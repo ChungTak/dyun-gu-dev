@@ -16,13 +16,14 @@ pub enum ModelSource {
 pub enum BackendOptions {
     Mock(MockOptions),
     OpenVINO(OpenVINOOptions),
+    Rknn(RknnOptions),
 }
 
 impl BackendOptions {
     pub fn as_mock(&self) -> Option<&MockOptions> {
         match self {
             Self::Mock(options) => Some(options),
-            Self::OpenVINO(_) => None,
+            Self::OpenVINO(_) | Self::Rknn(_) => None,
         }
     }
 
@@ -30,6 +31,14 @@ impl BackendOptions {
         match self {
             Self::Mock(_) => None,
             Self::OpenVINO(options) => Some(options),
+            Self::Rknn(_) => None,
+        }
+    }
+
+    pub fn as_rknn(&self) -> Option<&RknnOptions> {
+        match self {
+            Self::Mock(_) | Self::OpenVINO(_) => None,
+            Self::Rknn(options) => Some(options),
         }
     }
 }
@@ -46,6 +55,14 @@ impl Default for OpenVINOOptions {
             device: "CPU".to_string(),
         }
     }
+}
+
+/// Options passed to the RKNN backend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RknnOptions {
+    pub core_mask: Option<u32>,
+    pub enable_zero_copy: bool,
+    pub dynamic_shape: bool,
 }
 
 /// Unified runtime configuration.
