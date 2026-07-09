@@ -71,7 +71,8 @@ impl Element for SourceElement {
             if io.stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(Error::NotRunning);
             }
-            let tensor = filled_tensor(self.shape.clone(), self.dtype, self.start + index as f32)?;
+            let step = usize_to_exact_f32(index, "source index")?;
+            let tensor = filled_tensor(self.shape.clone(), self.dtype, self.start + step)?;
             io.send("out", Packet::tensor(tensor))?;
         }
         io.broadcast_eos()
@@ -254,7 +255,7 @@ fn read_f32(params: &Map<String, Value>, key: &str, default: f32) -> Result<f32>
         Some(value) => value
             .as_f64()
             .ok_or_else(|| Error::Config(format!("field {key} must be a number")))
-            .map(|value| value as f32),
+            .and_then(|value| f64_to_exact_f32(value, key)),
         None => Ok(default),
     }
 }
@@ -321,13 +322,98 @@ fn filled_tensor(shape: Shape, dtype: DataType, value: f32) -> Result<Tensor> {
         tensor.buffer().write_from_slice(&bytes)?;
     } else if dtype == DataType::U8 {
         let count = shape.element_count()?;
-        tensor
-            .buffer()
-            .write_from_slice(&vec![value as u8; count])?;
+        let byte = f32_to_exact_u8(value)?;
+        tensor.buffer().write_from_slice(&vec![byte; count])?;
     } else {
         return Err(Error::Config(format!(
             "source element only supports f32/u8 for now, got {dtype:?}"
         )));
     }
     Ok(tensor)
+}
+
+fn usize_to_exact_f32(value: usize, field: &str) -> Result<f32> {
+    const MAX_EXACT_INT: usize = 16_777_216;
+    if value > MAX_EXACT_INT {
+        return Err(Error::Config(format!(
+            "{field} {value} cannot be represented exactly as f32"
+        )));
+    }
+    let narrowed = value as f32;
+    Ok(narrowed)
+}
+
+fn f64_to_exact_f32(value: f64, field: &str) -> Result<f32> {
+    if !value.is_finite() {
+        return Err(Error::Config(format!("field {field} must be finite")));
+    }
+    let narrowed = value as f32;
+    if f64::from(narrowed) != value {
+        return Err(Error::Config(format!(
+            "field {field} {value} cannot be represented exactly as f32"
+        )));
+    }
+    Ok(narrowed)
+}
+
+fn f32_to_exact_u8(value: f32) -> Result<u8> {
+    if !value.is_finite() {
+        return Err(Error::Config(
+            "source element value must be finite to convert to u8".to_string(),
+        ));
+    }
+    if !(0.0..=255.0).contains(&value) {
+        return Err(Error::Config(format!(
+            "source element value {value} cannot be represented as u8"
+        )));
+    }
+    if value.fract() != 0.0 {
+        return Err(Error::Config(format!(
+            "source element value {value} cannot be represented as u8"
+        )));
+    }
+    let text = value.to_string();
+    text.parse::<u8>().map_err(|_| {
+        Error::Config(format!(
+            "source element value {value} cannot be represented as u8"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_f32_conversion_rejects_large_usize() {
+        let err = usize_to_exact_f32(16_777_217, "index").expect_err("expected rejection");
+        assert!(
+            matches!(err, Error::Config(message) if message.contains("cannot be represented exactly as f32"))
+        );
+    }
+
+    #[test]
+    fn read_f32_rejects_precision_loss() {
+        let mut params = Map::new();
+        params.insert("start".to_string(), json!(0.1_f64 + f64::EPSILON));
+        let err = read_f32(&params, "start", 0.0).expect_err("expected rejection");
+        assert!(
+            matches!(err, Error::Config(message) if message.contains("cannot be represented exactly as f32"))
+        );
+    }
+
+    #[test]
+    fn filled_tensor_rejects_u8_out_of_range_and_fractional_values() {
+        let shape = Shape::new(vec![1]);
+        let out_of_range = filled_tensor(shape.clone(), DataType::U8, 256.0);
+        assert!(
+            matches!(out_of_range, Err(Error::Config(message)) if message.contains("cannot be represented as u8"))
+        );
+
+        let fractional = filled_tensor(shape, DataType::U8, 1.5);
+        assert!(
+            matches!(fractional, Err(Error::Config(message)) if message.contains("cannot be represented as u8"))
+        );
+    }
 }
