@@ -122,6 +122,7 @@ impl InferBackend for TensorRtBackend {
                 "trt_runtime_create returned null".to_string(),
             ));
         }
+        self.runtime = Some(runtime);
         let engine =
             unsafe { sys::trt_runtime_deserialize_engine(runtime, model.as_ptr(), model.len()) };
         if engine.is_null() {
@@ -129,6 +130,7 @@ impl InferBackend for TensorRtBackend {
                 "trt_runtime_deserialize_engine failed".to_string(),
             ));
         }
+        self.engine = Some(engine);
         let context = unsafe { sys::trt_engine_create_context(engine) };
         if context.is_null() {
             return Err(Error::BackendUnavailable(
@@ -136,8 +138,6 @@ impl InferBackend for TensorRtBackend {
             ));
         }
 
-        self.runtime = Some(runtime);
-        self.engine = Some(engine);
         self.context = Some(context);
         self.input_infos =
             vec![TensorInfo::new(Shape::new([1]), DataType::F32).with_layout(DataFormat::Auto)];

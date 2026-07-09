@@ -122,6 +122,7 @@ impl InferBackend for SophonBackend {
         if status != sys::bm_status_t::BM_SUCCESS {
             return Err(Error::Backend(format!("bm_dev_request failed: {status}")));
         }
+        self.handle = Some(handle);
 
         let runtime = unsafe { sys::bmrt_create(handle) };
         if runtime.is_null() {
@@ -129,6 +130,7 @@ impl InferBackend for SophonBackend {
                 "bmrt_create returned null".to_string(),
             ));
         }
+        self.runtime = Some(runtime);
 
         let loaded = unsafe { sys::bmrt_load_bmodel_data(runtime, model.as_ptr(), model.len()) };
         if !loaded {
@@ -137,8 +139,6 @@ impl InferBackend for SophonBackend {
             ));
         }
 
-        self.handle = Some(handle);
-        self.runtime = Some(runtime);
         self.options = sophon.clone();
         self.input_infos =
             vec![TensorInfo::new(Shape::new([1]), DataType::F32).with_layout(DataFormat::Auto)];
@@ -198,11 +198,13 @@ impl InferBackend for SophonBackend {
 impl Drop for SophonBackend {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            if let Some(handle) = self.handle.take() {
-                unsafe {
-                    sys::bmrt_destroy(runtime);
-                    sys::bm_dev_free(handle);
-                }
+            unsafe {
+                sys::bmrt_destroy(runtime);
+            }
+        }
+        if let Some(handle) = self.handle.take() {
+            unsafe {
+                sys::bm_dev_free(handle);
             }
         }
     }
