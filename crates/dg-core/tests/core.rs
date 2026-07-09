@@ -35,6 +35,27 @@ fn cpu_tensor_allocate_copy_and_reshape() {
 }
 
 #[test]
+fn tensor_reshape_rejects_non_contiguous_strides() {
+    let device = CpuDevice::new();
+    let desc = TensorDesc::new(
+        Shape::new([2, 2]),
+        DataType::U8,
+        DataFormat::NCHW,
+        DeviceKind::Cpu,
+    )
+    .with_strides(dg_core::Strides::new([3, 1]));
+    let mut tensor = Tensor::allocate(&device, desc).expect("allocate tensor");
+
+    let err = tensor
+        .reshape(Shape::new([4]))
+        .expect_err("reshape should fail");
+    assert!(matches!(
+        err,
+        dg_core::Error::Shape(message) if message.contains("non-contiguous strides")
+    ));
+}
+
+#[test]
 fn buffer_refcount_and_copy_semantics() {
     let device = CpuDevice::new();
     let buffer = device

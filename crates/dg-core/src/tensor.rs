@@ -132,16 +132,19 @@ impl Tensor {
             ));
         }
 
-        let preserve_custom_strides = self
+        if self
             .desc
             .strides
             .as_ref()
-            .is_some_and(|strides| !strides.is_contiguous_for(&self.desc.shape));
+            .is_some_and(|strides| !strides.is_contiguous_for(&self.desc.shape))
+        {
+            return Err(Error::Shape(
+                "cannot reshape a tensor with non-contiguous strides".to_string(),
+            ));
+        }
 
         self.desc.shape = shape;
-        if !preserve_custom_strides {
-            self.desc.strides = Some(self.desc.shape.contiguous_strides());
-        }
+        self.desc.strides = Some(self.desc.shape.contiguous_strides());
         Ok(())
     }
 
