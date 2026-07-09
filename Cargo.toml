@@ -21,7 +21,12 @@ rust-version = "1.83"
 [workspace.dependencies]
 half = "2"
 inventory = "0.3"
+indexmap = "=2.3.0"
 openvino = { version = "0.11", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+toml = "0.8"
 thiserror = "1"
 tracing = "0.1"
 proptest = { version = "1", default-features = false, features = ["std"] }
