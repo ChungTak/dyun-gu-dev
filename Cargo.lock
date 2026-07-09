@@ -87,7 +87,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "avcodec-core-model"
 version = "0.1.0"
-source = "git+https://git-manager.devin.ai/proxy/github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=621a708b725f9b9c7e6da7e43382e2066f741aaf#621a708b725f9b9c7e6da7e43382e2066f741aaf"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=621a708b725f9b9c7e6da7e43382e2066f741aaf#621a708b725f9b9c7e6da7e43382e2066f741aaf"
 dependencies = [
  "spin",
 ]
@@ -173,7 +173,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "cheetah-codec"
 version = "0.1.0"
-source = "git+https://git-manager.devin.ai/proxy/github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
+source = "git+https://github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
 dependencies = [
  "base64",
  "bitflags 2.13.0",
@@ -185,7 +185,7 @@ dependencies = [
 [[package]]
 name = "cheetah-runtime-api"
 version = "0.1.0"
-source = "git+https://git-manager.devin.ai/proxy/github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
+source = "git+https://github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
 dependencies = [
  "async-trait",
  "bytes",
@@ -197,7 +197,7 @@ dependencies = [
 [[package]]
 name = "cheetah-sdk"
 version = "0.1.0"
-source = "git+https://git-manager.devin.ai/proxy/github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
+source = "git+https://github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -213,7 +213,7 @@ dependencies = [
 [[package]]
 name = "cheetah-sdk-macros"
 version = "0.1.0"
-source = "git+https://git-manager.devin.ai/proxy/github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
+source = "git+https://github.com/ChungTak/cheetah-media-server-rs-dev.git?rev=182621c393eff754660a445d174a61e41622c660#182621c393eff754660a445d174a61e41622c660"
 dependencies = [
  "proc-macro2",
  "quote",
