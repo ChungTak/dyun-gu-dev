@@ -5,6 +5,7 @@ use crate::{Error, Result, RuntimeOption, TensorInfo};
 pub enum BackendKind {
     Mock,
     OpenVINO,
+    Rknn,
 }
 
 /// A backend implementation.

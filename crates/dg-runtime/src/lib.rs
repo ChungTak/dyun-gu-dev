@@ -17,7 +17,7 @@ pub use backend::{
 };
 pub use error::{Error, Result};
 pub use mock::MockOptions;
-pub use option::{BackendOptions, ModelSource, OpenVINOOptions, RuntimeOption};
+pub use option::{BackendOptions, ModelSource, OpenVINOOptions, RknnOptions, RuntimeOption};
 pub use runtime::Runtime;
 pub use tensor_info::TensorInfo;
 
