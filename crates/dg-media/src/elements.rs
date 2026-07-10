@@ -364,8 +364,11 @@ fn read_boxes(params: &Map<String, Value>, node: &str) -> Result<Vec<OsdBox>> {
             let object = entry
                 .as_object()
                 .ok_or_else(|| Error::Config(format!("node {node}: each box must be an object")))?;
-            reject_unknown_fields(object, OSD_BOX_FIELDS).map_err(|err| {
-                Error::Config(format!("node {node}: field boxes[{index}]: {err}"))
+            reject_unknown_fields(object, OSD_BOX_FIELDS).map_err(|err| match err {
+                Error::Config(message) => {
+                    Error::Config(format!("node {node}: field boxes[{index}]: {message}"))
+                }
+                other => other,
             })?;
             let field = |key: &str| -> Result<usize> {
                 read_usize(object, key)?.ok_or_else(|| {

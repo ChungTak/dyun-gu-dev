@@ -190,6 +190,12 @@ fn media_element_parameters_are_validated_at_load_time() {
         let message = err.to_string();
         assert!(message.contains("nodes[media].params"), "{message}");
         assert!(message.contains(expected), "{message}");
+        if kind == "media_osd" && message.contains("boxes[0]") {
+            assert!(
+                !message.contains("boxes[0]: configuration error:"),
+                "{message}"
+            );
+        }
     }
 }
 
