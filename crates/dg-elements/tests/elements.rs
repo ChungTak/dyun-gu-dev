@@ -12,6 +12,7 @@ fn node(kind: &str, params: serde_json::Value) -> NodeSpec {
         kind: kind.to_string(),
         template: None,
         params,
+        ..NodeSpec::default()
     }
 }
 
@@ -94,6 +95,7 @@ fn yolo_pipeline_emits_nms_filtered_detections() {
             kind: "input".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "pre".to_string(),
@@ -103,6 +105,7 @@ fn yolo_pipeline_emits_nms_filtered_detections() {
                 "input_width": 4,
                 "input_height": 4
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer".to_string(),
@@ -114,6 +117,7 @@ fn yolo_pipeline_emits_nms_filtered_detections() {
                 "echo_inputs": false,
                 "fill_value": 0
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "post".to_string(),
@@ -126,12 +130,14 @@ fn yolo_pipeline_emits_nms_filtered_detections() {
                 "confidence_threshold": 0.2,
                 "nms_threshold": 0.4
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("input.out -> pre.in")
         .connect("pre.out -> infer.in")
@@ -174,36 +180,42 @@ fn distributor_and_converger_preserve_all_packets() {
             kind: "source".to_string(),
             template: None,
             params: json!({"count": 4, "shape": [1, 4]}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "distributor".to_string(),
             kind: "distributor".to_string(),
             template: None,
             params: json!({"strategy": "round_robin"}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer0".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer1".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "converger".to_string(),
             kind: "converger".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source.out -> distributor.in")
         .connect("distributor.out0 -> infer0.in")
@@ -229,24 +241,28 @@ fn converger_allows_subset_of_input_ports() {
             kind: "source".to_string(),
             template: None,
             params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "source_b".to_string(),
             kind: "source".to_string(),
             template: None,
             params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "converger".to_string(),
             kind: "converger".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source_a.out -> converger.in0")
         .connect("source_b.out -> converger.in2")

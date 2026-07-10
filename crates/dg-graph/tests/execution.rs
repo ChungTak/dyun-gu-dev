@@ -19,18 +19,21 @@ fn linear_spec(execution: ExecutionSpec, count: usize) -> GraphSpec {
             kind: "source".to_string(),
             template: None,
             params: json!({"count": count, "shape": [1, 4], "start": 1.0}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source.out -> infer.in")
         .connect("infer.out -> sink.in")
@@ -46,30 +49,35 @@ fn branched_spec(execution: ExecutionSpec, count: usize) -> GraphSpec {
             kind: "source".to_string(),
             template: None,
             params: json!({"count": count, "shape": [1, 4], "start": 1.0}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer_a".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer_b".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink_a".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink_b".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source.out -> infer_a.in")
         .connect("source.out -> infer_b.in")
@@ -159,12 +167,14 @@ fn failing_spec(execution: ExecutionSpec) -> GraphSpec {
             template: None,
             // f16 sources are rejected at run time, exercising error paths.
             params: json!({"count": 4, "shape": [1, 4], "dtype": "f16"}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source.out -> sink.in")
         .build()
