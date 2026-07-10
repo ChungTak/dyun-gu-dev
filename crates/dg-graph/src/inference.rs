@@ -16,10 +16,12 @@ use crate::{
 const INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 };
 const OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 };
 const PRECISION_VALUES: &[&str] = &[
     "f4", "f8", "f16", "f32", "f64", "bf16", "u8", "i8", "i4", "u16", "i16", "u32", "i32", "u64",

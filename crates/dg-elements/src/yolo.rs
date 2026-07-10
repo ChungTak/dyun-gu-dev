@@ -9,18 +9,22 @@ use crate::math::{nms, resize_letterbox, sigmoid, Letterbox};
 const PRE_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 }];
 const PRE_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
+    required: false,
 }];
 const POST_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
     dtype: Some(DataType::F32),
+    required: true,
 }];
 const POST_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 }];
 const PREPROCESS_FIELDS: &[&str] = &["input_width", "input_height"];
 const POSTPROCESS_FIELDS: &[&str] = &[

@@ -17,6 +17,9 @@ use crate::pipe::{PipeReceiver, PipeSender};
 pub struct PortSchema {
     pub name: &'static str,
     pub dtype: Option<DataType>,
+    /// For input ports, whether exactly one incoming connection is required.
+    /// This flag is ignored for output ports.
+    pub required: bool,
 }
 
 #[derive(Clone, Debug, Default)]

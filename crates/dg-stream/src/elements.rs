@@ -31,10 +31,12 @@ use dg_media::{MediaFrame, MediaFrameKind};
 const PULL_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::U8),
+    required: false,
 };
 const PUSH_INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 };
 
 const PTS_TAG: &str = "pts";

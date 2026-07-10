@@ -234,6 +234,76 @@ fn graph_spec_rejects_hanging_references() {
 }
 
 #[test]
+fn graph_spec_rejects_missing_required_input() {
+    let err = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            template: None,
+            params: json!({}),
+        })
+        .build()
+        .expect_err("unconnected required input should fail");
+    let message = err.to_string();
+    assert!(message.contains("nodes[sink].ports[in]"));
+    assert!(message.contains("required input port sink.in has no incoming connection"));
+}
+
+#[test]
+fn graph_spec_rejects_multiple_incoming_edges() {
+    let err = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source_a".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({"count": 1, "shape": [1, 4]}),
+        })
+        .add_node(NodeSpec {
+            name: "source_b".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({"count": 1, "shape": [1, 4]}),
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            template: None,
+            params: json!({}),
+        })
+        .connect("source_a.out -> sink.in")
+        .connect("source_b.out -> sink.in")
+        .build()
+        .expect_err("multiple incoming edges should fail");
+    let message = err.to_string();
+    assert!(message.contains("connections[1]"));
+    assert!(message.contains("input port sink.in already has an incoming connection"));
+}
+
+#[test]
+fn graph_spec_rejects_duplicate_edges() {
+    let err = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({"count": 1, "shape": [1, 4]}),
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            template: None,
+            params: json!({}),
+        })
+        .connect("source.out -> sink.in")
+        .connect("source.out -> sink.in")
+        .build()
+        .expect_err("duplicate edges should fail");
+    let message = err.to_string();
+    assert!(message.contains("connections[1]"));
+    assert!(message.contains("duplicate connection"));
+}
+
+#[test]
 fn graph_spec_connection_parse_round_trips() {
     let parsed = ConnectionSpec::parse("decode.out -> infer.in").expect("parse connection");
     assert_eq!(parsed.to_string(), "decode.out -> infer.in");

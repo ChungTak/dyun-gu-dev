@@ -220,3 +220,37 @@ fn distributor_and_converger_preserve_all_packets() {
         .expect("run graph");
     assert_eq!(report.sinks.get("sink").expect("sink output").len(), 4);
 }
+
+#[test]
+fn converger_allows_subset_of_input_ports() {
+    GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source_a".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({"count": 1, "shape": [1, 4]}),
+        })
+        .add_node(NodeSpec {
+            name: "source_b".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({"count": 1, "shape": [1, 4]}),
+        })
+        .add_node(NodeSpec {
+            name: "converger".to_string(),
+            kind: "converger".to_string(),
+            template: None,
+            params: json!({}),
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            template: None,
+            params: json!({}),
+        })
+        .connect("source_a.out -> converger.in0")
+        .connect("source_b.out -> converger.in2")
+        .connect("converger.out -> sink.in")
+        .build()
+        .expect("a subset of converger inputs should be valid");
+}

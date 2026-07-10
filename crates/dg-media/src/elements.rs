@@ -17,10 +17,12 @@ use crate::MediaFrame;
 const MEDIA_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 }];
 const MEDIA_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 }];
 const DECODE_PARAM_FIELDS: &[&str] = &["width", "height", "channels"];
 const RESIZE_PARAM_FIELDS: &[&str] = &["width", "height"];
