@@ -363,9 +363,10 @@ impl RuntimeGraph {
                     first_error = select_error(first_error, err);
                 }
                 Err(_) => {
-                    if first_error.is_none() {
-                        first_error = Some(Error::Runtime("element worker lost".to_string()));
-                    }
+                    first_error = select_error(
+                        first_error,
+                        Error::Runtime("element worker lost".to_string()),
+                    );
                     break;
                 }
             }
