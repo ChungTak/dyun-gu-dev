@@ -457,7 +457,11 @@ dependencies = [
  "clap",
  "dg-elements",
  "dg-graph",
+ "dg-openvino",
+ "dg-rknn",
  "dg-runtime",
+ "dg-sophon",
+ "dg-tensorrt",
  "serde",
  "serde_json",
  "tracing",
@@ -535,6 +539,7 @@ dependencies = [
  "dg-runtime",
  "inventory",
  "openvino",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -547,6 +552,7 @@ dependencies = [
  "dg-core",
  "dg-runtime",
  "inventory",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -557,6 +563,8 @@ version = "0.1.0"
 dependencies = [
  "dg-core",
  "inventory",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -579,6 +587,7 @@ dependencies = [
  "dg-runtime",
  "inventory",
  "libc",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -620,6 +629,7 @@ dependencies = [
  "dg-core",
  "dg-runtime",
  "inventory",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
 ]

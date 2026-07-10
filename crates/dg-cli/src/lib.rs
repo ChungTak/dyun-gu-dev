@@ -6,6 +6,14 @@ use dg_graph::{Graph, GraphReport, GraphSpec};
 use tracing_subscriber::EnvFilter;
 
 use dg_elements as _;
+#[cfg(feature = "openvino")]
+use dg_openvino as _;
+#[cfg(feature = "rknn")]
+use dg_rknn as _;
+#[cfg(feature = "sophon")]
+use dg_sophon as _;
+#[cfg(feature = "tensorrt")]
+use dg_tensorrt as _;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -213,5 +221,24 @@ connections:
             .join("../../examples/mock-multi-algorithm.yaml");
         validate_graph(&path).expect("validate documented example");
         run_graph(&path, OutputFormat::Json).expect("run documented example");
+    }
+
+    #[cfg(feature = "openvino")]
+    #[test]
+    fn openvino_feature_registers_configuration() {
+        let config = dg_runtime::BackendConfig::new(
+            Some(std::path::PathBuf::from("model.xml")),
+            serde_json::json!({"device": "GPU"}),
+        );
+        let option = dg_runtime::configure_backend("openvino", config).expect("configure OpenVINO");
+        assert_eq!(option.backend, dg_runtime::BackendKind::OpenVINO);
+        assert_eq!(
+            option
+                .backend_options
+                .as_openvino()
+                .expect("OpenVINO options")
+                .device,
+            "GPU"
+        );
     }
 }

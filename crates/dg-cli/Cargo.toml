@@ -6,12 +6,24 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+openvino = ["dep:dg-openvino", "dg-openvino/backend"]
+rknn = ["dep:dg-rknn", "dg-rknn/backend"]
+tensorrt = ["dep:dg-tensorrt", "dg-tensorrt/backend"]
+sophon = ["dep:dg-sophon", "dg-sophon/backend"]
+sophon-soc = ["sophon", "dg-sophon/soc"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 dg-elements = { path = "../dg-elements" }
 dg-graph = { path = "../dg-graph" }
+dg-openvino = { path = "../dg-openvino", optional = true, default-features = false }
+dg-rknn = { path = "../dg-rknn", optional = true, default-features = false }
 dg-runtime = { path = "../dg-runtime" }
+dg-sophon = { path = "../dg-sophon", optional = true, default-features = false }
+dg-tensorrt = { path = "../dg-tensorrt", optional = true, default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
