@@ -575,6 +575,7 @@ dependencies = [
  "dg-core",
  "dg-runtime",
  "inventory",
+ "libc",
  "thiserror 1.0.69",
  "tracing",
 ]
