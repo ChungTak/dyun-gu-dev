@@ -27,7 +27,7 @@ pub use option::{
     BackendConfig, BackendOptions, ModelSource, OpenVINOOptions, RknnOptions, RuntimeOption,
     SophonOptions, TensorRtOptions,
 };
-pub use runtime::Runtime;
+pub use runtime::{validate_runtime_option, Runtime};
 pub use tensor_info::TensorInfo;
 
 inventory::collect!(BackendDescriptor);

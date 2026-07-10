@@ -87,6 +87,7 @@ inventory::submit! {
         kind: "distributor",
         input_ports: &[INPUT_PORT],
         output_ports: &OUTPUT_PORTS,
+        validate: None,
         create: create_distributor,
     }
 }
@@ -96,6 +97,7 @@ inventory::submit! {
         kind: "converger",
         input_ports: &INPUT_PORTS,
         output_ports: &SINGLE_OUTPUT,
+        validate: None,
         create: create_converger,
     }
 }

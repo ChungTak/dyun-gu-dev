@@ -1,4 +1,27 @@
-use crate::{backend::BackendKind, create_backend, Result, RuntimeOption, TensorInfo};
+use crate::{
+    backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
+    Error, Result, RuntimeOption, TensorInfo,
+};
+
+/// Validates common backend capabilities without initializing a device or model.
+pub fn validate_runtime_option(option: &RuntimeOption) -> Result<()> {
+    if let Some(precision) = option.precision {
+        if !supports_precision(option.backend, precision) {
+            return Err(Error::UnsupportedPrecision(precision));
+        }
+    }
+    if let Some(device) = option.device {
+        if !supports_device(option.backend, device) {
+            return Err(Error::UnsupportedDevice(device));
+        }
+    }
+    if let Some(deploy_mode) = option.deploy_mode {
+        if !supports_deployment(option.backend, deploy_mode) {
+            return Err(Error::UnsupportedDeployment(deploy_mode));
+        }
+    }
+    Ok(())
+}
 
 /// Runtime wrapper around a concrete backend implementation.
 pub struct Runtime {
@@ -7,6 +30,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(option: RuntimeOption) -> Result<Self> {
+        validate_runtime_option(&option)?;
         let mut backend = create_backend(option.backend)?;
         backend.init(&option)?;
         Ok(Self { backend })

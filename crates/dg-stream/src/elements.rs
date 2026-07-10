@@ -44,6 +44,7 @@ inventory::submit! {
         kind: "rtsp_src",
         input_ports: &[],
         output_ports: &[PULL_OUTPUT_PORT],
+        validate: None,
         create: create_rtsp_src,
     }
 }
@@ -53,6 +54,7 @@ inventory::submit! {
         kind: "httpflv_src",
         input_ports: &[],
         output_ports: &[PULL_OUTPUT_PORT],
+        validate: None,
         create: create_httpflv_src,
     }
 }
@@ -62,6 +64,7 @@ inventory::submit! {
         kind: "rtmp_sink",
         input_ports: &[PUSH_INPUT_PORT],
         output_ports: &[],
+        validate: None,
         create: create_rtmp_sink,
     }
 }
@@ -71,6 +74,7 @@ inventory::submit! {
         kind: "webrtc_sink",
         input_ports: &[PUSH_INPUT_PORT],
         output_ports: &[],
+        validate: None,
         create: create_webrtc_sink,
     }
 }

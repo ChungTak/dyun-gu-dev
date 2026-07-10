@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use dg_core::{DataType, DeployMode, DeviceKind, Shape, TypeCode};
-use dg_runtime::{configure_backend, BackendConfig, Runtime};
+use dg_runtime::{
+    configure_backend, validate_runtime_option, BackendConfig, Runtime, RuntimeOption,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::trace;
@@ -25,6 +27,7 @@ inventory::submit! {
         kind: "inference",
         input_ports: &[INPUT_PORT],
         output_ports: &[OUTPUT_PORT],
+        validate: Some(validate_inference),
         create: create_inference,
     }
 }
@@ -77,6 +80,37 @@ fn create_inference(node: &NodeSpec) -> Result<CreatedElement> {
 }
 
 fn create_inference_inner(value: Value) -> Result<CreatedElement> {
+    let plan = prepare_inference(value)?;
+    let mut runtime = Runtime::new(plan.option)?;
+    if runtime.input_count() != 1 {
+        return Err(Error::Config(format!(
+            "inference element requires a single-input model, got {} inputs",
+            runtime.input_count()
+        )));
+    }
+    if runtime.output_count() == 0 {
+        return Err(Error::Config("inference model has no outputs".to_string()));
+    }
+    if let Some(shape) = plan.reshape {
+        runtime.reshape(&[shape])?;
+    }
+
+    Ok(CreatedElement {
+        element: Box::new(InferenceElement { runtime }),
+        handle: ElementHandle::None,
+    })
+}
+
+fn validate_inference(node: &NodeSpec) -> Result<()> {
+    prepare_inference(node.params.clone()).map(|_| ())
+}
+
+struct InferencePlan {
+    option: RuntimeOption,
+    reshape: Option<Shape>,
+}
+
+fn prepare_inference(value: Value) -> Result<InferencePlan> {
     let params: InferenceParams = serde_json::from_value(value)
         .map_err(|err| Error::Config(format!("invalid parameters: {err}")))?;
     let mut config = BackendConfig::new(params.model, params.options);
@@ -94,23 +128,10 @@ fn create_inference_inner(value: Value) -> Result<CreatedElement> {
     }
 
     let option = configure_backend(&params.backend, config)?;
-    let mut runtime = Runtime::new(option)?;
-    if runtime.input_count() != 1 {
-        return Err(Error::Config(format!(
-            "inference element requires a single-input model, got {} inputs",
-            runtime.input_count()
-        )));
-    }
-    if runtime.output_count() == 0 {
-        return Err(Error::Config("inference model has no outputs".to_string()));
-    }
-    if let Some(shape) = params.reshape {
-        runtime.reshape(&[Shape::new(shape)])?;
-    }
-
-    Ok(CreatedElement {
-        element: Box::new(InferenceElement { runtime }),
-        handle: ElementHandle::None,
+    validate_runtime_option(&option)?;
+    Ok(InferencePlan {
+        option,
+        reshape: params.reshape.map(Shape::new),
     })
 }
 
@@ -222,7 +243,7 @@ connections:
     }
 
     #[test]
-    fn unknown_backend_is_rejected_with_node_context() {
+    fn unknown_backend_is_rejected_during_graph_load() {
         let yaml = r#"
 apiVersion: dg/v1
 kind: Graph
@@ -232,19 +253,17 @@ nodes:
     params:
       backend: tensorrt
 "#;
-        let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
+        let err = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
             .expect("parse")
             .normalize_with_base_dir(None)
-            .expect("normalize");
-        let graph = Graph::new(spec).expect("build");
-        let err = graph.run().expect_err("backend is not registered");
+            .expect_err("backend is not registered");
         let message = err.to_string();
-        assert!(message.contains("element error in infer"));
+        assert!(message.contains("nodes[infer].params"));
         assert!(message.contains("unsupported backend: tensorrt"));
     }
 
     #[test]
-    fn inference_options_reject_unknown_fields_with_node_context() {
+    fn inference_options_reject_unknown_fields_during_graph_load() {
         let yaml = r#"
 apiVersion: dg/v1
 kind: Graph
@@ -256,14 +275,12 @@ nodes:
       options:
         unknown: true
 "#;
-        let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
+        let err = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
             .expect("parse")
             .normalize_with_base_dir(None)
-            .expect("normalize");
-        let graph = Graph::new(spec).expect("build");
-        let err = graph.run().expect_err("unknown option is rejected");
+            .expect_err("unknown option is rejected");
         let message = err.to_string();
-        assert!(message.contains("element error in infer"));
+        assert!(message.contains("nodes[infer].params"));
         assert!(message.contains("unknown field"));
     }
 }

@@ -32,6 +32,7 @@ inventory::submit! {
         kind: "resnet_preprocess",
         input_ports: &ANY_INPUT,
         output_ports: &TENSOR_OUTPUT,
+        validate: None,
         create: create_resnet_preprocess,
     }
 }
@@ -40,6 +41,7 @@ inventory::submit! {
         kind: "resnet_postprocess",
         input_ports: &TENSOR_INPUT,
         output_ports: &RESULT_OUTPUT,
+        validate: None,
         create: create_resnet_postprocess,
     }
 }
@@ -48,6 +50,7 @@ inventory::submit! {
         kind: "retinaface",
         input_ports: &TENSOR_INPUT,
         output_ports: &RESULT_OUTPUT,
+        validate: None,
         create: create_retinaface,
     }
 }
@@ -56,6 +59,7 @@ inventory::submit! {
         kind: "bytetrack",
         input_ports: &ANY_INPUT,
         output_ports: &RESULT_OUTPUT,
+        validate: None,
         create: create_bytetrack,
     }
 }
@@ -64,6 +68,7 @@ inventory::submit! {
         kind: "ppocr_det",
         input_ports: &TENSOR_INPUT,
         output_ports: &RESULT_OUTPUT,
+        validate: None,
         create: create_ppocr_det,
     }
 }
@@ -72,6 +77,7 @@ inventory::submit! {
         kind: "ppocr_rec",
         input_ports: &TENSOR_INPUT,
         output_ports: &RESULT_OUTPUT,
+        validate: None,
         create: create_ppocr_rec,
     }
 }

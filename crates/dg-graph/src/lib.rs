@@ -24,7 +24,8 @@ pub use packet::{Packet, PacketMeta, PacketPayload};
 pub use pipe::{DataPipe, PipeReceiver, PipeSender, DEFAULT_QUEUE_CAPACITY};
 pub use pool::ThreadPool;
 pub use registry::{
-    create_element, element_ports, find_element, registered_elements, ElementDescriptor,
+    create_element, element_ports, find_element, registered_elements, validate_element,
+    ElementDescriptor,
 };
 pub use spec::{
     ConnectionSpec, ExecutionSpec, GraphFormat, GraphSpec, GraphSpecBuilder, NodeSpec,

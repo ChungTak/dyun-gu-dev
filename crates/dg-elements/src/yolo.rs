@@ -27,6 +27,7 @@ inventory::submit! {
         kind: "yolo_preprocess",
         input_ports: &PRE_INPUT,
         output_ports: &PRE_OUTPUT,
+        validate: None,
         create: create_preprocess,
     }
 }
@@ -36,6 +37,7 @@ inventory::submit! {
         kind: "yolo_postprocess",
         input_ports: &POST_INPUT,
         output_ports: &POST_OUTPUT,
+        validate: None,
         create: create_postprocess,
     }
 }

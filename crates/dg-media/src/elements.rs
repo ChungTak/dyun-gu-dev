@@ -27,6 +27,7 @@ inventory::submit! {
         kind: "media_decode",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
+        validate: None,
         create: create_decode,
     }
 }
@@ -35,6 +36,7 @@ inventory::submit! {
         kind: "media_encode",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
+        validate: None,
         create: create_encode,
     }
 }
@@ -43,6 +45,7 @@ inventory::submit! {
         kind: "media_resize",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
+        validate: None,
         create: create_resize,
     }
 }
@@ -51,6 +54,7 @@ inventory::submit! {
         kind: "media_osd",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
+        validate: None,
         create: create_osd,
     }
 }

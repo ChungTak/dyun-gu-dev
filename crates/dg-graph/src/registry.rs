@@ -6,6 +6,7 @@ pub struct ElementDescriptor {
     pub kind: &'static str,
     pub input_ports: &'static [PortSchema],
     pub output_ports: &'static [PortSchema],
+    pub validate: Option<fn(&NodeSpec) -> Result<()>>,
     pub create: fn(&NodeSpec) -> Result<CreatedElement>,
 }
 
@@ -25,6 +26,15 @@ pub fn create_element(node: &NodeSpec) -> Result<CreatedElement> {
     let descriptor =
         find_element(&node.kind).ok_or_else(|| Error::UnknownNodeKind(node.kind.clone()))?;
     (descriptor.create)(node)
+}
+
+pub fn validate_element(node: &NodeSpec) -> Result<()> {
+    let descriptor =
+        find_element(&node.kind).ok_or_else(|| Error::UnknownNodeKind(node.kind.clone()))?;
+    if let Some(validate) = descriptor.validate {
+        validate(node)?;
+    }
+    Ok(())
 }
 
 pub fn element_ports(kind: &str) -> Result<(&'static [PortSchema], &'static [PortSchema])> {
