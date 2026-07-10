@@ -21,8 +21,8 @@ cargo run -p dg-cli -- run --config examples/mock-multi-algorithm.yaml
 ```
 
 该图广播三帧张量，同时执行分类后处理和检测、跟踪链路。`mock_inference`
-只用于验证编排与算法 element；切换到真实部署时应替换为对应后端的 inference
-element 和模型配置。
+只用于验证编排与算法 element；真实部署使用通用 `inference` element，并为
+`dg-cli` 启用对应后端 feature。
 
 ## 3. GraphSpec
 
@@ -80,6 +80,40 @@ cargo run -p dg-cli -- list-elements
 
 真实后端应在启动时完成设备、精度、部署模式和内存能力校验。缺少 SDK
 或设备时返回明确错误，不自动切换到 mock。
+
+单输入模型可直接接入图；多输出会依次发送到同一个 `out` 端口。示例：
+
+```yaml
+nodes:
+  - name: infer
+    kind: inference
+    params:
+      backend: tensorrt
+      model: /opt/models/model.engine
+      precision: f16
+      device: cuda_gpu
+      deploy_mode: host
+      reshape: [1, 3, 640, 640]
+      options:
+        device_id: 0
+        workspace_size_mb: 1024
+        enable_fp16: true
+```
+
+`options` 会按后端严格校验：OpenVINO 支持 `device`；RKNN 支持
+`enable_zero_copy`/`dynamic_shape`；TensorRT 支持 `device_id`、
+`workspace_size_mb`、`enable_fp16`/`enable_int8`；Sophon 支持 `device_id`。
+RKNN/Sophon 的 `core_mask`、通用 `precision`/`device`/`deploy_mode` 位于
+`params` 顶层。
+
+```bash
+cargo run -p dg-cli --features openvino -- run --config graph.yaml
+cargo run -p dg-cli --features rknn -- run --config graph.yaml
+cargo run -p dg-cli --features tensorrt -- run --config graph.yaml
+cargo run -p dg-cli --features sophon -- run --config graph.yaml
+```
+
+真实后端 feature 会链接相应厂商 SDK；默认构建仍保持无 SDK。
 
 ## 5. 媒体与流
 

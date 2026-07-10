@@ -10,6 +10,7 @@ mod builtin;
 mod element;
 mod engine;
 mod error;
+mod inference;
 mod packet;
 mod pipe;
 mod pool;

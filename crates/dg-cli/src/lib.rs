@@ -6,6 +6,14 @@ use dg_graph::{Graph, GraphReport, GraphSpec};
 use tracing_subscriber::EnvFilter;
 
 use dg_elements as _;
+#[cfg(feature = "openvino")]
+use dg_openvino as _;
+#[cfg(feature = "rknn")]
+use dg_rknn as _;
+#[cfg(feature = "sophon")]
+use dg_sophon as _;
+#[cfg(feature = "tensorrt")]
+use dg_tensorrt as _;
 
 #[derive(Debug, Parser)]
 #[command(
