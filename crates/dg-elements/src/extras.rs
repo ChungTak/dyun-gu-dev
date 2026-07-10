@@ -365,11 +365,15 @@ fn decode_retinaface(
         if score < score_threshold {
             continue;
         }
+        let center_x = (anchor.x + row[0] * 0.1 * anchor.w).clamp(0.0, 1.0) * width_f;
+        let center_y = (anchor.y + row[1] * 0.1 * anchor.h).clamp(0.0, 1.0) * height_f;
+        let box_width = (anchor.w * row[2].exp()).clamp(0.0, 1.0) * width_f;
+        let box_height = (anchor.h * row[3].exp()).clamp(0.0, 1.0) * height_f;
         let bbox = BBox::new(
-            (anchor.x + row[0] * 0.1 * anchor.w).clamp(0.0, 1.0) * width_f,
-            (anchor.y + row[1] * 0.1 * anchor.h).clamp(0.0, 1.0) * height_f,
-            (anchor.w * row[2].exp()).clamp(0.0, 1.0) * width_f,
-            (anchor.h * row[3].exp()).clamp(0.0, 1.0) * height_f,
+            (center_x - box_width * 0.5).max(0.0),
+            (center_y - box_height * 0.5).max(0.0),
+            box_width,
+            box_height,
         );
         let mut landmarks = Vec::with_capacity(5);
         for point in row[5..].chunks_exact(2) {
@@ -831,10 +835,16 @@ mod tests {
 
     #[test]
     fn anchor_generation_and_retina_decode_are_bounded() {
-        let anchors = generate_anchors(32, 32, 16, &[0.25]);
+        let anchors = vec![BBox::new(0.5, 0.5, 0.25, 0.25)];
         let values = vec![0.0; 15];
         let faces = decode_retinaface(&values, &anchors, 32, 32, 0.4, 0.5).expect("decode");
         assert_eq!(faces.len(), 1);
+        assert!((faces[0].bbox.x - 12.0).abs() < f32::EPSILON);
+        assert!((faces[0].bbox.y - 12.0).abs() < f32::EPSILON);
+        assert!((faces[0].bbox.w - 8.0).abs() < f32::EPSILON);
+        assert!((faces[0].bbox.h - 8.0).abs() < f32::EPSILON);
+        assert!((0.0..=32.0).contains(&faces[0].bbox.x));
+        assert!((0.0..=32.0).contains(&faces[0].bbox.y));
         assert!(faces[0]
             .landmarks
             .iter()
