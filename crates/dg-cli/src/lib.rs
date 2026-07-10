@@ -89,7 +89,9 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
             Ok(_) => {}
             Err(error) => println!("{}", render_reload_rejected(&error.to_string())),
         })?;
-        std::thread::park();
+        loop {
+            std::thread::park();
+        }
     }
     Ok(())
 }
