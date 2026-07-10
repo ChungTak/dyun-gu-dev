@@ -201,10 +201,13 @@ fn media_element_parameters_are_validated_at_load_time() {
 
 #[test]
 fn media_encode_allows_omitted_parameters() {
+    let input = node("input", "input", serde_json::Value::Null);
     let mut encode = node("encode", "media_encode", json!({}));
     encode.params = serde_json::Value::Null;
     GraphSpecBuilder::new()
+        .add_node(input)
         .add_node(encode)
+        .connect("input.out -> encode.in")
         .build()
         .expect("parameterless media encoder should allow null params");
 }
