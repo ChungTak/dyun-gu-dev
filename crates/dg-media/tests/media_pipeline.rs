@@ -126,3 +126,79 @@ fn media_elements_are_registered() {
         );
     }
 }
+
+#[test]
+fn media_element_parameters_are_validated_at_load_time() {
+    let invalid = [
+        (
+            "media_decode",
+            json!({ "width": 2, "height": 2, "unknown": true }),
+            "unknown field `unknown`",
+        ),
+        (
+            "media_decode",
+            json!({ "width": 0, "height": 2 }),
+            "field width must be non-zero",
+        ),
+        (
+            "media_decode",
+            json!({ "height": 2 }),
+            "field width is required",
+        ),
+        (
+            "media_decode",
+            json!({ "width": 2, "height": 2, "channels": 0 }),
+            "field channels must be non-zero",
+        ),
+        (
+            "media_encode",
+            json!({ "codec": "h264" }),
+            "unknown field `codec`",
+        ),
+        (
+            "media_resize",
+            json!({ "width": 4, "height": "4" }),
+            "field height must be a non-negative integer",
+        ),
+        (
+            "media_osd",
+            json!({ "color": [] }),
+            "field color must not be empty",
+        ),
+        (
+            "media_osd",
+            json!({ "thickness": 0 }),
+            "field thickness must be non-zero",
+        ),
+        (
+            "media_osd",
+            json!({ "boxes": [{ "x": 0, "y": 0, "width": 0, "height": 4 }] }),
+            "field boxes[].width must be non-zero",
+        ),
+        (
+            "media_osd",
+            json!({ "boxes": [{ "x": 0, "y": 0, "width": 4, "height": 4, "label": "x" }] }),
+            "unknown field `label`",
+        ),
+    ];
+
+    for (kind, params, expected) in invalid {
+        let err = GraphSpecBuilder::new()
+            .add_node(node("media", kind, params))
+            .build()
+            .expect_err("invalid media params must fail during graph loading");
+        let message = err.to_string();
+        assert!(message.contains("nodes[media].params"), "{message}");
+        assert!(message.contains(expected), "{message}");
+    }
+}
+
+#[test]
+fn media_encode_allows_omitted_parameters() {
+    let mut encode = node("encode", "media_encode", json!({}));
+    encode.params = serde_json::Value::Null;
+    GraphSpecBuilder::new()
+        .add_node(encode)
+        .build()
+        .expect("parameterless media encoder should allow null params");
+}

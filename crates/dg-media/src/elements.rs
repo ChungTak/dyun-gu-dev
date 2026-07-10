@@ -21,13 +21,17 @@ const MEDIA_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: None,
 }];
+const DECODE_PARAM_FIELDS: &[&str] = &["width", "height", "channels"];
+const RESIZE_PARAM_FIELDS: &[&str] = &["width", "height"];
+const OSD_PARAM_FIELDS: &[&str] = &["boxes", "color", "thickness"];
+const OSD_BOX_FIELDS: &[&str] = &["x", "y", "width", "height"];
 
 inventory::submit! {
     dg_graph::ElementDescriptor {
         kind: "media_decode",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
-        validate: None,
+        validate: Some(validate_decode),
         create: create_decode,
     }
 }
@@ -36,7 +40,7 @@ inventory::submit! {
         kind: "media_encode",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
-        validate: None,
+        validate: Some(validate_empty_params),
         create: create_encode,
     }
 }
@@ -45,7 +49,7 @@ inventory::submit! {
         kind: "media_resize",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
-        validate: None,
+        validate: Some(validate_resize),
         create: create_resize,
     }
 }
@@ -54,7 +58,7 @@ inventory::submit! {
         kind: "media_osd",
         input_ports: &MEDIA_INPUT,
         output_ports: &MEDIA_OUTPUT,
-        validate: None,
+        validate: Some(validate_osd),
         create: create_osd,
     }
 }
@@ -176,12 +180,7 @@ impl<C: MediaCore> Element for MediaElement<C> {
 }
 
 fn create_decode(node: &NodeSpec) -> Result<CreatedElement> {
-    let params = params_object(node)?;
-    let width = read_usize(params, "width")?
-        .ok_or_else(|| Error::Config(format!("node {}: field width is required", node.name)))?;
-    let height = read_usize(params, "height")?
-        .ok_or_else(|| Error::Config(format!("node {}: field height is required", node.name)))?;
-    let channels = read_usize(params, "channels")?.unwrap_or(3);
+    let (width, height, channels) = parse_decode(node)?;
     Ok(CreatedElement {
         element: Box::new(MediaElement {
             core: DecodeCore::new(width, height, channels),
@@ -191,7 +190,7 @@ fn create_decode(node: &NodeSpec) -> Result<CreatedElement> {
 }
 
 fn create_encode(node: &NodeSpec) -> Result<CreatedElement> {
-    let _ = params_object(node)?;
+    validate_empty_params(node)?;
     Ok(CreatedElement {
         element: Box::new(MediaElement {
             core: EncodeCore::new(),
@@ -201,11 +200,7 @@ fn create_encode(node: &NodeSpec) -> Result<CreatedElement> {
 }
 
 fn create_resize(node: &NodeSpec) -> Result<CreatedElement> {
-    let params = params_object(node)?;
-    let width = read_usize(params, "width")?
-        .ok_or_else(|| Error::Config(format!("node {}: field width is required", node.name)))?;
-    let height = read_usize(params, "height")?
-        .ok_or_else(|| Error::Config(format!("node {}: field height is required", node.name)))?;
+    let (width, height) = parse_resize(node)?;
     Ok(CreatedElement {
         element: Box::new(MediaElement {
             core: ResizeCore::new(width, height),
@@ -215,10 +210,7 @@ fn create_resize(node: &NodeSpec) -> Result<CreatedElement> {
 }
 
 fn create_osd(node: &NodeSpec) -> Result<CreatedElement> {
-    let params = params_object(node)?;
-    let boxes = read_boxes(params, &node.name)?;
-    let color = read_u8_array(params, "color")?.unwrap_or_else(|| vec![255, 0, 0]);
-    let thickness = read_usize(params, "thickness")?.unwrap_or(1);
+    let (boxes, color, thickness) = parse_osd(node)?;
     Ok(CreatedElement {
         element: Box::new(MediaElement {
             core: OsdCore::new(boxes, color, thickness),
@@ -227,10 +219,98 @@ fn create_osd(node: &NodeSpec) -> Result<CreatedElement> {
     })
 }
 
+fn validate_decode(node: &NodeSpec) -> Result<()> {
+    parse_decode(node).map(|_| ())
+}
+
+fn parse_decode(node: &NodeSpec) -> Result<(usize, usize, usize)> {
+    let params = params_object(node)?;
+    reject_unknown_fields(params, DECODE_PARAM_FIELDS)?;
+    let width = required_nonzero(params, "width", &node.name)?;
+    let height = required_nonzero(params, "height", &node.name)?;
+    let channels = read_usize(params, "channels")?.unwrap_or(3);
+    ensure_nonzero(channels, "channels")?;
+    height
+        .checked_mul(width)
+        .and_then(|pixels| pixels.checked_mul(channels))
+        .ok_or_else(|| Error::Config("image dimensions overflow".to_string()))?;
+    Ok((width, height, channels))
+}
+
+fn validate_resize(node: &NodeSpec) -> Result<()> {
+    parse_resize(node).map(|_| ())
+}
+
+fn parse_resize(node: &NodeSpec) -> Result<(usize, usize)> {
+    let params = params_object(node)?;
+    reject_unknown_fields(params, RESIZE_PARAM_FIELDS)?;
+    let width = required_nonzero(params, "width", &node.name)?;
+    let height = required_nonzero(params, "height", &node.name)?;
+    height
+        .checked_mul(width)
+        .ok_or_else(|| Error::Config("image dimensions overflow".to_string()))?;
+    Ok((width, height))
+}
+
+fn validate_osd(node: &NodeSpec) -> Result<()> {
+    parse_osd(node).map(|_| ())
+}
+
+fn parse_osd(node: &NodeSpec) -> Result<(Vec<OsdBox>, Vec<u8>, usize)> {
+    let params = params_object(node)?;
+    reject_unknown_fields(params, OSD_PARAM_FIELDS)?;
+    let boxes = read_boxes(params, &node.name)?;
+    let color = read_u8_array(params, "color")?.unwrap_or_else(|| vec![255, 0, 0]);
+    if color.is_empty() {
+        return Err(Error::Config("field color must not be empty".to_string()));
+    }
+    let thickness = read_usize(params, "thickness")?.unwrap_or(1);
+    ensure_nonzero(thickness, "thickness")?;
+    Ok((boxes, color, thickness))
+}
+
+fn validate_empty_params(node: &NodeSpec) -> Result<()> {
+    if node.params.is_null() {
+        return Ok(());
+    }
+    let params = params_object(node)?;
+    reject_unknown_fields(params, &[])
+}
+
 fn params_object(node: &NodeSpec) -> Result<&Map<String, Value>> {
     node.params
         .as_object()
         .ok_or_else(|| Error::Config(format!("node {} params must be an object", node.name)))
+}
+
+fn reject_unknown_fields(params: &Map<String, Value>, allowed: &[&str]) -> Result<()> {
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            let message = if allowed.is_empty() {
+                format!("unknown field `{key}`; no parameters are supported")
+            } else {
+                format!(
+                    "unknown field `{key}`; expected one of {}",
+                    allowed.join(", ")
+                )
+            };
+            return Err(Error::Config(message));
+        }
+    }
+    Ok(())
+}
+
+fn required_nonzero(params: &Map<String, Value>, key: &str, node: &str) -> Result<usize> {
+    let value = read_usize(params, key)?
+        .ok_or_else(|| Error::Config(format!("node {node}: field {key} is required")))?;
+    ensure_nonzero(value, key)
+}
+
+fn ensure_nonzero(value: usize, key: &str) -> Result<usize> {
+    if value == 0 {
+        return Err(Error::Config(format!("field {key} must be non-zero")));
+    }
+    Ok(value)
 }
 
 fn read_usize(params: &Map<String, Value>, key: &str) -> Result<Option<usize>> {
@@ -279,20 +359,32 @@ fn read_boxes(params: &Map<String, Value>, node: &str) -> Result<Vec<OsdBox>> {
         .ok_or_else(|| Error::Config(format!("node {node}: field boxes must be an array")))?;
     array
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             let object = entry
                 .as_object()
                 .ok_or_else(|| Error::Config(format!("node {node}: each box must be an object")))?;
+            reject_unknown_fields(object, OSD_BOX_FIELDS).map_err(|err| {
+                Error::Config(format!("node {node}: field boxes[{index}]: {err}"))
+            })?;
             let field = |key: &str| -> Result<usize> {
                 read_usize(object, key)?.ok_or_else(|| {
                     Error::Config(format!("node {node}: box field {key} is required"))
                 })
             };
+            let x = field("x")?;
+            let y = field("y")?;
+            let width = ensure_nonzero(field("width")?, "boxes[].width")?;
+            let height = ensure_nonzero(field("height")?, "boxes[].height")?;
+            x.checked_add(width)
+                .ok_or_else(|| Error::Config("box horizontal extent overflow".to_string()))?;
+            y.checked_add(height)
+                .ok_or_else(|| Error::Config("box vertical extent overflow".to_string()))?;
             Ok(OsdBox {
-                x: field("x")?,
-                y: field("y")?,
-                width: field("width")?,
-                height: field("height")?,
+                x,
+                y,
+                width,
+                height,
             })
         })
         .collect()
