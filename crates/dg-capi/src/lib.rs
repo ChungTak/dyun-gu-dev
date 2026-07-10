@@ -442,6 +442,7 @@ pub unsafe extern "C" fn dg_engine_load_file(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
+        spec.validate().map_err(graph_error)?;
         let engine = unsafe { &mut *engine };
         engine.inner.spec = spec;
         engine.inner.invalidate();
@@ -895,6 +896,8 @@ pub fn version() -> &'static str {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn graph_spec() -> CString {
         CString::new(
@@ -918,6 +921,14 @@ connections:
 "#,
         )
         .expect("valid graph spec")
+    }
+
+    fn unique_temp_path() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        std::env::temp_dir().join(format!("dg-capi-invalid-{nanos}.yaml"))
     }
 
     #[test]
@@ -985,6 +996,37 @@ connections:
         let status = unsafe { dg_engine_build(ptr::null_mut()) };
         assert_eq!(status, DgStatus::NullPointer);
         assert!(!dg_last_error().is_null());
+    }
+
+    #[test]
+    fn load_file_rejects_invalid_graph_during_load() {
+        let path = unique_temp_path();
+        fs::write(
+            &path,
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: duplicate
+    kind: source
+    params: {count: 0}
+  - name: duplicate
+    kind: sink
+    params: {}
+connections: []
+"#,
+        )
+        .expect("write invalid graph");
+        let path_string =
+            CString::new(path.to_str().expect("temp path is utf8")).expect("temp path has no nul");
+        let mut engine = ptr::null_mut();
+        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_load_file(engine, path_string.as_ptr()) },
+            DgStatus::ParseError
+        );
+        assert!(!dg_last_error().is_null());
+        unsafe { dg_engine_free(engine) };
+        fs::remove_file(path).expect("remove invalid graph");
     }
 
     #[test]
