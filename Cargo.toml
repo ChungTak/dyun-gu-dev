@@ -29,6 +29,7 @@ half = "2"
 inventory = "0.3"
 indexmap = "=2.3.0"
 async-trait = "0.1"
+libc = "0.2"
 anyhow = "1"
 bindgen = "0.70"
 bytes = { version = "1", features = ["serde"] }
