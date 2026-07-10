@@ -62,19 +62,47 @@ pub struct NodeTemplate {
     pub params: Value,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct DefaultsSpec {
-    pub backend: Option<String>,
-    pub device: Option<String>,
-    pub precision: Option<String>,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum DeviceDefault {
+    Named(String),
+    Detailed(DeviceDefaultDetails),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DeviceDefaultDetails {
+    pub kind: String,
+    #[serde(default)]
+    pub id: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DefaultsSpec {
+    pub backend: Option<String>,
+    pub device: Option<DeviceDefault>,
+    pub precision: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NodeSpec {
     pub name: String,
+    #[serde(alias = "type")]
     pub kind: String,
+    /// Reserved for CFG-08 runtime semantics.
+    #[serde(default)]
+    pub threads: Option<usize>,
+    /// Reserved for CFG-08 runtime semantics.
+    #[serde(default)]
+    pub sink: bool,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub precision: Option<String>,
     #[serde(default)]
     pub template: Option<String>,
     #[serde(default)]
@@ -132,6 +160,7 @@ pub struct GraphSpec {
     #[serde(default)]
     pub includes: Vec<String>,
     #[serde(default)]
+    #[serde(alias = "vars")]
     pub variables: BTreeMap<String, Value>,
     #[serde(default)]
     pub defaults: DefaultsSpec,
@@ -144,6 +173,7 @@ pub struct GraphSpec {
     #[serde(default)]
     pub nodes: Vec<NodeSpec>,
     #[serde(default)]
+    #[serde(alias = "edges")]
     pub connections: Vec<String>,
 }
 
@@ -247,6 +277,7 @@ impl GraphSpec {
         merged.merge_included(self.clone());
         merged.includes.clear();
         merged.apply_templates();
+        merged.apply_node_overrides();
         merged.apply_defaults();
         merged.apply_variables();
         merged.validate()?;
@@ -278,6 +309,36 @@ impl GraphSpec {
         }
     }
 
+    fn apply_node_overrides(&mut self) {
+        for node in &mut self.nodes {
+            let Some(descriptor) = find_element(&node.kind) else {
+                continue;
+            };
+            let allowed = |name: &str| descriptor.params.iter().any(|field| field.name == name);
+            let values = [
+                ("backend", node.backend.as_ref()),
+                ("device", node.device.as_ref()),
+                ("precision", node.precision.as_ref()),
+            ];
+            if !values.iter().any(|(_, value)| value.is_some()) {
+                continue;
+            }
+            if node.params.is_null() {
+                node.params = Value::Object(Map::new());
+            }
+            let Value::Object(params) = &mut node.params else {
+                continue;
+            };
+            for (name, value) in values {
+                if allowed(name) && !params.contains_key(name) {
+                    if let Some(value) = value {
+                        params.insert(name.to_string(), Value::String(value.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_defaults(&mut self) {
         let defaults = self.defaults.clone();
         for node in &mut self.nodes {
@@ -287,10 +348,10 @@ impl GraphSpec {
             let allowed = |name: &str| descriptor.params.iter().any(|field| field.name == name);
             let mut values = [
                 ("backend", defaults.backend.as_deref()),
-                ("device", defaults.device.as_deref()),
                 ("precision", defaults.precision.as_deref()),
             ];
-            if !values.iter().any(|(_, value)| value.is_some()) {
+            let has_named_device = matches!(defaults.device, Some(DeviceDefault::Named(_)));
+            if !values.iter().any(|(_, value)| value.is_some()) && !has_named_device {
                 continue;
             }
             if node.params.is_null() {
@@ -304,6 +365,11 @@ impl GraphSpec {
                     if allowed(name) && !params.contains_key(*name) {
                         params.insert((*name).to_string(), Value::String(value.to_string()));
                     }
+                }
+            }
+            if allowed("device") && !params.contains_key("device") {
+                if let Some(DeviceDefault::Named(value)) = defaults.device.as_ref() {
+                    params.insert("device".to_string(), Value::String(value.clone()));
                 }
             }
         }
