@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
@@ -17,6 +18,10 @@ const SOURCE_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
 };
+const INPUT_OUTPUT_PORT: PortSchema = PortSchema {
+    name: "out",
+    dtype: Some(DataType::F32),
+};
 const INFER_INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: Some(DataType::F32),
@@ -29,6 +34,15 @@ const SINK_INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: Some(DataType::F32),
 };
+
+inventory::submit! {
+    ElementDescriptor {
+        kind: "input",
+        input_ports: &[],
+        output_ports: &[INPUT_OUTPUT_PORT],
+        create: create_input,
+    }
+}
 
 inventory::submit! {
     ElementDescriptor {
@@ -64,6 +78,10 @@ struct SourceElement {
     start: f32,
 }
 
+struct InputElement {
+    queue: Arc<Mutex<VecDeque<Tensor>>>,
+}
+
 impl Element for SourceElement {
     fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
         trace!(node = %io.name, count = self.count, "running source element");
@@ -73,6 +91,23 @@ impl Element for SourceElement {
             }
             let step = usize_to_exact_f32(index, "source index")?;
             let tensor = filled_tensor(self.shape.clone(), self.dtype, self.start + step)?;
+            io.send("out", Packet::tensor(tensor))?;
+        }
+        io.broadcast_eos()
+    }
+}
+
+impl Element for InputElement {
+    fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
+        trace!(node = %io.name, "running input element");
+        let mut pending = {
+            let mut guard = self
+                .queue
+                .lock()
+                .map_err(|_| Error::Runtime("input queue poisoned".to_string()))?;
+            guard.drain(..).collect::<VecDeque<_>>()
+        };
+        while let Some(tensor) = pending.pop_front() {
             io.send("out", Packet::tensor(tensor))?;
         }
         io.broadcast_eos()
@@ -174,6 +209,16 @@ fn create_source(node: &NodeSpec) -> Result<CreatedElement> {
             start,
         }),
         handle: ElementHandle::None,
+    })
+}
+
+fn create_input(_node: &NodeSpec) -> Result<CreatedElement> {
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    Ok(CreatedElement {
+        element: Box::new(InputElement {
+            queue: queue.clone(),
+        }),
+        handle: ElementHandle::Input(queue),
     })
 }
 
