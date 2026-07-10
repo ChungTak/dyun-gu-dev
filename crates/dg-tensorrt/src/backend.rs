@@ -575,7 +575,7 @@ impl TensorRtBackend {
         let mut output_infos = Vec::with_capacity(self.outputs.len());
         for binding in &self.outputs {
             let dims = context.tensor_shape(&binding.name)?;
-            let (shape, _) = engine_dims_to_shape(&dims, &binding.name)?;
+            let shape = dims_to_shape(&dims, &binding.name)?;
             output_infos.push(
                 TensorInfo::new(shape, binding.dtype)
                     .with_name(binding.name.clone())
@@ -903,5 +903,22 @@ mod tests {
         let input = f32_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[3, 2]);
         let outputs = backend.run(&[input]).expect("run");
         assert_eq!(outputs[0].desc().shape().dims(), &[3, 2]);
+    }
+
+    #[test]
+    fn reshape_rejects_unresolved_output_shape() {
+        let engine = encode_mock_engine(&[
+            ("input", true, TRT_DTYPE_FLOAT, &[-1, 2]),
+            ("output", false, TRT_DTYPE_FLOAT, &[-1, 2, -1]),
+        ]);
+        let mut backend = TensorRtBackend::new();
+        backend.init(&runtime_option(engine)).expect("init");
+
+        let err = backend
+            .reshape(&[Shape::new([3usize, 2])])
+            .expect_err("unresolved output shape");
+        assert!(
+            matches!(err, Error::Backend(message) if message.contains("unresolved dynamic dimension"))
+        );
     }
 }
