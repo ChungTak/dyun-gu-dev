@@ -19,22 +19,27 @@ use crate::spec::NodeSpec;
 const SOURCE_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
+    required: false,
 };
 const INPUT_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
+    required: false,
 };
 const INFER_INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: Some(DataType::F32),
+    required: true,
 };
 const INFER_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
+    required: false,
 };
 const SINK_INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 };
 const SOURCE_PARAM_FIELDS: &[&str] = &["count", "shape", "dtype", "format", "start"];
 const MOCK_INFERENCE_PARAM_FIELDS: &[&str] = &[
@@ -651,6 +656,8 @@ nodes:
     kind: input
   - name: sink
     kind: sink
+connections:
+  - input.out -> sink.in
 "#;
         GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
             .expect("parse")

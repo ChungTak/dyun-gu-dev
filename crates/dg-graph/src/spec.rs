@@ -317,7 +317,9 @@ impl GraphSpec {
         }
 
         let mut edges = Vec::with_capacity(self.connections.len());
-        for connection in &self.connections {
+        let mut seen_edges = BTreeSet::new();
+        let mut connected_inputs = BTreeSet::new();
+        for (connection_index, connection) in self.connections.iter().enumerate() {
             let parsed = ConnectionSpec::parse(connection)?;
             let from_kind =
                 node_kinds
@@ -355,7 +357,46 @@ impl GraphSpec {
                     });
                 }
             }
+
+            let edge = (
+                parsed.from_node.clone(),
+                parsed.from_port.clone(),
+                parsed.to_node.clone(),
+                parsed.to_port.clone(),
+            );
+            let path = format!("connections[{connection_index}]");
+            if !seen_edges.insert(edge) {
+                return Err(Error::Validation {
+                    path,
+                    message: format!("duplicate connection: {parsed}"),
+                });
+            }
+            let input = (parsed.to_node.clone(), parsed.to_port.clone());
+            if !connected_inputs.insert(input) {
+                return Err(Error::Validation {
+                    path,
+                    message: format!(
+                        "input port {}.{} already has an incoming connection",
+                        parsed.to_node, parsed.to_port
+                    ),
+                });
+            }
             edges.push((parsed.from_node, parsed.to_node));
+        }
+
+        for node in &self.nodes {
+            let (in_ports, _) = element_ports(&node.kind)?;
+            for port in in_ports.iter().filter(|port| port.required) {
+                if !connected_inputs.contains(&(node.name.clone(), port.name.to_string())) {
+                    return Err(Error::Validation {
+                        path: format!("nodes[{}].ports[{}]", node.name, port.name),
+                        message: format!(
+                            "required input port {}.{} has no incoming connection",
+                            node.name, port.name
+                        ),
+                    });
+                }
+            }
         }
 
         if !self.allow_cycles && has_cycle(&self.nodes, &edges) {

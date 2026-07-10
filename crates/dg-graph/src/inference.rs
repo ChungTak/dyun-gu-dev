@@ -16,10 +16,12 @@ use crate::{
 const INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 };
 const OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 };
 
 inventory::submit! {

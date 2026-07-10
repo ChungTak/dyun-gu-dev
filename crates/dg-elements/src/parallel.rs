@@ -8,78 +8,96 @@ const MAX_BRANCHES: usize = 8;
 const INPUT_PORT: PortSchema = PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 };
 const OUTPUT_PORTS: [PortSchema; MAX_BRANCHES] = [
     PortSchema {
         name: "out0",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out1",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out2",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out3",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out4",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out5",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out6",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "out7",
         dtype: None,
+        required: false,
     },
 ];
 const INPUT_PORTS: [PortSchema; MAX_BRANCHES] = [
     PortSchema {
         name: "in0",
         dtype: None,
+        required: true,
     },
     PortSchema {
         name: "in1",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in2",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in3",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in4",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in5",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in6",
         dtype: None,
+        required: false,
     },
     PortSchema {
         name: "in7",
         dtype: None,
+        required: false,
     },
 ];
 const SINGLE_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 }];
 const DISTRIBUTOR_FIELDS: &[&str] = &["strategy"];
 

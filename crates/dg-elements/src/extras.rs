@@ -13,18 +13,22 @@ use crate::math::{iou, resize_letterbox, softmax, top_k};
 const ANY_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
     dtype: None,
+    required: true,
 }];
 const TENSOR_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
     dtype: Some(DataType::F32),
+    required: true,
 }];
 const TENSOR_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: Some(DataType::F32),
+    required: false,
 }];
 const RESULT_OUTPUT: [PortSchema; 1] = [PortSchema {
     name: "out",
     dtype: None,
+    required: false,
 }];
 const RESNET_PREPROCESS_FIELDS: &[&str] = &["input_width", "input_height", "mean", "std"];
 const RESNET_POSTPROCESS_FIELDS: &[&str] = &["top_k", "labels"];
