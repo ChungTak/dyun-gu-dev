@@ -172,6 +172,11 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 `cheetah` feature 的 connector 接入，未启用时会明确报错。发布前应确认视频/音频
 track 已 Ready，并提供 H264/H265/H266/AAC 所需的 codec extradata。
 
+`dg-cli` 和 `dg-capi` 通过 `media` 与 `stream` feature 链接这些 registry；两个
+feature 默认启用，因此 `dg list-elements` 和 C API 的配置加载都能发现上述八个
+element。它们只链接无 SDK 的 stub 实现，不会启用 `avcodec` 或 `cheetah`；
+使用 `--no-default-features` 可构建不含 media/stream registry 的精简版本。
+
 ## 6. C API
 
 头文件位于 `crates/dg-capi/include/dg_capi.h`，示例位于
