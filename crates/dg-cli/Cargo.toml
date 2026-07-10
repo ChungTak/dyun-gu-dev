@@ -19,6 +19,8 @@ anyhow.workspace = true
 clap.workspace = true
 dg-elements = { path = "../dg-elements" }
 dg-graph = { path = "../dg-graph" }
+dg-media = { path = "../dg-media" }
+dg-stream = { path = "../dg-stream" }
 dg-openvino = { path = "../dg-openvino", optional = true, default-features = false }
 dg-rknn = { path = "../dg-rknn", optional = true, default-features = false }
 dg-runtime = { path = "../dg-runtime" }

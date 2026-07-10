@@ -6,12 +6,14 @@ use dg_graph::{Graph, GraphReport, GraphSpec};
 use tracing_subscriber::EnvFilter;
 
 use dg_elements as _;
+use dg_media as _;
 #[cfg(feature = "openvino")]
 use dg_openvino as _;
 #[cfg(feature = "rknn")]
 use dg_rknn as _;
 #[cfg(feature = "sophon")]
 use dg_sophon as _;
+use dg_stream as _;
 #[cfg(feature = "tensorrt")]
 use dg_tensorrt as _;
 
@@ -41,6 +43,10 @@ pub enum Command {
         config: PathBuf,
     },
     ListElements,
+    Schema {
+        #[arg(long)]
+        kind: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -55,6 +61,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Run { config, format } => run_graph(&config, format),
         Command::Validate { config } => validate_graph(&config),
         Command::ListElements => list_elements(),
+        Command::Schema { kind } => schema(kind.as_deref()),
     }
 }
 
@@ -81,6 +88,16 @@ pub fn list_elements() -> Result<()> {
     for kind in kinds {
         println!("{kind}");
     }
+    Ok(())
+}
+
+pub fn schema(kind: Option<&str>) -> Result<()> {
+    let value = match kind {
+        Some(kind) => dg_graph::element_params_schema(kind)
+            .ok_or_else(|| anyhow::anyhow!("unknown element kind: {kind}"))?,
+        None => serde_json::to_value(dg_graph::all_element_schemas())?,
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
@@ -173,7 +190,7 @@ fn init_logging(verbose: u8) {
 mod tests {
     use std::fs;
 
-    use super::{list_elements, run_graph, validate_graph, OutputFormat};
+    use super::{list_elements, run_graph, schema, validate_graph, Command, OutputFormat};
 
     fn temp_config() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -223,6 +240,18 @@ connections:
             .join("../../examples/mock-multi-algorithm.yaml");
         validate_graph(&path).expect("validate documented example");
         run_graph(&path, OutputFormat::Json).expect("run documented example");
+    }
+
+    #[test]
+    fn schema_command_exports_all_and_one_element() {
+        schema(None).expect("export all element schemas");
+        schema(Some("media_osd")).expect("export media OSD schema");
+        let command = Command::Schema {
+            kind: Some("media_osd".to_string()),
+        };
+        assert!(matches!(command, Command::Schema { .. }));
+        let schema = dg_graph::element_params_schema("media_osd").expect("media OSD schema");
+        assert_eq!(schema["properties"]["boxes"]["type"], "array");
     }
 
     #[cfg(feature = "openvino")]

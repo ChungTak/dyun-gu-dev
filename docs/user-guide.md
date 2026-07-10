@@ -72,6 +72,13 @@ execution:
 cargo run -p dg-cli -- list-elements
 ```
 
+导出已注册 element 的参数 JSON Schema，或查看单个 element：
+
+```bash
+cargo run -p dg-cli -- schema
+cargo run -p dg-cli -- schema --kind media_osd
+```
+
 ## 4. 后端
 
 | 后端 | crate | 典型目标 | 外部要求 |
