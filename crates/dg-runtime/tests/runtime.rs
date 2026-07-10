@@ -3,8 +3,8 @@ use dg_core::{
     TensorDesc, TypeCode,
 };
 use dg_runtime::{
-    configure_backend, BackendConfig, BackendKind, BackendOptions, Error, MockOptions, ModelSource,
-    Runtime, RuntimeOption, TensorInfo,
+    configure_backend, validate_runtime_option, BackendConfig, BackendKind, BackendOptions, Error,
+    MockOptions, ModelSource, Runtime, RuntimeOption, TensorInfo, TensorRtOptions,
 };
 use serde_json::json;
 
@@ -138,4 +138,25 @@ fn backend_registry_rejects_unknown_names_and_missing_models() {
         err,
         Error::InvalidOption("TensorRT requires a model file path".to_string())
     );
+}
+
+#[test]
+fn runtime_option_preflight_rejects_unsupported_common_capabilities() {
+    let base = RuntimeOption::new(
+        BackendKind::TensorRt,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::TensorRt(TensorRtOptions::default()),
+    );
+
+    let err = validate_runtime_option(&base.clone().with_precision(DataType::F64))
+        .expect_err("precision should be rejected");
+    assert_eq!(err, Error::UnsupportedPrecision(DataType::F64));
+
+    let err = validate_runtime_option(&base.clone().with_device(DeviceKind::Cpu))
+        .expect_err("device should be rejected");
+    assert_eq!(err, Error::UnsupportedDevice(DeviceKind::Cpu));
+
+    let err = validate_runtime_option(&base.with_deploy_mode(dg_core::DeployMode::SoC))
+        .expect_err("deployment should be rejected");
+    assert_eq!(err, Error::UnsupportedDeployment(dg_core::DeployMode::SoC));
 }

@@ -42,6 +42,7 @@ inventory::submit! {
         kind: "input",
         input_ports: &[],
         output_ports: &[INPUT_OUTPUT_PORT],
+        validate: None,
         create: create_input,
     }
 }
@@ -51,6 +52,7 @@ inventory::submit! {
         kind: "source",
         input_ports: &[],
         output_ports: &[SOURCE_OUTPUT_PORT],
+        validate: None,
         create: create_source,
     }
 }
@@ -60,6 +62,7 @@ inventory::submit! {
         kind: "mock_inference",
         input_ports: &[INFER_INPUT_PORT],
         output_ports: &[INFER_OUTPUT_PORT],
+        validate: None,
         create: create_mock_inference,
     }
 }
@@ -69,6 +72,7 @@ inventory::submit! {
         kind: "sink",
         input_ports: &[SINK_INPUT_PORT],
         output_ports: &[],
+        validate: None,
         create: create_sink,
     }
 }

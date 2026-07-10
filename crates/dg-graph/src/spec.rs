@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use crate::element::PortSchema;
 use crate::error::{Error, Result};
 use crate::pipe::DEFAULT_QUEUE_CAPACITY;
-use crate::registry::element_ports;
+use crate::registry::{element_ports, validate_element};
 
 const DEFAULT_API_VERSION: &str = "dg/v1";
 const DEFAULT_KIND: &str = "Graph";
@@ -305,6 +305,10 @@ impl GraphSpec {
                 return Err(Error::DuplicateNode(node.name.clone()));
             }
             element_ports(&node.kind)?;
+            validate_element(node).map_err(|err| Error::Validation {
+                path: format!("nodes[{}].params", node.name),
+                message: err.to_string(),
+            })?;
         }
 
         let mut node_kinds = BTreeMap::new();

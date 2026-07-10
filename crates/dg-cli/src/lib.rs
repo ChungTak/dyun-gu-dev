@@ -191,10 +191,12 @@ nodes:
       count: 1
       shape: [1, 2]
   - name: infer
-    kind: mock_inference
+    kind: inference
     params:
-      shape: [1, 2]
-      echo_inputs: true
+      backend: mock
+      options:
+        shape: [1, 2]
+        echo_inputs: true
   - name: sink
     kind: sink
     params: {}
@@ -240,5 +242,29 @@ connections:
                 .device,
             "GPU"
         );
+    }
+
+    #[cfg(feature = "openvino")]
+    #[test]
+    fn validate_rejects_openvino_capability_mismatch_without_initializing_model() {
+        let path = std::env::temp_dir().join(format!(
+            "dg-cli-openvino-preflight-{}.yaml",
+            std::process::id()
+        ));
+        let content = r#"
+apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: infer
+    kind: inference
+    params:
+      backend: openvino
+      model: missing.xml
+      device: cuda_gpu
+"#;
+        fs::write(&path, content).expect("write config");
+        let err = validate_graph(&path).expect_err("device should fail preflight");
+        fs::remove_file(path).expect("remove config");
+        assert!(format!("{err:#}").contains("unsupported device: CudaGpu"));
     }
 }
