@@ -6,6 +6,7 @@ use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec};
 use tracing_subscriber::EnvFilter;
 
 use dg_elements as _;
+#[cfg(feature = "media")]
 use dg_media as _;
 #[cfg(feature = "openvino")]
 use dg_openvino as _;
@@ -13,6 +14,7 @@ use dg_openvino as _;
 use dg_rknn as _;
 #[cfg(feature = "sophon")]
 use dg_sophon as _;
+#[cfg(feature = "stream")]
 use dg_stream as _;
 #[cfg(feature = "tensorrt")]
 use dg_tensorrt as _;
@@ -329,6 +331,22 @@ connections:
         validate_graph(&path).expect("validate config");
         run_graph(&path, OutputFormat::Json).expect("run config");
         list_elements().expect("list elements");
+        let kinds = dg_graph::registered_elements()
+            .into_iter()
+            .map(|descriptor| descriptor.kind)
+            .collect::<std::collections::BTreeSet<_>>();
+        for kind in [
+            "media_decode",
+            "media_encode",
+            "media_resize",
+            "media_osd",
+            "rtsp_src",
+            "httpflv_src",
+            "rtmp_sink",
+            "webrtc_sink",
+        ] {
+            assert!(kinds.contains(kind), "missing registered element {kind}");
+        }
         fs::remove_file(path).expect("remove config");
     }
 

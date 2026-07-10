@@ -446,6 +446,8 @@ dependencies = [
  "cbindgen",
  "dg-core",
  "dg-graph",
+ "dg-media",
+ "dg-stream",
  "serde_json",
 ]
 
