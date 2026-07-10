@@ -10,7 +10,10 @@ use dg_runtime::{
 };
 use tracing::{debug, trace, warn};
 
-use crate::io::{quantization_from_rknn, select_io_path, strides_from_w_stride, IoPath};
+use crate::io::{
+    depad_bytes, pad_bytes, padded_byte_len, quantization_from_rknn, select_io_path,
+    strides_from_w_stride, IoPath,
+};
 
 #[allow(
     non_camel_case_types,
@@ -355,8 +358,15 @@ impl RknnBackend {
         let Some(binding) = &self.io_mems else {
             return Err(Error::Backend("rknn zero-copy binding missing".to_string()));
         };
-        for (mem, tensor) in binding.inputs.iter().zip(inputs) {
-            mem.write_bytes(&tensor.buffer().read_bytes())?;
+        for ((mem, tensor), info) in binding.inputs.iter().zip(inputs).zip(&self.input_infos) {
+            let bytes = tensor.buffer().read_bytes();
+            match &info.strides {
+                Some(strides) => {
+                    let elem_bytes = info.dtype.bytes_per_element_ceil();
+                    mem.write_bytes(&pad_bytes(&bytes, &info.shape, strides, elem_bytes)?)?;
+                }
+                None => mem.write_bytes(&bytes)?,
+            }
         }
 
         // SAFETY: `context` is live and IO buffers stay bound and alive for
@@ -368,7 +378,15 @@ impl RknnBackend {
         let mut tensors = Vec::with_capacity(self.output_infos.len());
         for (mem, info) in binding.outputs.iter().zip(&self.output_infos) {
             let tensor = info.allocate(&device)?;
-            let bytes = mem.read_bytes(tensor.buffer().len())?;
+            let bytes = match &info.strides {
+                Some(strides) => {
+                    let elem_bytes = info.dtype.bytes_per_element_ceil();
+                    let padded =
+                        mem.read_bytes(padded_byte_len(&info.shape, strides, elem_bytes)?)?;
+                    depad_bytes(&padded, &info.shape, strides, elem_bytes)?
+                }
+                None => mem.read_bytes(tensor.buffer().len())?,
+            };
             tensor.buffer().write_from_slice(&bytes)?;
             tensors.push(tensor);
         }

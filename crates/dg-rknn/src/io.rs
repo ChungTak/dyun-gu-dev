@@ -96,6 +96,130 @@ pub fn strides_from_w_stride(
     }
 }
 
+/// Byte size of the padded physical layout described by element `strides`.
+pub fn padded_byte_len(shape: &Shape, strides: &Strides, elem_bytes: usize) -> Result<usize> {
+    let (dims, stride_values) = validated_layout(shape, strides)?;
+    let last_offset: usize = dims
+        .iter()
+        .zip(stride_values)
+        .map(|(dim, stride)| (dim - 1) * stride)
+        .sum();
+    Ok((last_offset + 1) * elem_bytes)
+}
+
+/// Expands contiguous row-major bytes into the padded layout described by
+/// `strides` (padding bytes are zeroed).
+pub fn pad_bytes(
+    contiguous: &[u8],
+    shape: &Shape,
+    strides: &Strides,
+    elem_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut padded = vec![0u8; padded_byte_len(shape, strides, elem_bytes)?];
+    for_each_run(
+        shape,
+        strides,
+        elem_bytes,
+        contiguous.len(),
+        |pad, contig, run| {
+            padded[pad..pad + run].copy_from_slice(&contiguous[contig..contig + run]);
+        },
+    )?;
+    Ok(padded)
+}
+
+/// Collapses bytes in the padded layout described by `strides` into
+/// contiguous row-major bytes.
+pub fn depad_bytes(
+    padded: &[u8],
+    shape: &Shape,
+    strides: &Strides,
+    elem_bytes: usize,
+) -> Result<Vec<u8>> {
+    let needed = padded_byte_len(shape, strides, elem_bytes)?;
+    if padded.len() < needed {
+        return Err(Error::Backend(format!(
+            "padded buffer too small: {} < {needed}",
+            padded.len()
+        )));
+    }
+    let logical = shape.element_count()? * elem_bytes;
+    let mut contiguous = vec![0u8; logical];
+    for_each_run(shape, strides, elem_bytes, logical, |pad, contig, run| {
+        contiguous[contig..contig + run].copy_from_slice(&padded[pad..pad + run]);
+    })?;
+    Ok(contiguous)
+}
+
+fn validated_layout<'a>(
+    shape: &'a Shape,
+    strides: &'a Strides,
+) -> Result<(&'a [usize], &'a [usize])> {
+    let dims = shape.dims();
+    let stride_values = strides.values();
+    if dims.is_empty() || dims.len() != stride_values.len() {
+        return Err(Error::Backend(format!(
+            "stride rank {} does not match shape rank {}",
+            stride_values.len(),
+            dims.len()
+        )));
+    }
+    if dims.contains(&0) {
+        return Err(Error::Backend("padded layout with empty shape".to_string()));
+    }
+    if stride_values[dims.len() - 1] != 1 {
+        return Err(Error::Backend(format!(
+            "unsupported innermost stride: {}",
+            stride_values[dims.len() - 1]
+        )));
+    }
+    Ok((dims, stride_values))
+}
+
+/// Visits every contiguous innermost-dimension run, yielding byte offsets
+/// into the padded and contiguous buffers plus the run length in bytes.
+fn for_each_run(
+    shape: &Shape,
+    strides: &Strides,
+    elem_bytes: usize,
+    contiguous_len: usize,
+    mut visit: impl FnMut(usize, usize, usize),
+) -> Result<()> {
+    let (dims, stride_values) = validated_layout(shape, strides)?;
+    let logical = shape.element_count()? * elem_bytes;
+    if contiguous_len != logical {
+        return Err(Error::Backend(format!(
+            "contiguous buffer size mismatch: {contiguous_len} != {logical}"
+        )));
+    }
+    let rank = dims.len();
+    let run = dims[rank - 1] * elem_bytes;
+    let outer = &dims[..rank - 1];
+    let mut index = vec![0usize; outer.len()];
+    let mut contig = 0usize;
+    loop {
+        let pad: usize = index
+            .iter()
+            .zip(stride_values)
+            .map(|(i, stride)| i * stride * elem_bytes)
+            .sum();
+        visit(pad, contig, run);
+        contig += run;
+        let mut axis = outer.len();
+        loop {
+            if axis == 0 {
+                return Ok(());
+            }
+            axis -= 1;
+            index[axis] += 1;
+            if index[axis] < outer[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +286,53 @@ mod tests {
     fn strides_non_4d_shapes_are_ignored() {
         let shape = Shape::new([1, 128]);
         assert_eq!(strides_from_w_stride(&shape, DataFormat::NCHW, 256), None);
+    }
+
+    #[test]
+    fn padded_byte_len_accounts_for_w_stride() {
+        let shape = Shape::new([1, 2, 2, 3]);
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4).expect("padded");
+        // Three padded rows of 4 plus the final row's 3 logical elements.
+        assert_eq!(padded_byte_len(&shape, &strides, 1).expect("len"), 15);
+    }
+
+    #[test]
+    fn pad_and_depad_round_trip_nchw() {
+        let shape = Shape::new([1, 2, 2, 3]);
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4).expect("padded");
+        let contiguous: Vec<u8> = (1..=12).collect();
+        let padded = pad_bytes(&contiguous, &shape, &strides, 1).expect("pad");
+        assert_eq!(padded, vec![1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12]);
+        let restored = depad_bytes(&padded, &shape, &strides, 1).expect("depad");
+        assert_eq!(restored, contiguous);
+    }
+
+    #[test]
+    fn depad_reads_padded_nhwc_rows() {
+        let shape = Shape::new([1, 2, 2, 2]);
+        let strides = strides_from_w_stride(&shape, DataFormat::NHWC, 3).expect("padded");
+        // Two rows of 2x2 elements padded to width 3 (x = padding).
+        let padded = vec![1, 2, 3, 4, 0, 0, 5, 6, 7, 8, 0, 0];
+        let restored = depad_bytes(&padded, &shape, &strides, 1).expect("depad");
+        assert_eq!(restored, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn pad_and_depad_respect_element_size() {
+        let shape = Shape::new([1, 1, 2, 2]);
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3).expect("padded");
+        let contiguous: Vec<u8> = (1..=8).collect();
+        let padded = pad_bytes(&contiguous, &shape, &strides, 2).expect("pad");
+        assert_eq!(padded, vec![1, 2, 3, 4, 0, 0, 5, 6, 7, 8]);
+        let restored = depad_bytes(&padded, &shape, &strides, 2).expect("depad");
+        assert_eq!(restored, contiguous);
+    }
+
+    #[test]
+    fn pad_and_depad_reject_size_mismatch() {
+        let shape = Shape::new([1, 1, 2, 2]);
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3).expect("padded");
+        assert!(pad_bytes(&[0u8; 3], &shape, &strides, 1).is_err());
+        assert!(depad_bytes(&[0u8; 3], &shape, &strides, 1).is_err());
     }
 }
