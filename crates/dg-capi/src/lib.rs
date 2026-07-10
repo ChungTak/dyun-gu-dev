@@ -699,6 +699,7 @@ pub unsafe extern "C" fn dg_engine_add_node(
             kind,
             template: None,
             params,
+            ..NodeSpec::default()
         });
         engine.inner.invalidate();
         Ok(())

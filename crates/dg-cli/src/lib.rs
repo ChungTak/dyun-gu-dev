@@ -360,6 +360,7 @@ connections:
                 kind: "source".to_string(),
                 template: None,
                 params: serde_json::json!({}),
+                ..NodeSpec::default()
             }],
             removed_nodes: vec!["removed".to_string()],
             updated_nodes: vec![NodeSpec {
@@ -367,6 +368,7 @@ connections:
                 kind: "sink".to_string(),
                 template: None,
                 params: serde_json::json!({}),
+                ..NodeSpec::default()
             }],
             added_connections: vec!["added.out -> updated.in".to_string()],
             removed_connections: vec!["old.out -> removed.in".to_string()],

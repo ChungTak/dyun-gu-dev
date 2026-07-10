@@ -36,18 +36,21 @@ fn graph_with_input(kind: &str, params: serde_json::Value) -> dg_graph::GraphSpe
             kind: "input".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "algorithm".to_string(),
             kind: kind.to_string(),
             template: None,
             params,
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("input.out -> algorithm.in")
         .connect("algorithm.out -> sink.in")
@@ -86,12 +89,14 @@ fn retinaface_decodes_face_and_landmarks() {
             kind: "input".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer".to_string(),
             kind: "mock_inference".to_string(),
             template: None,
             params: json!({"shape": [1, 15], "echo_inputs": true}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "face".to_string(),
@@ -104,12 +109,14 @@ fn retinaface_decodes_face_and_landmarks() {
                 "anchor_sizes": [0.25],
                 "confidence_threshold": 0.4
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("input.out -> infer.in")
         .connect("infer.out -> face.in")

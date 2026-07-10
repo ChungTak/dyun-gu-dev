@@ -60,6 +60,7 @@ fn node(name: &str, kind: &str, params: serde_json::Value) -> NodeSpec {
         kind: kind.to_string(),
         template: None,
         params,
+        ..NodeSpec::default()
     }
 }
 

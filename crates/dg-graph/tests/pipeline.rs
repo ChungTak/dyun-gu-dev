@@ -23,6 +23,7 @@ fn source_mock_sink_pipeline_runs_end_to_end() {
                 "shape": [1, 4],
                 "start": 3.0
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer".to_string(),
@@ -32,12 +33,14 @@ fn source_mock_sink_pipeline_runs_end_to_end() {
                 "shape": [1, 4],
                 "echo_inputs": true
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("source.out -> infer.in")
         .connect("infer.out -> sink.in")
@@ -65,6 +68,7 @@ fn injected_input_mock_sink_pipeline_runs_end_to_end() {
             kind: "input".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "infer".to_string(),
@@ -74,12 +78,14 @@ fn injected_input_mock_sink_pipeline_runs_end_to_end() {
                 "shape": [1, 4],
                 "echo_inputs": true
             }),
+            ..NodeSpec::default()
         })
         .add_node(NodeSpec {
             name: "sink".to_string(),
             kind: "sink".to_string(),
             template: None,
             params: json!({}),
+            ..NodeSpec::default()
         })
         .connect("input.out -> infer.in")
         .connect("infer.out -> sink.in")
