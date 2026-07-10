@@ -125,11 +125,15 @@ impl Graph {
     }
 
     pub fn run(&self) -> Result<GraphReport> {
+        self.run_with_inputs(HashMap::new())
+    }
+
+    pub fn run_with_inputs(&self, inputs: HashMap<String, Vec<Tensor>>) -> Result<GraphReport> {
         info!(
             node_count = self.spec.nodes.len(),
             "starting graph execution"
         );
-        let (runtime, sinks) = RuntimeGraph::build(self.spec.clone())?;
+        let (runtime, sinks) = RuntimeGraph::build(self.spec.clone(), inputs)?;
         runtime.run()?;
         let mut report = GraphReport::default();
         for (name, sink) in sinks {
@@ -147,7 +151,7 @@ pub struct RuntimeGraph {
 }
 
 impl RuntimeGraph {
-    fn build(spec: GraphSpec) -> Result<(Self, SinkMap)> {
+    fn build(spec: GraphSpec, inputs: HashMap<String, Vec<Tensor>>) -> Result<(Self, SinkMap)> {
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
         for node in &spec.nodes {
@@ -165,10 +169,23 @@ impl RuntimeGraph {
         }
 
         let mut sinks = BTreeMap::new();
+        let mut input_queues = BTreeMap::new();
         for (name, node) in &mut nodes {
             if let ElementHandle::Sink(collector) = &node.handle {
                 sinks.insert(name.clone(), collector.clone());
+            } else if let ElementHandle::Input(queue) = &node.handle {
+                input_queues.insert(name.clone(), queue.clone());
             }
+        }
+
+        for (name, tensors) in inputs {
+            let queue = input_queues.get(&name).ok_or_else(|| {
+                Error::Config(format!("unknown input node {} for injected tensors", name))
+            })?;
+            let mut guard = queue
+                .lock()
+                .map_err(|_| Error::Runtime("input queue poisoned".to_string()))?;
+            guard.extend(tensors);
         }
 
         for connection in &spec.connections {

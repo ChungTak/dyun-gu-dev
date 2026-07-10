@@ -3,7 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -129,6 +129,7 @@ struct Engine {
     spec: GraphSpec,
     graph: Option<Graph>,
     outputs: VecDeque<Tensor>,
+    pending_inputs: BTreeMap<String, Vec<Tensor>>,
 }
 
 impl Engine {
@@ -137,47 +138,56 @@ impl Engine {
             spec: GraphSpec::default(),
             graph: None,
             outputs: VecDeque::new(),
+            pending_inputs: BTreeMap::new(),
         }
     }
 
     fn invalidate(&mut self) {
         self.graph = None;
         self.outputs.clear();
+        self.pending_inputs.clear();
     }
 
-    fn push(&mut self, tensor: Tensor) -> Result<Tensor, String> {
-        if self.graph.is_none() {
-            return Err("engine must be built before pushing input".to_string());
-        }
-        let output = tensor;
-        if let Some(node) = self
+    fn input_node_name(&self) -> Result<String, String> {
+        let mut names = self
             .spec
             .nodes
             .iter()
-            .find(|node| node.kind == "mock_inference")
-        {
-            let params = node
-                .params
-                .as_object()
-                .ok_or_else(|| format!("node {} params must be an object", node.name))?;
-            if !params
-                .get("echo_inputs")
-                .and_then(Value::as_bool)
-                .unwrap_or(true)
-            {
-                let fill = params
-                    .get("fill_value")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| "mock fill_value must be an integer".to_string())?;
-                let fill = u8::try_from(fill)
-                    .map_err(|_| "mock fill_value does not fit in u8".to_string())?;
-                output
-                    .buffer()
-                    .write_from_slice(&vec![fill; output.buffer().len()])
-                    .map_err(|error| error.to_string())?;
-            }
+            .filter(|node| node.kind == "input")
+            .map(|node| node.name.clone());
+        match (names.next(), names.next()) {
+            (Some(name), None) => Ok(name),
+            _ => Err("graph must contain exactly one input node".to_string()),
         }
-        Ok(output)
+    }
+
+    fn push(&mut self, tensor: Tensor) -> Result<(), String> {
+        if self.graph.is_none() {
+            return Err("engine must be built before pushing input".to_string());
+        }
+        let input_name = self.input_node_name()?;
+        self.pending_inputs
+            .entry(input_name)
+            .or_default()
+            .push(tensor);
+        Ok(())
+    }
+
+    fn run(&mut self) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "engine must be built first".to_string())?;
+        let inputs = std::mem::take(&mut self.pending_inputs)
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        let report = graph
+            .run_with_inputs(inputs)
+            .map_err(|error| error.to_string())?;
+        for tensors in report.sinks.into_values() {
+            self.outputs.extend(tensors);
+        }
+        Ok(())
     }
 }
 
@@ -582,7 +592,7 @@ pub unsafe extern "C" fn dg_engine_build(engine: *mut DgEngine) -> DgStatus {
     }
 }
 
-/// Runs built-in source elements and stores sink outputs for polling.
+/// Runs the built graph with pending inputs and stores sink outputs for polling.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
     match ffi_result(|| {
@@ -590,17 +600,13 @@ pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
         let engine = unsafe { &mut *engine };
-        let graph = engine
-            .inner
-            .graph
-            .as_ref()
-            .ok_or((DgStatus::NotBuilt, "engine must be built first".to_string()))?;
-        let report = graph
-            .run()
-            .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        for tensors in report.sinks.into_values() {
-            engine.inner.outputs.extend(tensors);
-        }
+        engine.inner.run().map_err(|message| {
+            if message.contains("built") {
+                (DgStatus::NotBuilt, message)
+            } else {
+                (DgStatus::RuntimeError, message)
+            }
+        })?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -762,17 +768,18 @@ pub unsafe extern "C" fn dg_engine_push(
         }
         let engine = unsafe { &mut *engine };
         let tensor = unsafe { &*tensor };
-        let output = engine
+        engine
             .inner
             .push(tensor.tensor.clone())
             .map_err(|message| {
-                if message.contains("built") {
+                if message.contains("input node") {
+                    (DgStatus::Unsupported, message)
+                } else if message.contains("built") {
                     (DgStatus::NotBuilt, message)
                 } else {
                     (DgStatus::RuntimeError, message)
                 }
             })?;
-        engine.inner.outputs.push_back(output);
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -894,10 +901,9 @@ mod tests {
             r#"apiVersion: dg/v1
 kind: Graph
 nodes:
-  - name: source
-    kind: source
-    params:
-      count: 0
+  - name: input
+    kind: input
+    params: {}
   - name: infer
     kind: mock_inference
     params:
@@ -905,8 +911,9 @@ nodes:
       echo_inputs: true
   - name: sink
     kind: sink
+    params: {}
 connections:
-  - source.out -> infer.in
+  - input.out -> infer.in
   - infer.out -> sink.in
 "#,
         )
@@ -924,17 +931,18 @@ connections:
         );
         assert_eq!(unsafe { dg_engine_build(engine) }, DgStatus::Ok);
 
-        let input = [1_u8, 2, 3, 4];
+        let input = [1.0_f32, 2.0, 3.0, 4.0];
+        let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
         let shape = [1_usize, 4];
         let mut tensor = ptr::null_mut();
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input.as_ptr(),
-                    input.len(),
+                    input_bytes.as_ptr(),
+                    input_bytes.len(),
                     shape.as_ptr(),
                     shape.len(),
-                    DgDataType::U8,
+                    DgDataType::F32,
                     DgDataFormat::Nc,
                     DgDeviceKind::Cpu,
                     &mut tensor,
@@ -943,6 +951,16 @@ connections:
             DgStatus::Ok
         );
         assert_eq!(unsafe { dg_engine_push(engine, tensor) }, DgStatus::Ok);
+        let run_status = unsafe { dg_engine_run(engine) };
+        let error = dg_last_error();
+        let error = if error.is_null() {
+            "<missing last error>".to_string()
+        } else {
+            unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(run_status, DgStatus::Ok, "{}", error);
         let mut output = ptr::null_mut();
         assert_eq!(unsafe { dg_engine_poll(engine, &mut output) }, DgStatus::Ok);
         let mut output_data = ptr::null();
@@ -953,7 +971,7 @@ connections:
         );
         assert_eq!(
             unsafe { std::slice::from_raw_parts(output_data, output_len) },
-            input
+            input_bytes.as_slice()
         );
         unsafe {
             dg_tensor_free(output);

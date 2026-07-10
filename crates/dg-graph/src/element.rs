@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +22,7 @@ pub struct PortSchema {
 pub enum ElementHandle {
     #[default]
     None,
+    Input(Arc<Mutex<VecDeque<Tensor>>>),
     Sink(Arc<std::sync::Mutex<Vec<Tensor>>>),
 }
 

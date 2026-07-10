@@ -176,7 +176,7 @@ enum DgStatus dg_engine_disconnect(struct DgEngine *engine, const char *connecti
 enum DgStatus dg_engine_build(struct DgEngine *engine);
 
 /**
- * Runs built-in source elements and stores sink outputs for polling.
+ * Runs the built graph with pending inputs and stores sink outputs for polling.
  */
 enum DgStatus dg_engine_run(struct DgEngine *engine);
 
