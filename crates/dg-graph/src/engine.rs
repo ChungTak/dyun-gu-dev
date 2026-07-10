@@ -370,8 +370,8 @@ pub fn watch(
     mut callback: impl FnMut(Result<(GraphSpec, GraphDiff)>) + Send + 'static,
 ) -> Result<WatchHandle> {
     let path = path.as_ref().to_path_buf();
-    let mut previous = GraphSpec::load_from_path(&path)?;
     let mut modified = fs::metadata(&path)?.modified()?;
+    let mut previous = GraphSpec::load_from_path(&path)?;
     let (stop, stop_receiver) = mpsc::channel();
     let thread = thread::spawn(move || {
         const POLL_INTERVAL: Duration = Duration::from_millis(50);
