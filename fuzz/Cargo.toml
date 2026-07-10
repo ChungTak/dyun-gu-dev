@@ -1,0 +1,24 @@
+[package]
+name = "dg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+dg-capi = { path = "../crates/dg-capi" }
+dg-graph = { path = "../crates/dg-graph" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "graph-spec"
+path = "fuzz_targets/graph_spec.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "capi-load-string"
+path = "fuzz_targets/capi_load_string.rs"
+test = false
+doc = false
