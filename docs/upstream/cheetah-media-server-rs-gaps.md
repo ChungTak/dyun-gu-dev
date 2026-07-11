@@ -38,16 +38,16 @@
 
   ```rust
   pub trait PublisherSink: Send + Sync {
-      fn update_tracks(&self, tracks: Vec<TrackInfo>) -> Result<()>;
-      fn push_frame(&self, frame: Arc<MediaFrame>) -> Result<DispatchResult>;
-      fn close(&self) -> Result<()>;
+      fn update_tracks(&self, tracks: Vec<TrackInfo>) -> Result<(), SdkError>;
+      fn push_frame(&self, frame: Arc<AVFrame>) -> Result<DispatchResult, SdkError>;
+      fn close(&self) -> Result<(), SdkError>;
       fn take_keyframe_requests(&self) -> u64;
   }
 
   #[async_trait]
   pub trait SubscriberSource: Send {
-      async fn recv(&mut self) -> Result<Option<Arc<MediaFrame>>>;
-      async fn close(&mut self) -> Result<()>;
+      async fn recv(&mut self) -> Result<Option<Arc<AVFrame>>, SdkError>;
+      async fn close(&mut self) -> Result<(), SdkError>;
       fn id(&self) -> SubscriberId;
   }
   ```
