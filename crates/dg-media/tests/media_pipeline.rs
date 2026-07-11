@@ -288,25 +288,23 @@ fn avcodec_jpeg_round_trip_through_media_elements() {
 #[cfg(feature = "avcodec")]
 #[test]
 fn avcodec_native_free_h264_round_trip_through_cores() {
-    use dg_media::{AvcodecDecodeCore, AvcodecEncodeCore, MediaFrame, MediaFrameKind, MediaPoll};
+    use dg_media::{
+        media_frame_to_graph_packet, AvcodecDecodeCore, AvcodecEncodeCore, MediaFrame,
+        MediaFrameKind, MediaPoll,
+    };
 
     let width = 32usize;
     let height = 32usize;
-    let chroma_width = width.div_ceil(2);
-    let chroma_height = height.div_ceil(2);
-    let y_len = width * height;
-    let chroma_len = chroma_width * chroma_height;
-    let mut i420 = vec![128u8; y_len + 2 * chroma_len];
-    i420[y_len..].fill(128);
+    let rgb = vec![128u8; width * height * 3];
     let mut input = MediaFrame::from_host_bytes(
         MediaFrameKind::Image,
         DataType::U8,
         DataFormat::NHWC,
         vec![height, width, 3],
         DeviceKind::Cpu,
-        i420,
+        rgb,
     )
-    .expect("construct I420 frame");
+    .expect("construct RGB24 frame");
     input.meta.pts = Some(7);
     input.meta.dts = Some(7);
 
@@ -343,4 +341,5 @@ fn avcodec_native_free_h264_round_trip_through_cores() {
     assert_eq!(frame.shape, vec![height, width, 3]);
     assert_eq!(frame.format, DataFormat::NHWC);
     assert!(reached_eos, "decoder must reach EOS after draining output");
+    media_frame_to_graph_packet(frame).expect("decoded H264 frame must convert to a tensor");
 }

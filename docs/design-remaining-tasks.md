@@ -85,9 +85,9 @@
 > `dg-media-avcodec` 改为经上游公开 SDK facade（package `avcodec`，`native-free-software` feature）
 > 依赖，`registry()` 用 `native_free_software_registry_builder()`（白名单 jpeg/zune/rust-h264），
 > `codec_from_name`/DecodeCore/EncodeCore 支持 `h264`（bitstream 按 codec 选 `H264AnnexB`/`JpegInterchange`，
-> encoder 走 host I420），并新增 native-free H.264 encode→decode round-trip 集成测试。剩余非阻塞项：
-> native-free VP8/VP9/AV1 覆盖与统一 `PacketMetadata` trait；I420 帧目前打包进 `[h,w,3]` `MediaFrame`
-> 表示（1.5 bpp，encode/decode 两端一致），后续 MEDIA-02 接真实数据路径时可引入显式 planar 表示。
+> bridge 以与 JPEG 一致的 interleaved RGB24 `[h,w,3]` 作为 MediaFrame 边界，并通过纯 Rust BT.601 scalar
+> CSC 转换至/自 host I420），并新增 native-free H.264 encode→decode round-trip 集成测试。剩余非阻塞项：
+> native-free VP8/VP9/AV1 覆盖与统一 `PacketMetadata` trait。
 > 复核详情见 [docs/upstream/avcodec-rs-media01-requirements.md](upstream/avcodec-rs-media01-requirements.md)。
 
 ## D. 可观测性、测试与交付

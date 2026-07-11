@@ -252,13 +252,14 @@ pub fn avcodec_image_to_media_frame(image: &dg_media_avcodec::Image) -> Result<M
             .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
         let width = usize::try_from(image.coded_width)
             .map_err(|_| dg_core::Error::Media("image width overflow".to_string()))?;
+        let rgb = i420_to_rgb(&host, width, height)?;
         let mut frame = MediaFrame::from_host_bytes(
             MediaFrameKind::Image,
             DataType::U8,
             DataFormat::NHWC,
             vec![height, width, 3],
             DeviceKind::Cpu,
-            host,
+            rgb,
         )?;
         frame.meta.pts = image.pts;
         frame.meta.dts = image.dts;
@@ -367,12 +368,12 @@ pub fn media_frame_to_avcodec_image_for_codec(
 fn media_frame_to_avcodec_i420_image(frame: MediaFrame) -> Result<dg_media_avcodec::Image> {
     let [height, width, channels] = frame.shape.as_slice() else {
         return Err(dg_core::Error::Media(
-            "h264 encoder expects [height, width, 3] I420 frames".to_string(),
+            "h264 encoder expects [height, width, 3] RGB24 frames".to_string(),
         ));
     };
     if *channels != 3 {
         return Err(dg_core::Error::Media(
-            "h264 encoder expects [height, width, 3] I420 frames".to_string(),
+            "h264 encoder expects [height, width, 3] RGB24 frames".to_string(),
         ));
     }
 
@@ -384,6 +385,21 @@ fn media_frame_to_avcodec_i420_image(frame: MediaFrame) -> Result<dg_media_avcod
         .map_err(|_| dg_core::Error::Media("image width overflow".to_string()))?;
     let height_usize = usize::try_from(height)
         .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
+    let expected = width_usize
+        .checked_mul(height_usize)
+        .and_then(|len| len.checked_mul(3))
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let pts = frame.meta.pts;
+    let dts = frame.meta.dts;
+    let bytes = frame.buffer.into_host_bytes();
+    if bytes.len() != expected {
+        return Err(dg_core::Error::Media(format!(
+            "h264 encoder expects {} RGB24 bytes, got {}",
+            expected,
+            bytes.len()
+        )));
+    }
+    let i420 = rgb_to_i420(&bytes, width_usize, height_usize)?;
     let chroma_width = width_usize.div_ceil(2);
     let chroma_height = height_usize.div_ceil(2);
     let y_len = width_usize
@@ -392,35 +408,136 @@ fn media_frame_to_avcodec_i420_image(frame: MediaFrame) -> Result<dg_media_avcod
     let chroma_len = chroma_width
         .checked_mul(chroma_height)
         .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
-    let expected = y_len
-        .checked_add(chroma_len)
-        .and_then(|len| len.checked_add(chroma_len))
-        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
-    let pts = frame.meta.pts;
-    let dts = frame.meta.dts;
-    let bytes = frame.buffer.into_host_bytes();
-    if bytes.len() != expected {
-        return Err(dg_core::Error::Media(format!(
-            "h264 encoder expects {} packed I420 bytes, got {}",
-            expected,
-            bytes.len()
-        )));
-    }
 
     let mut image = dg_media_avcodec::Image::from_host_i420(
         width,
         height,
-        &bytes[..y_len],
+        &i420[..y_len],
         width_usize,
-        &bytes[y_len..y_len + chroma_len],
+        &i420[y_len..y_len + chroma_len],
         chroma_width,
-        &bytes[y_len + chroma_len..],
+        &i420[y_len + chroma_len..],
         chroma_width,
     )
     .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?;
     image.pts = pts;
     image.dts = dts;
     Ok(image)
+}
+
+#[cfg(feature = "avcodec")]
+fn clamp_u8(value: i32) -> u8 {
+    u8::try_from(value.clamp(0, 255))
+        .ok()
+        .map_or(0, |value| value)
+}
+
+#[cfg(feature = "avcodec")]
+fn rgb_to_i420(rgb: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let expected = pixel_count
+        .checked_mul(3)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    if rgb.len() != expected {
+        return Err(dg_core::Error::Media(format!(
+            "RGB24 buffer must contain {} bytes, got {}",
+            expected,
+            rgb.len()
+        )));
+    }
+
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let chroma_len = chroma_width
+        .checked_mul(chroma_height)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let total = pixel_count
+        .checked_add(chroma_len)
+        .and_then(|len| len.checked_add(chroma_len))
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let mut i420 = vec![0u8; total];
+
+    for row in 0..height {
+        for column in 0..width {
+            let offset = (row * width + column) * 3;
+            let red = i32::from(rgb[offset]);
+            let green = i32::from(rgb[offset + 1]);
+            let blue = i32::from(rgb[offset + 2]);
+            let y = ((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16;
+            i420[row * width + column] = clamp_u8(y);
+        }
+    }
+
+    for row in 0..chroma_height {
+        for column in 0..chroma_width {
+            let mut u_sum = 0;
+            let mut v_sum = 0;
+            let mut samples = 0;
+            for source_row in row * 2..(row * 2 + 2).min(height) {
+                for source_column in column * 2..(column * 2 + 2).min(width) {
+                    let offset = (source_row * width + source_column) * 3;
+                    let red = i32::from(rgb[offset]);
+                    let green = i32::from(rgb[offset + 1]);
+                    let blue = i32::from(rgb[offset + 2]);
+                    u_sum += ((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128;
+                    v_sum += ((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128;
+                    samples += 1;
+                }
+            }
+            let u_offset = pixel_count + row * chroma_width + column;
+            let v_offset = pixel_count + chroma_len + row * chroma_width + column;
+            i420[u_offset] = clamp_u8(u_sum / samples);
+            i420[v_offset] = clamp_u8(v_sum / samples);
+        }
+    }
+
+    Ok(i420)
+}
+
+#[cfg(feature = "avcodec")]
+fn i420_to_rgb(i420: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let chroma_width = width.div_ceil(2);
+    let chroma_height = height.div_ceil(2);
+    let chroma_len = chroma_width
+        .checked_mul(chroma_height)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let expected = pixel_count
+        .checked_add(chroma_len)
+        .and_then(|len| len.checked_add(chroma_len))
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    if i420.len() != expected {
+        return Err(dg_core::Error::Media(format!(
+            "I420 buffer must contain {} bytes, got {}",
+            expected,
+            i420.len()
+        )));
+    }
+
+    let rgb_len = pixel_count
+        .checked_mul(3)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let mut rgb = vec![0u8; rgb_len];
+    for row in 0..height {
+        for column in 0..width {
+            let y = i32::from(i420[row * width + column]) - 16;
+            let chroma_offset = (row / 2) * chroma_width + (column / 2);
+            let u = i32::from(i420[pixel_count + chroma_offset]) - 128;
+            let v = i32::from(i420[pixel_count + chroma_len + chroma_offset]) - 128;
+            let red = (298 * y + 409 * v + 128) >> 8;
+            let green = (298 * y - 100 * u - 208 * v + 128) >> 8;
+            let blue = (298 * y + 516 * u + 128) >> 8;
+            let offset = (row * width + column) * 3;
+            rgb[offset] = clamp_u8(red);
+            rgb[offset + 1] = clamp_u8(green);
+            rgb[offset + 2] = clamp_u8(blue);
+        }
+    }
+    Ok(rgb)
 }
 
 #[cfg(feature = "avcodec")]

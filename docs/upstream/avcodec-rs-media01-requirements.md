@@ -207,6 +207,8 @@ parameter set 时兼容）；round-trip 测试断言 PTS/DTS/time_base/KEY flag 
   `default-features=false, features=["native-free-software"]`）依赖，不再直接 pin 内部
   `avcodec-core-model`/`backend-jpeg`/`backend-zune`；`registry()` 用 `native_free_software_registry_builder()`；
   `dg-media` 的 `codec_from_name`/`DecodeCore`/`EncodeCore` 支持 `h264`（bitstream 按 codec 选
-  `H264AnnexB`/`JpegInterchange`，encoder 走 host I420），并加了 native-free 的 H.264 encode→decode 集成测试。
+  `H264AnnexB`/`JpegInterchange`，bridge 以与 JPEG 一致的 interleaved RGB24 `[h,w,3]` 作为
+  H.264 MediaFrame 边界，并通过纯 Rust BT.601 scalar CSC 转换至/自 host I420），并加了 native-free
+  的 H.264 encode→decode 集成测试。
 - 剩余非阻塞项：native-free VP8/VP9/AV1 覆盖（Req B，上游明确不在 native-free 范围）与统一
   `PacketMetadata` trait（Req C 的可选收敛）。
