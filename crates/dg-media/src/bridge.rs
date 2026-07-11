@@ -243,6 +243,28 @@ pub fn media_frame_to_avcodec_packet(
 
 #[cfg(feature = "avcodec")]
 pub fn avcodec_image_to_media_frame(image: &dg_media_avcodec::Image) -> Result<MediaFrame> {
+    if image.format == dg_media_avcodec::ImageInfo::Yuv420p {
+        let planes =
+            dg_media_avcodec::host_i420_planes(image, image.coded_width, image.coded_height)
+                .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?;
+        let host = planes.to_packed();
+        let height = usize::try_from(image.coded_height)
+            .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
+        let width = usize::try_from(image.coded_width)
+            .map_err(|_| dg_core::Error::Media("image width overflow".to_string()))?;
+        let mut frame = MediaFrame::from_host_bytes(
+            MediaFrameKind::Image,
+            DataType::U8,
+            DataFormat::NHWC,
+            vec![height, width, 3],
+            DeviceKind::Cpu,
+            host,
+        )?;
+        frame.meta.pts = image.pts;
+        frame.meta.dts = image.dts;
+        return Ok(frame);
+    }
+
     let host = if let Some(bytes) = image
         .plane_host_bytes(0)
         .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?
@@ -292,6 +314,19 @@ pub fn media_frame_to_avcodec_image(
     frame: MediaFrame,
     stride_alignment: usize,
 ) -> Result<dg_media_avcodec::Image> {
+    media_frame_to_avcodec_image_for_codec(frame, stride_alignment, dg_media_avcodec::CodecId::Jpeg)
+}
+
+#[cfg(feature = "avcodec")]
+pub fn media_frame_to_avcodec_image_for_codec(
+    frame: MediaFrame,
+    stride_alignment: usize,
+    codec: dg_media_avcodec::CodecId,
+) -> Result<dg_media_avcodec::Image> {
+    if codec == dg_media_avcodec::CodecId::H264 {
+        return media_frame_to_avcodec_i420_image(frame);
+    }
+
     let pts = frame.meta.pts;
     let dts = frame.meta.dts;
     let height = frame.shape.first().copied().unwrap_or_default();
@@ -321,6 +356,66 @@ pub fn media_frame_to_avcodec_image(
         stride,
         bytes,
         stride_alignment,
+    )
+    .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?;
+    image.pts = pts;
+    image.dts = dts;
+    Ok(image)
+}
+
+#[cfg(feature = "avcodec")]
+fn media_frame_to_avcodec_i420_image(frame: MediaFrame) -> Result<dg_media_avcodec::Image> {
+    let [height, width, channels] = frame.shape.as_slice() else {
+        return Err(dg_core::Error::Media(
+            "h264 encoder expects [height, width, 3] I420 frames".to_string(),
+        ));
+    };
+    if *channels != 3 {
+        return Err(dg_core::Error::Media(
+            "h264 encoder expects [height, width, 3] I420 frames".to_string(),
+        ));
+    }
+
+    let width = u32::try_from(*width)
+        .map_err(|_| dg_core::Error::Media("image width overflow".to_string()))?;
+    let height = u32::try_from(*height)
+        .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
+    let width_usize = usize::try_from(width)
+        .map_err(|_| dg_core::Error::Media("image width overflow".to_string()))?;
+    let height_usize = usize::try_from(height)
+        .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
+    let chroma_width = width_usize.div_ceil(2);
+    let chroma_height = height_usize.div_ceil(2);
+    let y_len = width_usize
+        .checked_mul(height_usize)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let chroma_len = chroma_width
+        .checked_mul(chroma_height)
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let expected = y_len
+        .checked_add(chroma_len)
+        .and_then(|len| len.checked_add(chroma_len))
+        .ok_or_else(|| dg_core::Error::Media("image dimensions overflow".to_string()))?;
+    let pts = frame.meta.pts;
+    let dts = frame.meta.dts;
+    let bytes = frame.buffer.into_host_bytes();
+    if bytes.len() != expected {
+        return Err(dg_core::Error::Media(format!(
+            "h264 encoder expects {} packed I420 bytes, got {}",
+            expected,
+            bytes.len()
+        )));
+    }
+
+    let mut image = dg_media_avcodec::Image::from_host_i420(
+        width,
+        height,
+        &bytes[..y_len],
+        width_usize,
+        &bytes[y_len..y_len + chroma_len],
+        chroma_width,
+        &bytes[y_len + chroma_len..],
+        chroma_width,
     )
     .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?;
     image.pts = pts;
