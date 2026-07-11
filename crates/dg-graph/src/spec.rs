@@ -91,10 +91,10 @@ pub struct NodeSpec {
     pub name: String,
     #[serde(alias = "type")]
     pub kind: String,
-    /// Reserved for CFG-08 runtime semantics.
+    /// Number of Pipeline instances for this node.
     #[serde(default)]
     pub threads: Option<usize>,
-    /// Reserved for CFG-08 runtime semantics.
+    /// Marks this node as terminal; terminal nodes cannot have outgoing edges.
     #[serde(default)]
     pub sink: bool,
     #[serde(default)]
@@ -424,6 +424,20 @@ impl GraphSpec {
             if !seen.insert(&node.name) {
                 return Err(Error::DuplicateNode(node.name.clone()));
             }
+            if node.threads == Some(0) {
+                return Err(Error::Validation {
+                    path: format!("nodes[{}].threads", node.name),
+                    message: "threads must be >= 1".to_string(),
+                });
+            }
+            if self.execution.parallel != ParallelType::Pipeline
+                && node.threads.is_some_and(|threads| threads > 1)
+            {
+                return Err(Error::Validation {
+                    path: format!("nodes[{}].threads", node.name),
+                    message: "threads > 1 requires Pipeline execution".to_string(),
+                });
+            }
             element_ports(&node.kind)?;
             validate_element(node).map_err(|err| Error::Validation {
                 path: format!("nodes[{}].params", node.name),
@@ -448,6 +462,19 @@ impl GraphSpec {
                         path: format!("connections[{connection}]"),
                         message: format!("unknown source node {}", parsed.from_node),
                     })?;
+            if self
+                .nodes
+                .iter()
+                .any(|node| node.name == parsed.from_node && node.sink)
+            {
+                return Err(Error::Validation {
+                    path: format!("connections[{connection_index}]"),
+                    message: format!(
+                        "sink node {} cannot have outgoing connection {}",
+                        parsed.from_node, connection
+                    ),
+                });
+            }
             let to_kind =
                 node_kinds
                     .get(parsed.to_node.as_str())

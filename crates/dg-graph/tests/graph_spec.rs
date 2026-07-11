@@ -6,8 +6,8 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dg_graph::{
-    watch, ConnectionSpec, DefaultsSpec, DeviceDefault, Graph, GraphFormat, GraphSpec,
-    GraphSpecBuilder, NodeSpec, NodeTemplate,
+    watch, ConnectionSpec, DefaultsSpec, DeviceDefault, ExecutionSpec, Graph, GraphFormat,
+    GraphSpec, GraphSpecBuilder, NodeSpec, NodeTemplate, ParallelType,
 };
 use proptest::prelude::*;
 use serde_json::json;
@@ -243,6 +243,95 @@ fn graph_spec_validation_rejects_duplicate_names_and_cycles() {
         .connect("b.out -> a.in")
         .build();
     assert!(cycle.is_err());
+}
+
+#[test]
+fn cfg08_validates_threads_and_sink_semantics() {
+    let threads_zero = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(0),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .build()
+        .expect_err("zero threads should be rejected");
+    assert!(threads_zero.to_string().contains("threads must be >= 1"));
+
+    let sink_with_output = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "terminal".to_string(),
+            kind: "mock_inference".to_string(),
+            sink: true,
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> terminal.in")
+        .connect("terminal.out -> sink.in")
+        .build()
+        .expect_err("terminal nodes should not have outgoing edges");
+    assert!(sink_with_output
+        .to_string()
+        .contains("cannot have outgoing connection"));
+
+    for parallel in [ParallelType::Sequential, ParallelType::Task] {
+        let error = GraphSpecBuilder::new()
+            .execution(ExecutionSpec {
+                parallel,
+                ..ExecutionSpec::default()
+            })
+            .add_node(NodeSpec {
+                name: "infer".to_string(),
+                kind: "mock_inference".to_string(),
+                threads: Some(2),
+                params: json!({"shape": [1, 4]}),
+                ..NodeSpec::default()
+            })
+            .build()
+            .expect_err("multi-instancing must be Pipeline-only");
+        assert!(error
+            .to_string()
+            .contains("threads > 1 requires Pipeline execution"));
+    }
+
+    GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(2),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "terminal".to_string(),
+            kind: "sink".to_string(),
+            sink: true,
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> infer.in")
+        .connect("infer.out -> terminal.in")
+        .build()
+        .expect("Pipeline multi-instancing with a terminal sink should validate");
 }
 
 #[test]

@@ -87,7 +87,11 @@ template 参数 > 全局 defaults**；defaults 只填充节点、节点级字段
 `edges` 是 `connections` 的别名，`vars` 是 `variables` 的别名。旧字段仍然
 保持兼容。节点也可以用 `backend`、`device`、`precision` 提供节点级覆盖，
 优先级为 **params 显式字段 > 节点级字段 > template 参数 > 全局 defaults**。
-`threads` 和 `sink` 字段目前仅保留配置数据，运行时语义属于 CFG-08。
+节点可用 `threads` 指定实例数（必须 >= 1）。在本版本中，多实例仅支持
+`pipeline` 执行：输入会在实例间负载均衡，实例间输出顺序不保证；在
+`sequential` 或 `task` 执行中使用 `threads > 1` 会在加载期拒绝。带有
+输入队列、source 输出或 sink collector 的特殊节点不能多实例化。
+`sink: true` 将节点标记为终端节点，必须没有任何出边，否则配置会在加载期拒绝。
 结构化的 `defaults.device`（例如 `{ kind: OpenVino, id: 0 }`）可以解析并
 序列化，但调度器级设备含义暂由后续 SCH-* 任务接入；当前只有字符串形式会
 注入 `inference` 参数。
