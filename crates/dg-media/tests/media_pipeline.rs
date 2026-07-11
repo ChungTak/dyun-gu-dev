@@ -217,6 +217,22 @@ fn media_encode_allows_omitted_parameters() {
         .expect("parameterless media encoder should allow null params");
 }
 
+#[cfg(feature = "avcodec")]
+#[test]
+fn avcodec_media_encode_creates_with_omitted_parameters() {
+    let input = node("input", "input", serde_json::Value::Null);
+    let mut encode = node("encode", "media_encode", json!({}));
+    encode.params = serde_json::Value::Null;
+    let spec = GraphSpecBuilder::new()
+        .add_node(input)
+        .add_node(encode)
+        .connect("input.out -> encode.in")
+        .build()
+        .expect("parameterless media encoder should validate");
+
+    Graph::new(spec).expect("parameterless avcodec media encoder should create");
+}
+
 #[cfg(all(feature = "avcodec", target_arch = "x86_64"))]
 #[test]
 fn avcodec_jpeg_round_trip_through_media_elements() {

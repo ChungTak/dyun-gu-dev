@@ -326,7 +326,13 @@ fn create_decode(node: &NodeSpec) -> Result<CreatedElement> {
 fn create_encode(node: &NodeSpec) -> Result<CreatedElement> {
     validate_encode(node)?;
     #[cfg(feature = "avcodec")]
-    let core = AvcodecEncodeCore::new(parse_codec(node)?)?;
+    let codec = if node.params.is_null() {
+        crate::avcodec::codec_from_name(None).map_err(|err| Error::Config(err.to_string()))?
+    } else {
+        parse_codec(node)?
+    };
+    #[cfg(feature = "avcodec")]
+    let core = AvcodecEncodeCore::new(codec)?;
     #[cfg(not(feature = "avcodec"))]
     let core = EncodeCore::new();
     Ok(CreatedElement {
