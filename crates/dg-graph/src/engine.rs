@@ -391,14 +391,13 @@ impl RuntimeGraph {
             match receiver.recv() {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
+                    first_error = select_error(first_error, err);
                 }
                 Err(_) => {
-                    if first_error.is_none() {
-                        first_error = Some(Error::Runtime("element worker lost".to_string()));
-                    }
+                    first_error = select_error(
+                        first_error,
+                        Error::Runtime("element worker lost".to_string()),
+                    );
                     break;
                 }
             }
@@ -475,9 +474,7 @@ impl RuntimeGraph {
                     }
                 }
                 Err(err) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
+                    first_error = select_error(first_error, err);
                 }
             }
         }
@@ -485,6 +482,19 @@ impl RuntimeGraph {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+fn is_cancellation(error: &Error) -> bool {
+    matches!(error, Error::NotRunning)
+}
+
+fn select_error(current: Option<Error>, candidate: Error) -> Option<Error> {
+    match current {
+        Some(existing) if !is_cancellation(&existing) || is_cancellation(&candidate) => {
+            Some(existing)
+        }
+        _ => Some(candidate),
     }
 }
 
@@ -684,7 +694,6 @@ fn notify_watch(
         error!("graph watch callback panicked");
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -785,5 +794,30 @@ mod tests {
             "requested instances should each be created"
         );
         assert_eq!(report.sinks["sink"].len(), 8);
+    }
+
+    fn root_cause() -> Error {
+        Error::Element {
+            element: "decode".to_string(),
+            message: "recorded frame has an invalid payload size".to_string(),
+        }
+    }
+
+    #[test]
+    fn error_selection_prefers_root_cause_over_cancellation() {
+        let selected = select_error(Some(Error::NotRunning), root_cause());
+        assert!(matches!(selected, Some(Error::Element { .. })));
+    }
+
+    #[test]
+    fn error_selection_keeps_root_cause_when_cancellation_arrives_later() {
+        let selected = select_error(Some(root_cause()), Error::NotRunning);
+        assert!(matches!(selected, Some(Error::Element { .. })));
+    }
+
+    #[test]
+    fn cancellation_is_only_the_not_running_error() {
+        assert!(is_cancellation(&Error::NotRunning));
+        assert!(!is_cancellation(&root_cause()));
     }
 }
