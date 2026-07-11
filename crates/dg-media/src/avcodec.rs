@@ -50,29 +50,16 @@ pub fn map_av_error(error: AvError) -> Error {
             Error::Media(format!("avcodec {kind:?}: {detail:?}"))
         }
         AvError::ExternalError(code) => Error::Media(format!("avcodec external error code {code}")),
+        AvError::WithContext { error, .. } => map_av_error(*error),
     }
 }
 
 fn is_again(error: &AvError) -> bool {
-    matches!(
-        error,
-        AvError::Again
-            | AvError::Classified {
-                kind: AvErrorKind::Again,
-                ..
-            }
-    )
+    error.kind() == AvErrorKind::Again
 }
 
 fn is_end_of_stream(error: &AvError) -> bool {
-    matches!(
-        error,
-        AvError::EndOfStream
-            | AvError::Classified {
-                kind: AvErrorKind::EndOfStream,
-                ..
-            }
-    )
+    error.kind() == AvErrorKind::EndOfStream
 }
 
 pub struct DecodeCore {
