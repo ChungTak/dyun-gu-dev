@@ -7,7 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["media", "stream"]
+media = ["dep:dg-media"]
+stream = ["dep:dg-stream", "media"]
 openvino = ["dep:dg-openvino", "dg-openvino/backend"]
 rknn = ["dep:dg-rknn", "dg-rknn/backend"]
 tensorrt = ["dep:dg-tensorrt", "dg-tensorrt/backend"]
@@ -19,8 +21,8 @@ anyhow.workspace = true
 clap.workspace = true
 dg-elements = { path = "../dg-elements" }
 dg-graph = { path = "../dg-graph" }
-dg-media = { path = "../dg-media" }
-dg-stream = { path = "../dg-stream" }
+dg-media = { path = "../dg-media", optional = true }
+dg-stream = { path = "../dg-stream", optional = true }
 dg-openvino = { path = "../dg-openvino", optional = true, default-features = false }
 dg-rknn = { path = "../dg-rknn", optional = true, default-features = false }
 dg-runtime = { path = "../dg-runtime" }

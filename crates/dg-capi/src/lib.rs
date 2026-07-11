@@ -14,6 +14,10 @@ use dg_core::{
     ExternalHandle, MemoryDomain, Shape, Tensor, TensorDesc, TypeCode,
 };
 use dg_graph::{Graph, GraphDiff, GraphFormat, GraphSpec, NodeSpec};
+#[cfg(feature = "media")]
+use dg_media as _;
+#[cfg(feature = "stream")]
+use dg_stream as _;
 use serde_json::{Map, Value};
 
 thread_local! {
@@ -1135,6 +1139,34 @@ connections:
         .expect("valid graph spec")
     }
 
+    #[cfg(feature = "stream")]
+    fn media_stream_graph_spec() -> CString {
+        CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: stream_source
+    kind: rtsp_src
+    params:
+      url: mock://app01
+  - name: decode
+    kind: media_decode
+    params:
+      width: 4
+      height: 4
+      channels: 3
+  - name: stream_sink
+    kind: rtmp_sink
+    params:
+      url: mock://app01
+connections:
+  - stream_source.out -> decode.in
+  - decode.out -> stream_sink.in
+"#,
+        )
+        .expect("valid media/stream graph spec")
+    }
+
     fn unique_temp_path() -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1235,6 +1267,19 @@ connections:
             dg_tensor_free(tensor);
             dg_engine_free(engine);
         }
+    }
+
+    #[cfg(feature = "stream")]
+    #[test]
+    fn c_abi_load_discovers_media_and_stream_elements() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        let spec = media_stream_graph_spec();
+        assert_eq!(
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, spec.as_ptr()) },
+            DgStatus::Ok
+        );
+        unsafe { dg_engine_free(engine) };
     }
 
     #[test]

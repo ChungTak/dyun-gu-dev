@@ -6,6 +6,7 @@ use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec};
 use tracing_subscriber::EnvFilter;
 
 use dg_elements as _;
+#[cfg(feature = "media")]
 use dg_media as _;
 #[cfg(feature = "openvino")]
 use dg_openvino as _;
@@ -13,6 +14,7 @@ use dg_openvino as _;
 use dg_rknn as _;
 #[cfg(feature = "sophon")]
 use dg_sophon as _;
+#[cfg(feature = "stream")]
 use dg_stream as _;
 #[cfg(feature = "tensorrt")]
 use dg_tensorrt as _;
@@ -285,9 +287,11 @@ mod tests {
 
     use dg_graph::{GraphDiff, NodeSpec};
 
+    #[cfg(feature = "stream")]
+    use super::Command;
     use super::{
         list_elements, render_diff, render_reload_rejected, run_graph, schema, validate_graph,
-        Command, OutputFormat,
+        OutputFormat,
     };
 
     fn temp_config() -> std::path::PathBuf {
@@ -329,6 +333,25 @@ connections:
         validate_graph(&path).expect("validate config");
         run_graph(&path, OutputFormat::Json).expect("run config");
         list_elements().expect("list elements");
+        #[cfg(feature = "stream")]
+        {
+            let kinds = dg_graph::registered_elements()
+                .into_iter()
+                .map(|descriptor| descriptor.kind)
+                .collect::<std::collections::BTreeSet<_>>();
+            for kind in [
+                "media_decode",
+                "media_encode",
+                "media_resize",
+                "media_osd",
+                "rtsp_src",
+                "httpflv_src",
+                "rtmp_sink",
+                "webrtc_sink",
+            ] {
+                assert!(kinds.contains(kind), "missing registered element {kind}");
+            }
+        }
         fs::remove_file(path).expect("remove config");
     }
 
@@ -343,13 +366,16 @@ connections:
     #[test]
     fn schema_command_exports_all_and_one_element() {
         schema(None).expect("export all element schemas");
-        schema(Some("media_osd")).expect("export media OSD schema");
-        let command = Command::Schema {
-            kind: Some("media_osd".to_string()),
-        };
-        assert!(matches!(command, Command::Schema { .. }));
-        let schema = dg_graph::element_params_schema("media_osd").expect("media OSD schema");
-        assert_eq!(schema["properties"]["boxes"]["type"], "array");
+        #[cfg(feature = "stream")]
+        {
+            schema(Some("media_osd")).expect("export media OSD schema");
+            let command = Command::Schema {
+                kind: Some("media_osd".to_string()),
+            };
+            assert!(matches!(command, Command::Schema { .. }));
+            let schema = dg_graph::element_params_schema("media_osd").expect("media OSD schema");
+            assert_eq!(schema["properties"]["boxes"]["type"], "array");
+        }
     }
 
     #[test]

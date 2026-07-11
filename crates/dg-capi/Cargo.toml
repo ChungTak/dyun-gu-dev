@@ -7,9 +7,16 @@ repository.workspace = true
 rust-version.workspace = true
 build = "build.rs"
 
+[features]
+default = ["media", "stream"]
+media = ["dep:dg-media"]
+stream = ["dep:dg-stream", "media"]
+
 [dependencies]
 dg-core = { path = "../dg-core" }
 dg-graph = { path = "../dg-graph" }
+dg-media = { path = "../dg-media", optional = true }
+dg-stream = { path = "../dg-stream", optional = true }
 serde_json = { workspace = true }
 
 [lib]
