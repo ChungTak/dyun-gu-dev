@@ -116,3 +116,133 @@ fn injected_input_mock_sink_pipeline_runs_end_to_end() {
         f32_bytes(&[1.0, 2.0, 3.0, 4.0])
     );
 }
+
+#[test]
+fn pipeline_load_balances_packets_across_threaded_element_instances() {
+    let count = 32;
+    let spec = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            template: None,
+            params: json!({
+                "count": count,
+                "shape": [1, 4],
+                "start": 10.0
+            }),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(2),
+            template: None,
+            params: json!({
+                "shape": [1, 4],
+                "echo_inputs": true
+            }),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            template: None,
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> infer.in")
+        .connect("infer.out -> sink.in")
+        .build()
+        .expect("build threaded pipeline spec");
+
+    let report = Graph::new(spec)
+        .expect("build graph")
+        .run()
+        .expect("run threaded pipeline");
+    let tensors = report.sinks.get("sink").expect("sink outputs");
+    assert_eq!(tensors.len(), count);
+    let mut observed = tensors
+        .iter()
+        .map(|tensor| tensor.buffer().read_bytes())
+        .collect::<Vec<_>>();
+    observed.sort();
+    let mut expected = (0..count)
+        .map(|index| f32_bytes(&[(10 + index) as f32; 4]))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn pipeline_rejects_multi_instanced_special_handles_at_build_time() {
+    let source_spec = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            threads: Some(2),
+            params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> sink.in")
+        .build()
+        .expect("source graph should validate before runtime build");
+    let source_error = Graph::new(source_spec)
+        .expect("source graph should construct")
+        .run()
+        .expect_err("source elements cannot be multi-instanced");
+    assert!(source_error.to_string().contains("source elements"));
+
+    let input_spec = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "input".to_string(),
+            kind: "input".to_string(),
+            threads: Some(2),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("input.out -> sink.in")
+        .build()
+        .expect("input graph should validate before runtime build");
+    let input_error = Graph::new(input_spec)
+        .expect("input graph should construct")
+        .run()
+        .expect_err("input handles cannot be multi-instanced");
+    assert!(input_error
+        .to_string()
+        .contains("cannot be multi-instanced"));
+
+    let sink_spec = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            params: json!({"count": 1, "shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            threads: Some(2),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> sink.in")
+        .build()
+        .expect("sink graph should validate before runtime build");
+    let sink_error = Graph::new(sink_spec)
+        .expect("sink graph should construct")
+        .run()
+        .expect_err("sink handles cannot be multi-instanced");
+    assert!(sink_error.to_string().contains("cannot be multi-instanced"));
+}

@@ -12,7 +12,7 @@ use std::time::Duration;
 use dg_core::{Classification, Detection, FaceDetection, OcrText, Tensor, Track};
 use tracing::{error, info};
 
-use crate::element::{Element, ElementHandle, ElementIo};
+use crate::element::{Element, ElementHandle, ElementIo, EosState};
 use crate::error::{Error, Result};
 use crate::pipe::{DataPipe, PipeReceiver, PipeSender};
 use crate::pool::ThreadPool;
@@ -209,13 +209,34 @@ impl RuntimeGraph {
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
         for node in &spec.nodes {
+            let threads = node.threads.unwrap_or(1);
             let created = create_element(node)?;
+            if threads > 1
+                && (node.kind == "source" || !matches!(&created.handle, ElementHandle::None))
+            {
+                return Err(Error::Config(format!(
+                    "node {} cannot be multi-instanced because source elements and elements with special handles are single-instance",
+                    node.name,
+                )));
+            }
+            let handle = created.handle;
+            let mut elements = vec![created.element];
+            for _ in 1..threads {
+                let created = create_element(node)?;
+                if node.kind == "source" || !matches!(&created.handle, ElementHandle::None) {
+                    return Err(Error::Config(format!(
+                        "node {} cannot be multi-instanced because source elements and elements with special handles are single-instance",
+                        node.name,
+                    )));
+                }
+                elements.push(created.element);
+            }
             nodes.insert(
                 node.name.clone(),
                 NodeRuntime {
                     name: node.name.clone(),
-                    element: Some(created.element),
-                    handle: created.handle,
+                    elements,
+                    handle,
                     inputs: HashMap::new(),
                     outputs: HashMap::new(),
                 },
@@ -269,7 +290,8 @@ impl RuntimeGraph {
                     parsed.to_node, parsed.to_port
                 )));
             }
-            dst.inputs.insert(parsed.to_port.clone(), receiver);
+            dst.inputs
+                .insert(parsed.to_port.clone(), Arc::new(Mutex::new(receiver)));
         }
 
         for node in nodes.values() {
@@ -287,24 +309,33 @@ impl RuntimeGraph {
             }
         }
 
-        let mut exec_nodes = Vec::with_capacity(nodes.len());
-        for mut node in nodes.into_values() {
-            let io = ElementIo {
-                name: node.name.clone(),
-                inputs: node.inputs.drain().collect(),
-                outputs: node.outputs.drain().collect(),
-                stop: stop.clone(),
-                send_backoff: Duration::from_millis(1),
-            };
-            let element = node
-                .element
-                .take()
-                .ok_or_else(|| Error::Config("missing element".to_string()))?;
-            exec_nodes.push(ExecNode {
-                name: node.name,
-                element,
-                io,
-            });
+        let total_elements = nodes.values().map(|node| node.elements.len()).sum();
+        let mut exec_nodes = Vec::with_capacity(total_elements);
+        for node in nodes.into_values() {
+            let eos = Arc::new(Mutex::new(EosState {
+                seen: false,
+                broadcasts: 0,
+                instances: node.elements.len(),
+            }));
+            for element in node.elements {
+                let io = ElementIo {
+                    name: node.name.clone(),
+                    inputs: node
+                        .inputs
+                        .iter()
+                        .map(|(port, receiver)| (port.clone(), receiver.clone()))
+                        .collect(),
+                    outputs: node.outputs.clone(),
+                    stop: stop.clone(),
+                    send_backoff: Duration::from_millis(1),
+                    eos: eos.clone(),
+                };
+                exec_nodes.push(ExecNode {
+                    name: node.name.clone(),
+                    element,
+                    io,
+                });
+            }
         }
 
         Ok((
@@ -360,14 +391,13 @@ impl RuntimeGraph {
             match receiver.recv() {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
+                    first_error = select_error(first_error, err);
                 }
                 Err(_) => {
-                    if first_error.is_none() {
-                        first_error = Some(Error::Runtime("element worker lost".to_string()));
-                    }
+                    first_error = select_error(
+                        first_error,
+                        Error::Runtime("element worker lost".to_string()),
+                    );
                     break;
                 }
             }
@@ -444,9 +474,7 @@ impl RuntimeGraph {
                     }
                 }
                 Err(err) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
+                    first_error = select_error(first_error, err);
                 }
             }
         }
@@ -454,6 +482,19 @@ impl RuntimeGraph {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+fn is_cancellation(error: &Error) -> bool {
+    matches!(error, Error::NotRunning)
+}
+
+fn select_error(current: Option<Error>, candidate: Error) -> Option<Error> {
+    match current {
+        Some(existing) if !is_cancellation(&existing) || is_cancellation(&candidate) => {
+            Some(existing)
+        }
+        _ => Some(candidate),
     }
 }
 
@@ -526,9 +567,9 @@ fn topological_order(nodes: &[ExecNode], edges: &[(String, String)]) -> Result<V
 
 struct NodeRuntime {
     name: String,
-    element: Option<Box<dyn Element>>,
+    elements: Vec<Box<dyn Element>>,
     handle: ElementHandle,
-    inputs: HashMap<String, PipeReceiver>,
+    inputs: HashMap<String, Arc<Mutex<PipeReceiver>>>,
     outputs: HashMap<String, Vec<PipeSender>>,
 }
 
@@ -651,5 +692,132 @@ fn notify_watch(
 ) {
     if catch_unwind(AssertUnwindSafe(|| callback(result))).is_err() {
         error!("graph watch callback panicked");
+    }
+}
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use dg_core::DataType;
+    use serde_json::json;
+
+    use super::*;
+    use crate::element::{CreatedElement, PortSchema};
+    use crate::registry::ElementDescriptor;
+    use crate::spec::{GraphSpecBuilder, NodeSpec};
+
+    static THREADED_INSTANCE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    const TEST_INPUT: PortSchema = PortSchema {
+        name: "in",
+        dtype: Some(DataType::F32),
+        required: true,
+    };
+    const TEST_OUTPUT: PortSchema = PortSchema {
+        name: "out",
+        dtype: Some(DataType::F32),
+        required: false,
+    };
+
+    struct ThreadedPassthrough;
+
+    impl Element for ThreadedPassthrough {
+        fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
+            loop {
+                let packet = match io.recv("in")? {
+                    Some(packet) => packet,
+                    None => continue,
+                };
+                if packet.is_eos() {
+                    io.broadcast_eos()?;
+                    return Ok(());
+                }
+                io.send("out", packet)?;
+            }
+        }
+    }
+
+    fn create_threaded_passthrough(_: &NodeSpec) -> Result<CreatedElement> {
+        THREADED_INSTANCE_COUNT.fetch_add(1, Ordering::SeqCst);
+        Ok(CreatedElement {
+            element: Box::new(ThreadedPassthrough),
+            handle: ElementHandle::None,
+        })
+    }
+
+    inventory::submit! {
+        ElementDescriptor {
+            kind: "threaded_test_passthrough",
+            input_ports: &[TEST_INPUT],
+            output_ports: &[TEST_OUTPUT],
+            params: &[],
+            validate: None,
+            create: create_threaded_passthrough,
+        }
+    }
+
+    #[test]
+    fn pipeline_creates_and_runs_each_requested_instance() {
+        THREADED_INSTANCE_COUNT.store(0, Ordering::SeqCst);
+        let spec = GraphSpecBuilder::new()
+            .add_node(NodeSpec {
+                name: "source".to_string(),
+                kind: "source".to_string(),
+                params: json!({"count": 8, "shape": [1, 4]}),
+                ..NodeSpec::default()
+            })
+            .add_node(NodeSpec {
+                name: "threaded".to_string(),
+                kind: "threaded_test_passthrough".to_string(),
+                threads: Some(2),
+                params: json!({}),
+                ..NodeSpec::default()
+            })
+            .add_node(NodeSpec {
+                name: "sink".to_string(),
+                kind: "sink".to_string(),
+                params: json!({}),
+                ..NodeSpec::default()
+            })
+            .connect("source.out -> threaded.in")
+            .connect("threaded.out -> sink.in")
+            .build()
+            .expect("build threaded test graph");
+
+        let report = Graph::new(spec)
+            .expect("construct threaded test graph")
+            .run()
+            .expect("run threaded test graph");
+        assert_eq!(
+            THREADED_INSTANCE_COUNT.load(Ordering::SeqCst),
+            2,
+            "requested instances should each be created"
+        );
+        assert_eq!(report.sinks["sink"].len(), 8);
+    }
+
+    fn root_cause() -> Error {
+        Error::Element {
+            element: "decode".to_string(),
+            message: "recorded frame has an invalid payload size".to_string(),
+        }
+    }
+
+    #[test]
+    fn error_selection_prefers_root_cause_over_cancellation() {
+        let selected = select_error(Some(Error::NotRunning), root_cause());
+        assert!(matches!(selected, Some(Error::Element { .. })));
+    }
+
+    #[test]
+    fn error_selection_keeps_root_cause_when_cancellation_arrives_later() {
+        let selected = select_error(Some(root_cause()), Error::NotRunning);
+        assert!(matches!(selected, Some(Error::Element { .. })));
+    }
+
+    #[test]
+    fn cancellation_is_only_the_not_running_error() {
+        assert!(is_cancellation(&Error::NotRunning));
+        assert!(!is_cancellation(&root_cause()));
     }
 }

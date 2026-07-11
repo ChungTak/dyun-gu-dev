@@ -51,10 +51,11 @@ pub trait Element: Send {
 
 pub struct ElementIo {
     pub name: String,
-    pub inputs: HashMap<String, PipeReceiver>,
+    pub inputs: HashMap<String, Arc<Mutex<PipeReceiver>>>,
     pub outputs: HashMap<String, Vec<PipeSender>>,
     pub stop: Arc<AtomicBool>,
     pub send_backoff: Duration,
+    pub(crate) eos: Arc<Mutex<EosState>>,
 }
 
 impl ElementIo {
@@ -63,12 +64,45 @@ impl ElementIo {
             node: self.name.clone(),
             port: port.to_string(),
         })?;
+        let receiver = receiver
+            .lock()
+            .map_err(|_| Error::Runtime(format!("receive lock poisoned on {port}")))?;
         match receiver.recv_timeout(self.send_backoff) {
-            Ok(packet) => Ok(Some(packet)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Err(Error::Runtime(format!(
-                "receive failed on {port}: disconnected"
-            ))),
+            Ok(packet) => {
+                if packet.is_eos() {
+                    self.eos
+                        .lock()
+                        .map_err(|_| Error::Runtime("EOS state lock poisoned".to_string()))?
+                        .seen = true;
+                }
+                Ok(Some(packet))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let seen = self
+                    .eos
+                    .lock()
+                    .map_err(|_| Error::Runtime("EOS state lock poisoned".to_string()))?
+                    .seen;
+                if seen {
+                    Ok(Some(Packet::eos()))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let seen = self
+                    .eos
+                    .lock()
+                    .map_err(|_| Error::Runtime("EOS state lock poisoned".to_string()))?
+                    .seen;
+                if seen {
+                    Ok(Some(Packet::eos()))
+                } else {
+                    Err(Error::Runtime(format!(
+                        "receive failed on {port}: disconnected"
+                    )))
+                }
+            }
         }
     }
 
@@ -95,10 +129,28 @@ impl ElementIo {
     }
 
     pub fn broadcast_eos(&self) -> Result<()> {
+        let should_broadcast = {
+            let mut eos = self
+                .eos
+                .lock()
+                .map_err(|_| Error::Runtime("EOS state lock poisoned".to_string()))?;
+            eos.broadcasts += 1;
+            eos.broadcasts == eos.instances
+        };
+        if !should_broadcast {
+            return Ok(());
+        }
         let packet = Packet::eos();
         for port in self.outputs.keys() {
             self.send(port, packet.clone())?;
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct EosState {
+    pub seen: bool,
+    pub broadcasts: usize,
+    pub instances: usize,
 }
