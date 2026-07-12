@@ -1486,12 +1486,19 @@ name = "dg-openvino"
 version = "0.1.0"
 dependencies = [
  "dg-core",
+ "dg-openvino-sys",
  "dg-runtime",
  "inventory",
- "openvino",
  "serde",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "dg-openvino-sys"
+version = "0.1.0"
+dependencies = [
+ "openvino",
 ]
 
 [[package]]

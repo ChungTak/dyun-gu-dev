@@ -8,13 +8,13 @@ rust-version.workspace = true
 
 [features]
 default = []
-backend = ["dep:openvino", "openvino/runtime-linking"]
+backend = ["dep:dg-openvino-sys", "dg-openvino-sys/runtime-linking"]
 
 [dependencies]
 dg-core = { path = "../dg-core" }
 dg-runtime = { path = "../dg-runtime" }
 inventory.workspace = true
-openvino = { workspace = true, optional = true, default-features = false }
+dg-openvino-sys = { path = "../dg-openvino-sys", optional = true }
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

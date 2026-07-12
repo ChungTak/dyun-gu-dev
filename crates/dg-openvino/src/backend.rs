@@ -1,13 +1,13 @@
 use std::convert::TryFrom;
 
 use dg_core::{DataFormat, DataType, Shape, Tensor};
+use dg_openvino_sys::{
+    Core, DeviceType, ElementType, InferRequest, Model, Node, PartialShape, Tensor as OvTensor,
+};
 use dg_runtime::{
     supports_deployment, supports_device, supports_precision, BackendConfig, BackendDescriptor,
     BackendKind, BackendOptions, Error, InferBackend, ModelSource, Result, RuntimeOption,
     TensorInfo,
-};
-use openvino::{
-    Core, DeviceType, ElementType, InferRequest, Model, Node, PartialShape, Tensor as OvTensor,
 };
 use serde::Deserialize;
 use tracing::trace;
@@ -22,7 +22,7 @@ pub struct OpenVINOBackend {
     option: Option<RuntimeOption>,
     core: Option<Core>,
     model: Option<Model>,
-    compiled_model: Option<openvino::CompiledModel>,
+    compiled_model: Option<dg_openvino_sys::CompiledModel>,
     input_infos: Vec<TensorInfo>,
     output_infos: Vec<TensorInfo>,
     request: Option<InferRequest>,
@@ -394,8 +394,8 @@ impl InferBackend for OpenVINOBackend {
                         .map_err(|_| Error::InvalidOption("shape dimension overflow".to_string()))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let ov_shape =
-                openvino::Shape::new(&dims).map_err(|err| Error::Backend(err.to_string()))?;
+            let ov_shape = dg_openvino_sys::Shape::new(&dims)
+                .map_err(|err| Error::Backend(err.to_string()))?;
             let element_type = Self::map_element_type(info.dtype)?;
             let mut ov_tensor = OvTensor::new(element_type, &ov_shape)
                 .map_err(|err| Error::Backend(err.to_string()))?;

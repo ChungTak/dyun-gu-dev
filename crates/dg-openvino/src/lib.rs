@@ -4,9 +4,8 @@
 //!
 //! This crate intentionally ships as a feature-gated adapter for M1:
 //! - the default build is a no-op placeholder that does not require OpenVINO;
-//! - the `backend` feature enables the real implementation using the community
-//!   `openvino` crate, which keeps the crate usable on Rust 1.96.1 without a
-//!   bespoke `-sys` layer in this milestone.
+//! - the `backend` feature enables the real implementation through the
+//!   `dg-openvino-sys` FFI/link boundary around the community `openvino` crate.
 
 #[cfg(feature = "backend")]
 mod backend;
