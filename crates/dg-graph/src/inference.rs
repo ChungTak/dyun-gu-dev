@@ -6,7 +6,9 @@ use dg_runtime::{
     configure_backend, validate_runtime_option, BackendConfig, CoreSelection, Runtime,
     RuntimeOption,
 };
-use dg_scheduler::{Lease, Request, Scheduler, Topology};
+use dg_scheduler::{
+    InstancePool, Lease, Placement, Request, Scheduler, SchedulingPolicy, Topology,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::trace;
@@ -42,6 +44,7 @@ const DEVICE_VALUES: &[&str] = &[
     "sophon_tpu",
 ];
 const DEPLOY_MODE_VALUES: &[&str] = &["host", "soc"];
+const SCHEDULE_VALUES: &[&str] = &["least_loaded", "round_robin"];
 const INFERENCE_PARAMS: &[ParamField] = &[
     ParamField {
         name: "backend",
@@ -74,6 +77,16 @@ const INFERENCE_PARAMS: &[ParamField] = &[
         required: false,
     },
     ParamField {
+        name: "instances",
+        ty: ParamType::Uint,
+        required: false,
+    },
+    ParamField {
+        name: "schedule",
+        ty: ParamType::Enum(SCHEDULE_VALUES),
+        required: false,
+    },
+    ParamField {
         name: "reshape",
         ty: ParamType::Array(&ParamType::Uint),
         required: false,
@@ -96,14 +109,25 @@ inventory::submit! {
     }
 }
 
+enum InferenceExecution {
+    Single {
+        runtime: Runtime,
+        _lease: Option<Lease>,
+    },
+    Pool {
+        runtimes: Vec<Runtime>,
+        pool: InstancePool,
+        policy: SchedulingPolicy,
+    },
+}
+
 struct InferenceElement {
-    runtime: Runtime,
-    _lease: Option<Lease>,
+    execution: InferenceExecution,
 }
 
 impl Element for InferenceElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> Result<()> {
-        trace!(node = %io.name, backend = ?self.runtime.backend_kind(), "running inference element");
+        trace!(node = %io.name, "running inference element");
         loop {
             let packet = match io.recv("in") {
                 Ok(Some(packet)) => packet,
@@ -125,7 +149,24 @@ impl Element for InferenceElement {
                 .ok_or_else(|| Error::Runtime("inference expects a tensor payload".to_string()))?
                 .clone();
             let meta = packet.meta.clone();
-            for output in self.runtime.run(&[input])? {
+            let affinity_key = packet.meta.stream_id.as_deref();
+            let outputs = match &mut self.execution {
+                InferenceExecution::Single { runtime, .. } => runtime.run(&[input])?,
+                InferenceExecution::Pool {
+                    runtimes,
+                    pool,
+                    policy,
+                } => {
+                    let checkout = pool.checkout(*policy, affinity_key).map_err(|error| {
+                        Error::Runtime(format!(
+                            "inference pool checkout failed for node {}: {error}",
+                            io.name
+                        ))
+                    })?;
+                    runtimes[checkout.instance_index()].run(&[input])?
+                }
+            };
+            for output in outputs {
                 io.send("out", crate::Packet::tensor(output).with_meta(meta.clone()))?;
             }
         }
@@ -146,8 +187,28 @@ fn create_inference(node: &NodeSpec) -> Result<CreatedElement> {
 
 fn create_inference_inner(value: Value) -> Result<CreatedElement> {
     let plan = prepare_inference(value)?;
-    let (option, lease) = acquire_inference_lease(plan.option)?;
-    let mut runtime = Runtime::new(option)?;
+    let execution = if plan.instances <= 1 || plan.option.device.is_none() {
+        let (option, lease) = acquire_inference_lease(plan.option)?;
+        let mut runtime = Runtime::new(option)?;
+        validate_runtime_shape(&runtime)?;
+        if let Some(ref shape) = plan.reshape {
+            runtime.reshape(std::slice::from_ref(shape))?;
+        }
+        InferenceExecution::Single {
+            runtime,
+            _lease: lease,
+        }
+    } else {
+        create_inference_pool(plan)?
+    };
+
+    Ok(CreatedElement {
+        element: Box::new(InferenceElement { execution }),
+        handle: ElementHandle::None,
+    })
+}
+
+fn validate_runtime_shape(runtime: &Runtime) -> Result<()> {
     if runtime.input_count() != 1 {
         return Err(Error::Config(format!(
             "inference element requires a single-input model, got {} inputs",
@@ -157,17 +218,63 @@ fn create_inference_inner(value: Value) -> Result<CreatedElement> {
     if runtime.output_count() == 0 {
         return Err(Error::Config("inference model has no outputs".to_string()));
     }
-    if let Some(shape) = plan.reshape {
-        runtime.reshape(&[shape])?;
-    }
+    Ok(())
+}
 
-    Ok(CreatedElement {
-        element: Box::new(InferenceElement {
-            runtime,
-            _lease: lease,
-        }),
-        handle: ElementHandle::None,
+fn create_inference_pool(plan: InferencePlan) -> Result<InferenceExecution> {
+    let kind = plan
+        .option
+        .device
+        .ok_or_else(|| Error::Config("inference pool requires a selected device".to_string()))?;
+    let scheduler = inference_scheduler()?;
+    let core_selection = requested_core_selection(&plan.option);
+    let instance_count = usize::try_from(plan.instances)
+        .map_err(|_| Error::Config("inference instances value is too large".to_string()))?;
+    let pool = InstancePool::new(scheduler.clone(), kind, instance_count, core_selection)
+        .map_err(|error| Error::Config(format!("failed to create inference pool: {error}")))?;
+    let mut runtimes = Vec::with_capacity(pool.instance_count());
+    for placement in pool.placements() {
+        let option = option_for_placement(&plan.option, *placement, scheduler);
+        let mut runtime = Runtime::new(option)?;
+        if runtimes.is_empty() {
+            validate_runtime_shape(&runtime)?;
+        }
+        if let Some(ref shape) = plan.reshape {
+            runtime.reshape(std::slice::from_ref(shape))?;
+        }
+        runtimes.push(runtime);
+    }
+    Ok(InferenceExecution::Pool {
+        runtimes,
+        pool,
+        policy: plan.policy,
     })
+}
+
+fn requested_core_selection(option: &RuntimeOption) -> CoreSelection {
+    if option.core.is_explicit() {
+        option.core
+    } else if let Some(mask) = option.core_mask {
+        CoreSelection::Mask(mask)
+    } else {
+        CoreSelection::Auto
+    }
+}
+
+fn option_for_placement(
+    base: &RuntimeOption,
+    placement: Placement,
+    scheduler: &Scheduler,
+) -> RuntimeOption {
+    let mut option = base.clone();
+    option.device = Some(placement.kind);
+    option.device_id = Some(placement.device_id);
+    option.core = CoreSelection::Single(placement.core_id);
+    option.core_mask = None;
+    if option.deploy_mode.is_none() {
+        option.deploy_mode = Some(scheduler.topology().deployment());
+    }
+    option
 }
 
 fn acquire_inference_lease(mut option: RuntimeOption) -> Result<(RuntimeOption, Option<Lease>)> {
@@ -232,6 +339,8 @@ fn validate_inference(node: &NodeSpec) -> Result<()> {
 struct InferencePlan {
     option: RuntimeOption,
     reshape: Option<Shape>,
+    instances: u32,
+    policy: SchedulingPolicy,
 }
 
 fn prepare_inference(value: Value) -> Result<InferencePlan> {
@@ -256,6 +365,8 @@ fn prepare_inference(value: Value) -> Result<InferencePlan> {
     Ok(InferencePlan {
         option,
         reshape: params.reshape.map(Shape::new),
+        instances: params.instances,
+        policy: parse_schedule(&params.schedule)?,
     })
 }
 
@@ -273,10 +384,18 @@ struct InferenceParams {
     deploy_mode: Option<String>,
     #[serde(default)]
     core_mask: Option<u32>,
+    #[serde(default = "default_instances")]
+    instances: u32,
+    #[serde(default)]
+    schedule: Option<String>,
     #[serde(default)]
     reshape: Option<Vec<usize>>,
     #[serde(default)]
     options: Value,
+}
+
+fn default_instances() -> u32 {
+    1
 }
 
 fn parse_dtype(value: &str) -> Result<DataType> {
@@ -322,6 +441,16 @@ fn parse_deploy_mode(value: &str) -> Result<DeployMode> {
         "soc" => Ok(DeployMode::SoC),
         _ => Err(Error::Config(format!(
             "unsupported inference deploy_mode: {value}"
+        ))),
+    }
+}
+
+fn parse_schedule(value: &Option<String>) -> Result<SchedulingPolicy> {
+    match value.as_deref().unwrap_or("least_loaded") {
+        "least_loaded" => Ok(SchedulingPolicy::LeastLoaded),
+        "round_robin" => Ok(SchedulingPolicy::RoundRobin),
+        value => Err(Error::Config(format!(
+            "unsupported inference schedule: {value}"
         ))),
     }
 }
@@ -409,6 +538,83 @@ connections:
             .iter()
             .flat_map(|device| device.cores.iter())
             .all(|core| core.load == 0));
+    }
+
+    #[test]
+    fn multi_instance_inference_dispatches_with_round_robin() {
+        let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 4
+      shape: [1, 2]
+  - name: infer
+    kind: inference
+    params:
+      backend: mock
+      device: cpu
+      instances: 3
+      schedule: round_robin
+      options:
+        shape: [1, 2]
+        echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#;
+        let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
+            .expect("parse")
+            .normalize_with_base_dir(None)
+            .expect("normalize");
+        let report = Graph::new(spec).expect("build").run().expect("run");
+        assert_eq!(report.sinks.get("sink").expect("sink outputs").len(), 4);
+        let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
+        assert!(snapshot
+            .iter()
+            .flat_map(|device| device.cores.iter())
+            .all(|core| core.load == 0));
+    }
+
+    #[test]
+    fn multi_instance_inference_accepts_least_loaded_schedule() {
+        let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 2
+      shape: [1, 2]
+  - name: infer
+    kind: inference
+    params:
+      backend: mock
+      device: cpu
+      instances: 2
+      schedule: least_loaded
+      options:
+        shape: [1, 2]
+        echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#;
+        let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
+            .expect("parse")
+            .normalize_with_base_dir(None)
+            .expect("normalize");
+        let report = Graph::new(spec).expect("build").run().expect("run");
+        assert_eq!(report.sinks.get("sink").expect("sink outputs").len(), 2);
     }
 
     #[test]
