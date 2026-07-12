@@ -7,8 +7,9 @@ use std::fs;
 
 use dg_core::{CpuDevice, DataFormat, DataType, Shape, Tensor};
 use dg_runtime::{
-    BackendConfig, BackendDescriptor, BackendKind, BackendOptions, Error, InferBackend,
-    ModelSource, Result, RuntimeOption, TensorInfo, TensorRtOptions,
+    backend_capabilities, BackendConfig, BackendDescriptor, BackendKind, BackendOptions, Error,
+    InferBackend, ModelSource, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
+    TensorRtOptions,
 };
 use serde::Deserialize;
 use tracing::trace;
@@ -583,6 +584,19 @@ impl TensorRtBackend {
 impl InferBackend for TensorRtBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::TensorRt
+    }
+
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        let mut capabilities = backend_capabilities(BackendKind::TensorRt)
+            .map(RuntimeCapabilities::from_static)
+            .ok_or_else(|| {
+                Error::BackendUnavailable("TensorRT capabilities unavailable".to_string())
+            })?;
+        capabilities.device_count = ffi::cuda_device_count()?;
+        if capabilities.device_count == 0 {
+            capabilities.devices.clear();
+        }
+        Ok(capabilities)
     }
 
     fn init(&mut self, option: &RuntimeOption) -> Result<()> {

@@ -14,8 +14,9 @@ use std::ptr;
 
 use dg_core::{CpuDevice, Shape, Tensor};
 use dg_runtime::{
-    supports_precision, BackendConfig, BackendDescriptor, BackendKind, BackendOptions, Error,
-    InferBackend, ModelSource, Result, RuntimeOption, SophonOptions, TensorInfo,
+    backend_capabilities, supports_precision, BackendConfig, BackendDescriptor, BackendKind,
+    BackendOptions, Error, InferBackend, ModelSource, Result, RuntimeCapabilities, RuntimeOption,
+    SophonOptions, TensorInfo,
 };
 use serde::Deserialize;
 use tracing::{debug, trace};
@@ -271,6 +272,12 @@ impl SophonBackend {
 impl InferBackend for SophonBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Sophon
+    }
+
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        backend_capabilities(BackendKind::Sophon)
+            .map(RuntimeCapabilities::from_static)
+            .ok_or_else(|| Error::BackendUnavailable("Sophon capabilities unavailable".to_string()))
     }
 
     fn init(&mut self, option: &RuntimeOption) -> Result<()> {

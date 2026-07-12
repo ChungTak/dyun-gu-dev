@@ -48,6 +48,26 @@ fn mock_backend_registry_and_run_identity() {
 }
 
 #[test]
+fn runtime_capabilities_reflect_mock_probe() {
+    let option = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions::default()),
+    );
+    let runtime = Runtime::new(option).expect("construct runtime");
+    assert_eq!(
+        runtime.capabilities().sdk_version.as_deref(),
+        Some("mock-1")
+    );
+    assert_eq!(runtime.capabilities().device_count, 1);
+    assert_eq!(runtime.capabilities().devices, vec![DeviceKind::Cpu]);
+    assert!(runtime.capabilities().supports_precision(DataType::F32));
+    assert!(runtime
+        .capabilities()
+        .supports_deployment(dg_core::DeployMode::Host));
+}
+
+#[test]
 fn mock_backend_rejects_unsupported_precision() {
     let option = RuntimeOption::new(
         BackendKind::Mock,
@@ -60,6 +80,47 @@ fn mock_backend_rejects_unsupported_precision() {
         .err()
         .expect("precision should be rejected");
     assert!(matches!(err, dg_runtime::Error::UnsupportedPrecision(_)));
+}
+
+#[test]
+fn runtime_rejects_requests_missing_from_probed_capabilities() {
+    let base = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions::default()),
+    );
+
+    let err = match Runtime::new(base.clone().with_precision(DataType::F16)) {
+        Ok(_) => panic!("mock probe should reject F16"),
+        Err(err) => err,
+    };
+    let Error::CapabilityUnsupported(message) = err else {
+        panic!("expected probed precision diagnostic");
+    };
+    assert!(message.contains("backend Mock"));
+    assert!(message.contains("F16"));
+    assert!(message.contains("sdk_version=mock-1"));
+    assert!(message.contains("available_devices=[Cpu]"));
+
+    let err = match Runtime::new(base.clone().with_device(DeviceKind::IntelGpu)) {
+        Ok(_) => panic!("mock probe should reject Intel GPU"),
+        Err(err) => err,
+    };
+    let Error::CapabilityUnsupported(message) = err else {
+        panic!("expected probed device diagnostic");
+    };
+    assert!(message.contains("IntelGpu"));
+    assert!(message.contains("available_devices=[Cpu]"));
+
+    let err = match Runtime::new(base.with_deploy_mode(dg_core::DeployMode::SoC)) {
+        Ok(_) => panic!("mock probe should reject SoC"),
+        Err(err) => err,
+    };
+    let Error::CapabilityUnsupported(message) = err else {
+        panic!("expected probed deployment diagnostic");
+    };
+    assert!(message.contains("SoC"));
+    assert!(message.contains("available_deploy_modes=[Host]"));
 }
 
 #[test]

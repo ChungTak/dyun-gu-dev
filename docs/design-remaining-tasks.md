@@ -58,7 +58,7 @@
 | SYS-04 | 进行中 | `dg-sophon-sys` 分层 | BMRuntime/bmlib bindings、link 和 raw calls 移入 `dg-sophon-sys` | 无 |
 | BE-01 | 未开始 | RKNN/Sophon 无硬件 adapter type-check | stub sys 覆盖真实 backend 模块，而非只测纯转换函数；默认 CI 能发现 adapter 编译回归 | SYS-02、SYS-04 |
 | RT-01 | 进行中 | 补齐统一 `RuntimeOption` 与 stream-aware inference API | 支持 device_id/core selection、cpu threads、model format、external stream、zero-copy/dynamic-shape 通用入口；`InferBackend` 提供非阻塞 submit/poll 或等价 stream API | CORE-01 |
-| RT-02 | 未开始 | 运行期 SDK/设备能力探测 | 各后端 init 查询 SDK 版本、设备、精度和部署能力；静态表仅为无硬件 fallback；不支持时给出明确诊断且不静默降级 | SYS-01 至 SYS-04 |
+| RT-02 | 进行中 | 运行期 SDK/设备能力探测 | 各后端 init 查询 SDK 版本、设备、精度和部署能力；静态表仅为无硬件 fallback；不支持时给出明确诊断且不静默降级 | SYS-01 至 SYS-04 |
 | SCH-01 | 未开始 | 设备发现与 scheduler/runtime 接线 | 枚举设备/核心形成 topology；Graph inference 创建后端前获取 lease，并把 device/core/deploy mode 写入 RuntimeOption | RT-01、RT-02 |
 | SCH-02 | 未开始 | 多实例负载均衡 | 同模型按 core/card 创建实例池；支持 least-loaded、round-robin、显式绑定和 stream affinity；lease 生命周期反映在途负载 | SCH-01 |
 | MEM-01 | 未开始 | 真正的外部设备 buffer | `Buffer` 可只持 dma-buf/device ptr 而不分配等长 host Vec；host 访问必须显式 map/stage；C ABI 导入保持 RAII 所有权 | CORE-01、SYS-02 至 SYS-04 |
@@ -89,6 +89,10 @@
 > RT-01 说明：`dg-runtime` 增加统一 `RuntimeOption` 字段、`run_with_stream`
 > 以及 `Runtime` 的 submit/poll 入口；厂商字段映射延后到 RT-02、SCH-01 和
 > MEM-02。
+
+> RT-02 说明：`dg-runtime` 增加运行期 capability probe、静态表 fallback
+> 以及显式 no-downgrade 诊断；厂商 probe override 按 backend feature
+> 隔离，需 SDK 的路径仅做编译覆盖，默认构建保持 SDK-free。
 
 ## C. 多媒体、流媒体与 element
 

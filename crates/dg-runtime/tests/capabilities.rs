@@ -1,6 +1,7 @@
 use dg_core::{DataType, DeployMode, DeviceKind, TypeCode};
 use dg_runtime::{
     backend_capabilities, supports_deployment, supports_device, supports_precision, BackendKind,
+    RuntimeCapabilities,
 };
 
 #[test]
@@ -28,6 +29,19 @@ fn capability_matrix_reports_expected_support() {
     let unsupported = DataType::new(TypeCode::Int, 128, 1);
     assert!(!supports_precision(BackendKind::OpenVINO, unsupported));
     assert!(!supports_precision(BackendKind::Rknn, unsupported));
+}
+
+#[test]
+fn runtime_capabilities_convert_static_records() {
+    let static_caps = backend_capabilities(BackendKind::Rknn).expect("RKNN capabilities");
+    let capabilities = RuntimeCapabilities::from_static(static_caps);
+
+    assert_eq!(capabilities.sdk_version, None);
+    assert_eq!(capabilities.device_count, capabilities.devices.len());
+    assert!(capabilities.supports_precision(DataType::F32));
+    assert!(capabilities.supports_device(DeviceKind::RknnNpu));
+    assert!(capabilities.supports_deployment(DeployMode::SoC));
+    assert!(!capabilities.supports_deployment(DeployMode::Host));
 }
 
 #[test]
