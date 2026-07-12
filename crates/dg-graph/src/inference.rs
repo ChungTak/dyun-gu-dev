@@ -1,9 +1,12 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use dg_core::{DataType, DeployMode, DeviceKind, Shape, TypeCode};
 use dg_runtime::{
-    configure_backend, validate_runtime_option, BackendConfig, Runtime, RuntimeOption,
+    configure_backend, validate_runtime_option, BackendConfig, CoreSelection, Runtime,
+    RuntimeOption,
 };
+use dg_scheduler::{Lease, Request, Scheduler, Topology};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::trace;
@@ -95,6 +98,7 @@ inventory::submit! {
 
 struct InferenceElement {
     runtime: Runtime,
+    _lease: Option<Lease>,
 }
 
 impl Element for InferenceElement {
@@ -142,7 +146,8 @@ fn create_inference(node: &NodeSpec) -> Result<CreatedElement> {
 
 fn create_inference_inner(value: Value) -> Result<CreatedElement> {
     let plan = prepare_inference(value)?;
-    let mut runtime = Runtime::new(plan.option)?;
+    let (option, lease) = acquire_inference_lease(plan.option)?;
+    let mut runtime = Runtime::new(option)?;
     if runtime.input_count() != 1 {
         return Err(Error::Config(format!(
             "inference element requires a single-input model, got {} inputs",
@@ -157,9 +162,67 @@ fn create_inference_inner(value: Value) -> Result<CreatedElement> {
     }
 
     Ok(CreatedElement {
-        element: Box::new(InferenceElement { runtime }),
+        element: Box::new(InferenceElement {
+            runtime,
+            _lease: lease,
+        }),
         handle: ElementHandle::None,
     })
+}
+
+fn acquire_inference_lease(mut option: RuntimeOption) -> Result<(RuntimeOption, Option<Lease>)> {
+    let Some(kind) = option.device else {
+        return Ok((option, None));
+    };
+
+    let scheduler = inference_scheduler()?;
+    let core_selection = if option.core.is_explicit() {
+        option.core
+    } else if let Some(mask) = option.core_mask {
+        CoreSelection::Mask(mask)
+    } else {
+        CoreSelection::Auto
+    };
+    let request = if let Some(device_id) = option.device_id {
+        Request::explicit(kind, device_id, core_selection)
+    } else {
+        Request::auto(kind).with_core_selection(core_selection)
+    };
+    let lease = scheduler.acquire(request).map_err(|error| {
+        Error::Config(format!(
+            "scheduler could not acquire {kind:?} device/core lease: {error}"
+        ))
+    })?;
+    let (leased_kind, device_id) = lease.device();
+    option.device = Some(leased_kind);
+    option.device_id = Some(device_id);
+    option.core = CoreSelection::Single(lease.core_id());
+    option.core_mask = None;
+    if option.deploy_mode.is_none() {
+        option.deploy_mode = Some(scheduler.topology().deployment());
+    }
+    Ok((option, Some(lease)))
+}
+
+fn inference_scheduler() -> Result<&'static Scheduler> {
+    static SCHEDULER: OnceLock<std::result::Result<Scheduler, String>> = OnceLock::new();
+    match SCHEDULER.get_or_init(|| {
+        Topology::from_registered_devices(1)
+            .and_then(Scheduler::new)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(scheduler) => Ok(scheduler),
+        Err(error) => Err(Error::Config(format!(
+            "failed to initialize inference scheduler: {error}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+fn inference_scheduler_snapshot() -> Result<Vec<dg_scheduler::DeviceLoad>> {
+    inference_scheduler()?
+        .snapshot()
+        .map_err(|error| Error::Runtime(format!("failed to inspect inference scheduler: {error}")))
 }
 
 fn validate_inference(node: &NodeSpec) -> Result<()> {
@@ -265,6 +328,7 @@ fn parse_deploy_mode(value: &str) -> Result<DeployMode> {
 
 #[cfg(test)]
 mod tests {
+    use super::inference_scheduler_snapshot;
     use crate::{Graph, GraphFormat, GraphSpec};
 
     #[test]
@@ -301,6 +365,50 @@ connections:
         let outputs = report.sinks.get("sink").expect("sink outputs");
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].desc().shape().dims(), &[1, 2]);
+    }
+
+    #[test]
+    fn device_selected_inference_acquires_and_releases_scheduler_lease() {
+        let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 1
+      shape: [1, 2]
+  - name: infer
+    kind: inference
+    params:
+      backend: mock
+      device: cpu
+      options:
+        shape: [1, 2]
+        echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#;
+        let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml)
+            .expect("parse")
+            .normalize_with_base_dir(None)
+            .expect("normalize");
+        let report = Graph::new(spec).expect("build").run().expect("run");
+        assert_eq!(
+            report.sinks.get("sink").expect("sink outputs")[0]
+                .buffer()
+                .read_bytes(),
+            vec![0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
+        assert!(snapshot
+            .iter()
+            .flat_map(|device| device.cores.iter())
+            .all(|core| core.load == 0));
     }
 
     #[test]

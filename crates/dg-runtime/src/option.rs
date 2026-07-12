@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+pub use dg_core::CoreSelection;
 use dg_core::{DataType, DeployMode, DeviceKind, StreamKind};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -42,16 +43,6 @@ impl ModelFormat {
             _ => Self::Auto,
         }
     }
-}
-
-/// Backend-agnostic device core selection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CoreSelection {
-    #[default]
-    Auto,
-    Single(u8),
-    Mask(u32),
-    All,
 }
 
 /// Opaque stream handle for backend-specific interpretation.

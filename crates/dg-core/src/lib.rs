@@ -7,6 +7,7 @@
 //! will compose.
 
 mod buffer;
+mod core;
 mod datatype;
 mod deployment;
 mod detection;
@@ -20,6 +21,7 @@ mod stream;
 mod tensor;
 
 pub use buffer::{Buffer, BufferDesc};
+pub use core::CoreSelection;
 pub use datatype::{
     pack_float4, pack_int4, unpack_float4, unpack_int4, DataType, NativeDataType, TypeCode,
 };
