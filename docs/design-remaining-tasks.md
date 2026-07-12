@@ -86,9 +86,10 @@
 > `native-free-software` 接线已移除。
 >
 > 对硬件解码可能产生的 YUV 图像，颜色空间转换不在 `dg-media` 手写实现，而是委托给
-> avcodec 的 `ImageProcessor` `Csc` 操作；当前通过 SDK 的 `libyuv` backend（无外部 SDK
-> 的 Cargo 构建依赖）转换为 `Rgb24`，再进入下游 `MediaFrame`。若运行时没有可用 CSC
-> processor，则显式返回错误，不静默降级。详见
+> avcodec 的 `ImageProcessor` `Csc` 操作；该选择同样遵循解码硬件偏好，Rockchip/Auto
+> 优先尝试 `librga`，再回退到无外部 SDK 构建依赖的 `libyuv` 软件 backend，转换为
+> `Rgb24` 后进入下游 `MediaFrame`。若运行时没有可用 CSC processor，则显式返回错误，
+> 不静默降级。详见
 > [docs/upstream/avcodec-rs-media01-requirements.md §0](upstream/avcodec-rs-media01-requirements.md)。
 
 ## D. 可观测性、测试与交付

@@ -81,6 +81,16 @@ fn backend_candidates(codec: CodecId, hw: HwPreference, encode: bool) -> Vec<&'s
         .collect()
 }
 
+fn csc_candidates(hw: HwPreference) -> Vec<&'static str> {
+    let hardware = match hw {
+        HwPreference::Auto | HwPreference::Rockchip => vec!["librga"],
+        HwPreference::Nvidia | HwPreference::Intel | HwPreference::Amd | HwPreference::Software => {
+            Vec::new()
+        }
+    };
+    hardware.into_iter().chain(["libyuv"]).collect()
+}
+
 fn no_backend_error(
     codec: CodecId,
     hw: HwPreference,
@@ -94,6 +104,27 @@ fn no_backend_error(
             .iter()
             .map(|candidate| match *candidate {
                 "jpeg" | "zune" => "`avcodec` (jpeg/zune)".to_string(),
+                other => format!("`codec-{other}`"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn no_csc_backend_error(
+    codec: CodecId,
+    hw: HwPreference,
+    candidates: &[&'static str],
+    attempts: &[String],
+) -> Error {
+    Error::Media(format!(
+        "no CSC image processor available for codec {codec:?} with hardware preference {hw:?}; attempted [{}]; enable one of cargo features: {}",
+        attempts.join("; "),
+        candidates
+            .iter()
+            .map(|candidate| match *candidate {
+                "librga" => "`codec-librga`".to_string(),
+                "libyuv" => "`avcodec` (libyuv)".to_string(),
                 other => format!("`codec-{other}`"),
             })
             .collect::<Vec<_>>()
@@ -242,19 +273,31 @@ fn is_end_of_stream(error: &AvError) -> bool {
     error.kind() == AvErrorKind::EndOfStream
 }
 
-fn create_csc_processor() -> Result<Box<dyn ImageProcessor>> {
+fn create_csc_processor(codec: CodecId, hw: HwPreference) -> Result<Box<dyn ImageProcessor>> {
+    let candidates = csc_candidates(hw);
     let config = ImageProcessorConfig::new()
         .with_memory_domain(MemoryDomain::Host)
         .with_allow_staging(true)
         .with_target_op(dg_media_avcodec::ImageOpKind::Csc);
-    registry()
-        .create_image_processor(&config)
-        .map_err(map_av_error)
+    let registry = registry();
+    let mut attempts = Vec::new();
+    for candidate in &candidates {
+        let hinted = config.with_backend_hint(Some(candidate));
+        match registry.create_image_processor(&hinted) {
+            Ok(processor) => return Ok(processor),
+            Err(error) if is_skippable_selection_error(&error) => {
+                attempts.push(format!("{candidate}: {}", map_av_error(error)));
+            }
+            Err(error) => return Err(map_av_error(error)),
+        }
+    }
+    Err(no_csc_backend_error(codec, hw, &candidates, &attempts))
 }
 
 pub struct DecodeCore {
     decoder: Box<dyn Decoder>,
     codec: CodecId,
+    hw: HwPreference,
     eos: bool,
     pending_error: Option<Error>,
     csc_processor: Option<Box<dyn ImageProcessor>>,
@@ -266,6 +309,7 @@ impl DecodeCore {
         Ok(Self {
             decoder,
             codec,
+            hw,
             eos: false,
             pending_error: None,
             csc_processor: None,
@@ -305,7 +349,7 @@ impl DecodeCore {
                 if image.format == dg_media_avcodec::ImageInfo::Yuv420p
                     && self.csc_processor.is_none()
                 {
-                    self.csc_processor = Some(create_csc_processor()?);
+                    self.csc_processor = Some(create_csc_processor(self.codec, self.hw)?);
                 }
                 let processor = self
                     .csc_processor
@@ -481,7 +525,10 @@ impl ResizeCore {
 
 #[cfg(test)]
 mod tests {
-    use super::{codec_from_name, create_decoder, create_encoder, HwPreference};
+    use super::{
+        codec_from_name, create_csc_processor, create_decoder, create_encoder, csc_candidates,
+        HwPreference,
+    };
     use dg_media_avcodec::{CodecId, Image, ImageInfo};
 
     #[test]
@@ -512,6 +559,25 @@ mod tests {
         let image = Image::new_host_packed(ImageInfo::Rgb24, 2, 2, 0, 6, vec![0; 12], 1)
             .expect("valid JPEG image");
         assert!(create_encoder(CodecId::Jpeg, HwPreference::Auto, &image).is_ok());
+    }
+
+    #[test]
+    fn csc_candidates_prefer_rockchip_hardware() {
+        assert_eq!(
+            csc_candidates(HwPreference::Rockchip),
+            vec!["librga", "libyuv"]
+        );
+        assert_eq!(csc_candidates(HwPreference::Auto), vec!["librga", "libyuv"]);
+    }
+
+    #[test]
+    fn software_csc_candidates_skip_hardware() {
+        assert_eq!(csc_candidates(HwPreference::Software), vec!["libyuv"]);
+    }
+
+    #[test]
+    fn default_registry_creates_software_csc_processor() {
+        assert!(create_csc_processor(CodecId::H264, HwPreference::Software).is_ok());
     }
 
     #[test]
