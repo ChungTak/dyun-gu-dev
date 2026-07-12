@@ -8,9 +8,10 @@
 //! consume the scheduler to map backend requests onto concrete device/core
 //! placements.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+pub use dg_core::CoreSelection;
 use dg_core::{DeployMode, DeviceKind};
 use thiserror::Error;
 
@@ -89,6 +90,25 @@ impl Topology {
         )
     }
 
+    /// Builds a topology from adapters registered in `dg-core`.
+    ///
+    /// Discovery intentionally uses a caller-provided uniform core hint until
+    /// runtime capability probes can supply device-specific counts.
+    pub fn from_registered_devices(core_count_hint: u8) -> Result<Self> {
+        let core_count = core_count_hint.max(1);
+        let mut seen = HashSet::new();
+        let devices = dg_core::registered_device_kinds()
+            .into_iter()
+            .filter(|kind| seen.insert(*kind))
+            .map(|kind| Device {
+                kind,
+                id: 0,
+                cores: cores_from_count(core_count),
+            })
+            .collect();
+        Self::new(DeployMode::Host, devices)
+    }
+
     pub fn single_card_multi_core(kind: DeviceKind, card: u16, core_count: u8) -> Result<Self> {
         Self::new(
             DeployMode::Host,
@@ -121,29 +141,6 @@ impl Topology {
 
     pub fn devices(&self) -> &[Device] {
         &self.devices
-    }
-}
-
-/// Core selection expressed as a bitmask-compatible request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoreSelection {
-    Auto,
-    Single(u8),
-    Mask(u32),
-    All,
-}
-
-impl CoreSelection {
-    fn contains(self, core_id: u8) -> bool {
-        match self {
-            Self::Auto | Self::All => true,
-            Self::Single(selected) => selected == core_id,
-            Self::Mask(mask) => mask & (1u32 << u32::from(core_id)) != 0,
-        }
-    }
-
-    fn is_explicit(self) -> bool {
-        !matches!(self, Self::Auto)
     }
 }
 
@@ -615,6 +612,20 @@ mod tests {
             .acquire(Request::auto(DeviceKind::CudaGpu))
             .expect_err("no device");
         assert!(matches!(err, Error::NoMatchingDevice { kind } if kind == DeviceKind::CudaGpu));
+    }
+
+    #[test]
+    fn topology_discovers_registered_devices() {
+        let topology = Topology::from_registered_devices(0).expect("registered topology");
+        assert!(topology
+            .devices()
+            .iter()
+            .any(|device| device.kind == DeviceKind::Cpu));
+        assert!(topology
+            .devices()
+            .iter()
+            .all(|device| device.cores.len() == 1));
+        assert_eq!(topology.deployment(), DeployMode::Host);
     }
 
     proptest! {
