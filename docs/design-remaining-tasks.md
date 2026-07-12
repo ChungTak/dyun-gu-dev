@@ -94,6 +94,11 @@
 > 以及显式 no-downgrade 诊断；厂商 probe override 按 backend feature
 > 隔离，需 SDK 的路径仅做编译覆盖，默认构建保持 SDK-free。
 
+> TEST-01 说明：`dg-runtime` 提供可复用的固定张量回归 harness，支持每个
+> case 配置 absolute/relative epsilon 与 cosine threshold；JSON fixtures
+> 通过 mock backend 在普通 `cargo test --workspace` 中执行，并在形状、
+> NaN、误差超限时报告具体 tensor/index 上下文。
+
 > SCH-01 说明：`CoreSelection` 统一下沉到 `dg-core`，注册设备用于构建
 > topology；Graph inference 获取 lease 并回写 RuntimeOption 的 device/core/deploy；
 > 多实例负载均衡池、round-robin 和 stream affinity 在 SCH-02 实现。
@@ -142,7 +147,7 @@
 | ID | 状态 | 独立 PR 范围 | 验收条件 | 依赖 |
 |---|---|---|---|---|
 | OBS-01 | 未开始 | element 运行指标 | 每节点输出吞吐、处理时延、队列深度、drop/backpressure 计数；结构化 tracing 可测试，保留后续 Prometheus 接口 | 无 |
-| TEST-01 | 未开始 | 精度回归 harness | 固定输入/参考输出、余弦相似度阈值、可复用 backend runner；mock 与 OpenVINO 进入通用 CI，硬件后端复用同一格式 | RT-02 |
+| TEST-01 | 已完成 | 精度回归 harness | 固定输入/参考输出、余弦相似度阈值、可复用 backend runner；mock 与 OpenVINO 进入通用 CI，硬件后端复用同一格式 | RT-02 |
 | TEST-02 | 未开始 | OpenVINO CPU 真实 CI | 安装/缓存 OpenVINO runtime，启用 backend feature，执行真实模型 load → infer → compare，并对 feature path clippy | SYS-01、TEST-01 |
 | TEST-03 | 未开始 | 补齐模型/码流 fuzz target | 除现有 config/C ABI 外，覆盖媒体码流/模型元数据等不可信解析面；CI 至少执行 `cargo fuzz check` | MEDIA-01 |
 | DEMO-01 | 未开始 | 无硬件多路流多算法综合 demo | `mock://` 多路输入经 decode/resize/inference/track/osd/push 跑通，CLI 集成测试验证，并记录 planned copy count | APP-01、MEDIA-02 |
