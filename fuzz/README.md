@@ -8,6 +8,8 @@ Install `cargo-fuzz` and use a nightly toolchain:
 
 ```text
 cargo install cargo-fuzz
+```
+
 From the repository root:
 
 ```text
@@ -17,7 +19,6 @@ cargo +nightly fuzz check runtime-backend-options
 cargo +nightly fuzz run graph-spec
 cargo +nightly fuzz run capi-load-string
 cargo +nightly fuzz run runtime-backend-options
-```
 ```
 
 `graph-spec` exercises YAML, JSON, and TOML configuration parsing. The
