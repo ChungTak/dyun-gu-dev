@@ -269,6 +269,7 @@ impl Element for StreamPushElement {
                     )));
                 }
             }
+            io.finish_packet()?;
             let keyframe_requests = self.sink.take_keyframe_requests();
             if keyframe_requests > 0 {
                 debug!(node = %io.name, keyframe_requests, "keyframe requested by remote peer");
