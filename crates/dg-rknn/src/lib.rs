@@ -2,8 +2,8 @@
 //!
 //! The default build is a no-op placeholder so the workspace stays green on
 //! machines without vendor SDKs. Enabling the `backend` feature switches the
-//! crate to the real RKNN runtime adapter and requires `RKNN_SDK_ROOT` to point
-//! at a local SDK installation.
+//! crate to the real RKNN runtime adapter through `dg-rknn-sys`, which requires
+//! `RKNN_SDK_ROOT` to point at a local SDK installation.
 
 #[cfg(feature = "backend")]
 mod backend;

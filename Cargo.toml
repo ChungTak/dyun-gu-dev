@@ -7,6 +7,7 @@ members = [
     "crates/dg-openvino-sys",
     "crates/dg-sophon",
     "crates/dg-rknn",
+    "crates/dg-rknn-sys",
     "crates/dg-tensorrt",
     "crates/dg-scheduler",
     "crates/dg-graph",
