@@ -35,7 +35,7 @@ fn main() {
     // Surface the resolved deployment target so mismatched SDK roots are easy to
     // spot in build logs; the runtime guard rejects mode mismatches.
     println!(
-        "cargo:warning=building dg-sophon for {} deployment",
+        "cargo:warning=building dg-sophon-sys for {} deployment",
         if soc { "SoC" } else { "Host (PCIe)" }
     );
 

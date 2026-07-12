@@ -1546,14 +1546,21 @@ dependencies = [
 name = "dg-sophon"
 version = "0.1.0"
 dependencies = [
- "bindgen 0.70.1",
  "dg-core",
  "dg-runtime",
+ "dg-sophon-sys",
  "inventory",
  "libc",
  "serde",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "dg-sophon-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen 0.70.1",
 ]
 
 [[package]]
