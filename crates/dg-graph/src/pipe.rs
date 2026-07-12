@@ -1,6 +1,8 @@
 //! Bounded/unbounded typed packet queues connecting graph elements.
 
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, TrySendError};
+use std::sync::mpsc::{
+    channel, sync_channel, Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError,
+};
 use std::time::Duration;
 
 use crate::packet::Packet;
@@ -66,5 +68,9 @@ pub struct PipeReceiver {
 impl PipeReceiver {
     pub fn recv_timeout(&self, timeout: Duration) -> std::result::Result<Packet, RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
+    }
+
+    pub fn try_recv(&self) -> std::result::Result<Packet, TryRecvError> {
+        self.receiver.try_recv()
     }
 }

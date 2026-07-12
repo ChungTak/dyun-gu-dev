@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use dg_core::{CpuDevice, DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
-use dg_graph::{Graph, GraphSpecBuilder, NodeSpec};
+use dg_graph::{Graph, GraphDiff, GraphSpecBuilder, NodeSpec};
 use serde_json::json;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -245,4 +245,64 @@ fn pipeline_rejects_multi_instanced_special_handles_at_build_time() {
         .run()
         .expect_err("sink handles cannot be multi-instanced");
     assert!(sink_error.to_string().contains("cannot be multi-instanced"));
+}
+
+#[test]
+fn running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomically() {
+    let spec = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            params: json!({"count": 128, "shape": [1, 4], "start": 1.0}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            params: json!({"shape": [1, 4], "echo_inputs": true}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> infer.in")
+        .connect("infer.out -> sink.in")
+        .build()
+        .expect("build running graph spec");
+    let graph = Graph::new(spec).expect("construct running graph");
+    let mut running = graph.start(HashMap::new()).expect("start running graph");
+
+    let replacement = NodeSpec {
+        name: "infer".to_string(),
+        kind: "mock_inference".to_string(),
+        params: json!({"shape": [1, 4], "echo_inputs": false, "fill_value": 7}),
+        ..NodeSpec::default()
+    };
+    running
+        .apply_hot_update(GraphDiff {
+            updated_nodes: vec![replacement],
+            ..GraphDiff::default()
+        })
+        .expect("replace running worker");
+
+    let invalid = GraphDiff {
+        added_nodes: vec![NodeSpec {
+            name: "broken".to_string(),
+            kind: "does_not_exist".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        }],
+        ..GraphDiff::default()
+    };
+    assert!(running.apply_hot_update(invalid).is_err());
+
+    let report = running.finish().expect("finish updated graph");
+    let outputs = report.sinks.get("sink").expect("sink outputs");
+    assert!(!outputs.is_empty());
+    assert!(outputs
+        .iter()
+        .any(|tensor| { tensor.buffer().read_bytes().iter().all(|byte| *byte == 7) }));
 }

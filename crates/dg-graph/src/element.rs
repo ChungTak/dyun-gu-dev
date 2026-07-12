@@ -52,13 +52,18 @@ pub trait Element: Send {
 pub struct ElementIo {
     pub name: String,
     pub inputs: HashMap<String, Arc<Mutex<PipeReceiver>>>,
-    pub outputs: HashMap<String, Vec<PipeSender>>,
+    pub outputs: HashMap<String, Arc<Mutex<Vec<PipeSender>>>>,
     pub stop: Arc<AtomicBool>,
+    pub(crate) control: Arc<NodeControl>,
     pub send_backoff: Duration,
     pub(crate) eos: Arc<Mutex<EosState>>,
 }
 
 impl ElementIo {
+    pub fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.control.stop.load(Ordering::Relaxed)
+    }
+
     pub fn recv(&self, port: &str) -> Result<Option<Packet>> {
         let receiver = self.inputs.get(port).ok_or_else(|| Error::UnknownPort {
             node: self.name.clone(),
@@ -78,6 +83,9 @@ impl ElementIo {
                 Ok(Some(packet))
             }
             Err(RecvTimeoutError::Timeout) => {
+                if self.should_stop() {
+                    return Err(Error::NotRunning);
+                }
                 let seen = self
                     .eos
                     .lock()
@@ -90,6 +98,9 @@ impl ElementIo {
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
+                if self.should_stop() {
+                    return Err(Error::NotRunning);
+                }
                 let seen = self
                     .eos
                     .lock()
@@ -111,9 +122,12 @@ impl ElementIo {
             node: self.name.clone(),
             port: port.to_string(),
         })?;
-        for sender in senders {
+        let senders = senders
+            .lock()
+            .map_err(|_| Error::Runtime(format!("send lock poisoned on {port}")))?;
+        for sender in senders.iter() {
             loop {
-                if self.stop.load(Ordering::Relaxed) {
+                if self.should_stop() {
                     return Err(Error::NotRunning);
                 }
                 match sender.try_send(packet.clone()) {
@@ -146,6 +160,11 @@ impl ElementIo {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NodeControl {
+    pub stop: AtomicBool,
 }
 
 #[derive(Debug)]
