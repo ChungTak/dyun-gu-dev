@@ -200,14 +200,42 @@ name = "avcodec"
 version = "0.1.0"
 source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
 dependencies = [
+ "avcodec-backend-amf",
+ "avcodec-backend-ffmpeg",
  "avcodec-backend-jpeg",
- "avcodec-backend-rust-h264",
+ "avcodec-backend-librga",
+ "avcodec-backend-libyuv",
+ "avcodec-backend-nvcodec",
+ "avcodec-backend-onevpl",
+ "avcodec-backend-openh264",
+ "avcodec-backend-rkmpp",
+ "avcodec-backend-x264",
+ "avcodec-backend-x265",
  "avcodec-backend-zune",
  "avcodec-core-model",
  "avcodec-core-pipeline",
  "avcodec-core-plugin-api",
  "avcodec-runtime-native",
  "avcodec-runtime-web",
+]
+
+[[package]]
+name = "avcodec-backend-amf"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-amf",
+ "avcodec-core-model",
+ "shiguredo_amf",
+]
+
+[[package]]
+name = "avcodec-backend-ffmpeg"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-ffmpeg",
+ "avcodec-core-model",
 ]
 
 [[package]]
@@ -221,13 +249,81 @@ dependencies = [
 ]
 
 [[package]]
-name = "avcodec-backend-rust-h264"
+name = "avcodec-backend-librga"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-librga",
+ "avcodec-core-model",
+ "libc",
+]
+
+[[package]]
+name = "avcodec-backend-libyuv"
 version = "0.1.0"
 source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
 dependencies = [
  "avcodec-core-model",
- "rust_h264",
- "rusty_h264",
+ "shiguredo_libyuv",
+]
+
+[[package]]
+name = "avcodec-backend-nvcodec"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-nvcuvid",
+ "avcodec-core-model",
+ "shiguredo_libyuv",
+ "shiguredo_nvcodec",
+]
+
+[[package]]
+name = "avcodec-backend-onevpl"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-libva",
+ "avcodec-core-model",
+ "libc",
+ "shiguredo_libyuv",
+ "shiguredo_vpl",
+]
+
+[[package]]
+name = "avcodec-backend-openh264"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-core-model",
+ "shiguredo_openh264",
+]
+
+[[package]]
+name = "avcodec-backend-rkmpp"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-rkmpp",
+ "avcodec-core-model",
+]
+
+[[package]]
+name = "avcodec-backend-x264"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-x264",
+ "avcodec-core-model",
+]
+
+[[package]]
+name = "avcodec-backend-x265"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-x265",
+ "avcodec-core-model",
 ]
 
 [[package]]
@@ -243,6 +339,75 @@ dependencies = [
  "zune-jpeg",
  "zune-png",
 ]
+
+[[package]]
+name = "avcodec-codec-amf"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-vendor-probe",
+ "libloading",
+ "shiguredo_amf",
+]
+
+[[package]]
+name = "avcodec-codec-ffmpeg"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "ffmpeg-sys-next",
+]
+
+[[package]]
+name = "avcodec-codec-librga"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-vendor-probe",
+ "libloading",
+]
+
+[[package]]
+name = "avcodec-codec-libva"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-vendor-probe",
+ "libc",
+ "libloading",
+]
+
+[[package]]
+name = "avcodec-codec-nvcuvid"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "avcodec-codec-vendor-probe",
+ "libloading",
+]
+
+[[package]]
+name = "avcodec-codec-rkmpp"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+
+[[package]]
+name = "avcodec-codec-vendor-probe"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
+name = "avcodec-codec-x264"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
+
+[[package]]
+name = "avcodec-codec-x265"
+version = "0.1.0"
+source = "git+https://github.com/TimothyWalker6922/avcodec-rs-develop.git?rev=8ef5a72a50b396bad1a670fc2757893c059191a4#8ef5a72a50b396bad1a670fc2757893c059191a4"
 
 [[package]]
 name = "avcodec-core-model"
@@ -350,6 +515,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.0",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex",
+ "syn",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -384,12 +569,6 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-
-[[package]]
-name = "bytemuck"
-version = "1.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6aedf8ae72766347502cf3cb4f41cf5e9cc37d28bee90f1fdaaae15f9cf9424"
 
 [[package]]
 name = "byteorder"
@@ -1319,7 +1498,7 @@ dependencies = [
 name = "dg-rknn"
 version = "0.1.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.70.1",
  "dg-core",
  "dg-runtime",
  "inventory",
@@ -1353,7 +1532,7 @@ dependencies = [
 name = "dg-sophon"
 version = "0.1.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.70.1",
  "dg-core",
  "dg-runtime",
  "inventory",
@@ -1398,7 +1577,7 @@ dependencies = [
 name = "dg-tensorrt"
 version = "0.1.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.70.1",
  "cc",
  "dg-core",
  "dg-runtime",
@@ -1574,6 +1753,20 @@ checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
 dependencies = [
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "ffmpeg-sys-next"
+version = "8.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -2141,6 +2334,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2634,12 +2837,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_h264"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbedf5e104105e8783a77926f1e212ea37e78fd3b38b2c928938a283d083d6f1"
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2735,58 +2932,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "rusty_h264"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "363e230d4077795bce5d9220fbc57adfd992f7b88cb51da61fcc821db94cb11f"
-dependencies = [
- "rusty_h264-common",
- "rusty_h264-decoder",
- "rusty_h264-encoder",
-]
-
-[[package]]
-name = "rusty_h264-common"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55b68927b9fef8e7193b3d646e3a6a53ff48f00e1b3b2c9d0356d1fcf0317a0"
-dependencies = [
- "bytemuck",
- "wide",
-]
-
-[[package]]
-name = "rusty_h264-decoder"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7452c4bdc27d418d17ac7a08e026df05c95b76342aa31a637b270e6e776c0b7"
-dependencies = [
- "rusty_h264-common",
-]
-
-[[package]]
-name = "rusty_h264-encoder"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30fd45781286cbfb8680a653482610476f91fb51c0565fd1a8637b6d29b5c41f"
-dependencies = [
- "rusty_h264-common",
-]
-
-[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "safe_arch"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "same-file"
@@ -2990,6 +3139,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shiguredo_amf"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93ba1bd91dcf5c7191c2c98479392e20817063d351cf8ac8c6f977780f2ca5ae"
+dependencies = [
+ "bindgen 0.72.1",
+ "log",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_cmake"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ebe8d4ddac00dfb93edcd3edc678a743cb61601a8b5431df23d18d37f9c0d63"
+dependencies = [
+ "cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_libyuv"
+version = "2026.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0af2cc3c4a128214a8b25409314cd6313d8776bb5db5fdd3a9010739dbb69ac0"
+dependencies = [
+ "bindgen 0.72.1",
+ "shiguredo_cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_nvcodec"
+version = "2026.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab3b51ad8dee83d36d84d7f4c8bddb529523143b3303ff8d861829360cd1462a"
+dependencies = [
+ "bindgen 0.72.1",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_openh264"
+version = "2026.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08588733ad03a7110b7132a250d560b496be9a8616ef2e2833fdcccee88f88d0"
+dependencies = [
+ "bindgen 0.72.1",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_toml"
+version = "2026.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b475c218cf15d056ed3e48c9e98693135b261b79530881e63b162650b236fdec"
+
+[[package]]
+name = "shiguredo_vpl"
+version = "2026.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83ca51cac97f13728b3fd198b539f2ad20839fee23374911bd60a7723f73c71b"
+dependencies = [
+ "bindgen 0.72.1",
+ "shiguredo_cmake",
+ "shiguredo_toml",
 ]
 
 [[package]]
@@ -3522,6 +3740,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3623,16 +3847,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "wide"
-version = "0.7.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
-dependencies = [
- "bytemuck",
- "safe_arch",
 ]
 
 [[package]]

@@ -15,7 +15,7 @@ mod ops;
 mod planner;
 
 #[cfg(feature = "avcodec")]
-pub use avcodec::{DecodeCore as AvcodecDecodeCore, EncodeCore as AvcodecEncodeCore};
+pub use avcodec::{DecodeCore as AvcodecDecodeCore, EncodeCore as AvcodecEncodeCore, HwPreference};
 pub use frame::{MediaFrame, MediaFrameKind, MediaFrameMeta};
 pub use mock::{MockMediaSink, MockMediaSource};
 pub use ops::{DecodeCore, EncodeCore, MediaPoll, OsdBox, OsdCore, ResizeCore};

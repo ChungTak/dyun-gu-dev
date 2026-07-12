@@ -2,7 +2,7 @@ use dg_core::{Error, Result};
 
 use crate::bridge::{
     avcodec_image_to_media_frame, avcodec_packet_to_media_frame, media_frame_to_avcodec_image,
-    media_frame_to_avcodec_image_for_codec, media_frame_to_avcodec_packet,
+    media_frame_to_avcodec_packet,
 };
 use crate::MediaFrame;
 
@@ -13,7 +13,7 @@ use dg_media_avcodec::{
 };
 
 pub fn registry() -> Registry {
-    dg_media_avcodec::native_free_software_registry_builder().build()
+    dg_media_avcodec::default_registry_builder().build()
 }
 
 pub fn codec_from_name(name: Option<&str>) -> Result<CodecId> {
@@ -25,6 +25,138 @@ pub fn codec_from_name(name: Option<&str>) -> Result<CodecId> {
             "codec must be one of `jpeg`, `mjpeg`, or `h264`, got `{other}`"
         ))),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwPreference {
+    Auto,
+    Rockchip,
+    Nvidia,
+    Intel,
+    Amd,
+    Software,
+}
+
+impl HwPreference {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("auto").to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "rk" | "rockchip" | "rknn" | "rknpu" => Ok(Self::Rockchip),
+            "nv" | "nvidia" | "cuda" => Ok(Self::Nvidia),
+            "intel" | "vaapi" => Ok(Self::Intel),
+            "amd" | "amf" => Ok(Self::Amd),
+            "sw" | "software" | "cpu" | "none" => Ok(Self::Software),
+            other => Err(Error::Config(format!(
+                "hw must be one of `auto`, `rk`, `rockchip`, `rknn`, `rknpu`, `nv`, `nvidia`, `cuda`, `intel`, `vaapi`, `amd`, `amf`, `sw`, `software`, `cpu`, or `none`, got `{other}`"
+            ))),
+        }
+    }
+}
+
+fn backend_candidates(codec: CodecId, hw: HwPreference, encode: bool) -> Vec<&'static str> {
+    if matches!(codec, CodecId::Jpeg | CodecId::Mjpeg) {
+        return if encode {
+            vec!["jpeg"]
+        } else {
+            vec!["jpeg", "zune"]
+        };
+    }
+
+    let hardware = match hw {
+        HwPreference::Auto => vec!["rkmpp", "nvcodec", "onevpl", "amf"],
+        HwPreference::Rockchip => vec!["rkmpp"],
+        HwPreference::Nvidia => vec!["nvcodec"],
+        HwPreference::Intel => vec!["onevpl"],
+        HwPreference::Amd => vec!["amf"],
+        HwPreference::Software => Vec::new(),
+    };
+    let software = if encode {
+        ["ffmpeg", "x264", "openh264"].as_slice()
+    } else {
+        ["ffmpeg", "openh264"].as_slice()
+    };
+    hardware
+        .into_iter()
+        .chain(software.iter().copied())
+        .collect()
+}
+
+fn no_backend_error(
+    codec: CodecId,
+    hw: HwPreference,
+    candidates: &[&'static str],
+    attempts: &[String],
+) -> Error {
+    Error::Media(format!(
+        "no backend available for codec {codec:?} with hardware preference {hw:?}; attempted [{}]; enable one of cargo features: {}",
+        attempts.join("; "),
+        candidates
+            .iter()
+            .map(|candidate| match *candidate {
+                "jpeg" | "zune" => "`avcodec` (jpeg/zune)".to_string(),
+                other => format!("`codec-{other}`"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn is_skippable_selection_error(error: &AvError) -> bool {
+    matches!(
+        error.kind(),
+        AvErrorKind::Unsupported | AvErrorKind::SelectionFailed
+    )
+}
+
+fn create_decoder(codec: CodecId, hw: HwPreference) -> Result<Box<dyn Decoder>> {
+    let candidates = backend_candidates(codec, hw, false);
+    let mut attempts = Vec::new();
+    let registry = registry();
+    let config = DecoderConfig::new(codec, TimeBase::new(1, 25))
+        .with_memory_domain(MemoryDomain::Host)
+        .with_allow_staging(true);
+    for candidate in &candidates {
+        let hinted = config.clone().with_backend_hint(Some(candidate));
+        match registry.create_decoder(&hinted) {
+            Ok(decoder) => return Ok(decoder),
+            Err(error) if is_skippable_selection_error(&error) => {
+                attempts.push(format!("{candidate}: {}", map_av_error(error)));
+            }
+            Err(error) => return Err(map_av_error(error)),
+        }
+    }
+    Err(no_backend_error(codec, hw, &candidates, &attempts))
+}
+
+fn create_encoder(
+    codec: CodecId,
+    hw: HwPreference,
+    image: &dg_media_avcodec::Image,
+) -> Result<Box<dyn Encoder>> {
+    let candidates = backend_candidates(codec, hw, true);
+    let mut attempts = Vec::new();
+    let registry = registry();
+    let config = EncoderConfig::new(
+        codec,
+        image.coded_width,
+        image.coded_height,
+        image.format,
+        TimeBase::new(1, 25),
+        1,
+    )
+    .with_memory_domain(MemoryDomain::Host)
+    .with_allow_staging(true);
+    for candidate in &candidates {
+        let hinted = config.clone().with_backend_hint(Some(candidate));
+        match registry.create_encoder(&hinted) {
+            Ok(encoder) => return Ok(encoder),
+            Err(error) if is_skippable_selection_error(&error) => {
+                attempts.push(format!("{candidate}: {}", map_av_error(error)));
+            }
+            Err(error) => return Err(map_av_error(error)),
+        }
+    }
+    Err(no_backend_error(codec, hw, &candidates, &attempts))
 }
 
 fn bitstream_format(codec: CodecId) -> BitstreamFormat {
@@ -118,10 +250,8 @@ pub struct DecodeCore {
 }
 
 impl DecodeCore {
-    pub fn new(codec: CodecId) -> Result<Self> {
-        let config =
-            DecoderConfig::new(codec, TimeBase::new(1, 25)).with_memory_domain(MemoryDomain::Host);
-        let decoder = registry().create_decoder(&config).map_err(map_av_error)?;
+    pub fn new(codec: CodecId, hw: HwPreference) -> Result<Self> {
+        let decoder = create_decoder(codec, hw)?;
         Ok(Self {
             decoder,
             codec,
@@ -176,15 +306,17 @@ pub struct EncodeCore {
     codec: CodecId,
     eos: bool,
     pending_error: Option<Error>,
+    hw: HwPreference,
 }
 
 impl EncodeCore {
-    pub fn new(codec: CodecId) -> Result<Self> {
+    pub fn new(codec: CodecId, hw: HwPreference) -> Result<Self> {
         Ok(Self {
             encoder: None,
             codec,
             eos: false,
             pending_error: None,
+            hw,
         })
     }
 
@@ -194,18 +326,9 @@ impl EncodeCore {
                 "media_encode: frame submitted after end of stream".to_string(),
             ));
         }
-        let image = media_frame_to_avcodec_image_for_codec(frame, 1, self.codec)?;
+        let image = media_frame_to_avcodec_image(frame, 1)?;
         if self.encoder.is_none() {
-            let config = EncoderConfig::new(
-                self.codec,
-                image.coded_width,
-                image.coded_height,
-                image.format,
-                TimeBase::new(1, 25),
-                1,
-            )
-            .with_memory_domain(MemoryDomain::Host);
-            self.encoder = Some(registry().create_encoder(&config).map_err(map_av_error)?);
+            self.encoder = Some(create_encoder(self.codec, self.hw, &image)?);
         }
         let encoder = self
             .encoder
@@ -330,5 +453,70 @@ impl ResizeCore {
             Err(error) if is_end_of_stream(&error) => Ok(crate::ops::MediaPoll::EndOfStream),
             Err(error) => Err(map_av_error(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{codec_from_name, create_decoder, create_encoder, HwPreference};
+    use dg_media_avcodec::{CodecId, Image, ImageInfo};
+
+    #[test]
+    fn codec_names_include_video_codecs() {
+        assert_eq!(codec_from_name(Some("jpeg")), Ok(CodecId::Jpeg));
+        assert_eq!(codec_from_name(Some("mjpeg")), Ok(CodecId::Mjpeg));
+        assert_eq!(codec_from_name(Some("h264")), Ok(CodecId::H264));
+    }
+
+    #[test]
+    fn hardware_preference_accepts_aliases() {
+        assert_eq!(
+            HwPreference::parse(Some("rknpu")),
+            Ok(HwPreference::Rockchip)
+        );
+        assert_eq!(HwPreference::parse(Some("cuda")), Ok(HwPreference::Nvidia));
+        assert_eq!(HwPreference::parse(Some("vaapi")), Ok(HwPreference::Intel));
+        assert_eq!(HwPreference::parse(Some("amf")), Ok(HwPreference::Amd));
+        assert_eq!(
+            HwPreference::parse(Some("software")),
+            Ok(HwPreference::Software)
+        );
+        assert!(HwPreference::parse(Some("mystery")).is_err());
+    }
+
+    #[test]
+    fn jpeg_selection_uses_default_registry() {
+        let image = Image::new_host_packed(ImageInfo::Rgb24, 2, 2, 0, 6, vec![0; 12], 1)
+            .expect("valid JPEG image");
+        assert!(create_encoder(CodecId::Jpeg, HwPreference::Auto, &image).is_ok());
+    }
+
+    #[test]
+    fn h264_selection_reports_all_attempts_without_video_backends() {
+        let error = match create_decoder(CodecId::H264, HwPreference::Auto) {
+            Ok(_) => panic!("H264 must require an explicitly enabled backend"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("codec H264"), "{message}");
+        assert!(message.contains("hardware preference Auto"), "{message}");
+        assert!(message.contains("rkmpp"), "{message}");
+        assert!(message.contains("ffmpeg"), "{message}");
+        assert!(message.contains("codec-openh264"), "{message}");
+    }
+
+    #[test]
+    fn h264_encoder_selection_reports_all_attempts_without_video_backends() {
+        let image = Image::new_host_packed(ImageInfo::Rgb24, 2, 2, 0, 6, vec![0; 12], 1)
+            .expect("valid H264 image");
+        let error = match create_encoder(CodecId::H264, HwPreference::Auto, &image) {
+            Ok(_) => panic!("H264 must require an explicitly enabled backend"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("codec H264"), "{message}");
+        assert!(message.contains("hardware preference Auto"), "{message}");
+        assert!(message.contains("x264"), "{message}");
+        assert!(message.contains("codec-openh264"), "{message}");
     }
 }
