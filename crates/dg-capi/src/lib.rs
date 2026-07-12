@@ -420,8 +420,8 @@ fn backend_name(kind: DgBackendKind) -> &'static str {
     }
 }
 
-fn c_dtype(dtype: DataType) -> DgDataType {
-    match (dtype.code, dtype.bits, dtype.lanes) {
+fn c_dtype(dtype: DataType) -> Result<DgDataType, (DgStatus, String)> {
+    let value = match (dtype.code, dtype.bits, dtype.lanes) {
         (TypeCode::Uint, 8, 1) => DgDataType::U8,
         (TypeCode::Uint, 16, 1) => DgDataType::U16,
         (TypeCode::Int, 4, 1) => DgDataType::I4,
@@ -437,8 +437,14 @@ fn c_dtype(dtype: DataType) -> DgDataType {
         (TypeCode::Int, 32, 1) => DgDataType::I32,
         (TypeCode::Uint, 64, 1) => DgDataType::U64,
         (TypeCode::Int, 64, 1) => DgDataType::I64,
-        _ => DgDataType::U8,
-    }
+        _ => {
+            return Err((
+                DgStatus::Unsupported,
+                format!("unsupported data type: {dtype:?}"),
+            ));
+        }
+    };
+    Ok(value)
 }
 
 fn c_format(format: DataFormat) -> DgDataFormat {
@@ -466,7 +472,7 @@ fn c_tensor_info(info: &dg_runtime::TensorInfo) -> Result<DgTensorInfo, (DgStatu
     let mut shape = [0; 8];
     shape[..dims.len()].copy_from_slice(dims);
     Ok(DgTensorInfo {
-        dtype: c_dtype(info.dtype),
+        dtype: c_dtype(info.dtype)?,
         format: c_format(info.layout.unwrap_or(DataFormat::Auto)),
         device: DgDeviceKind::Cpu,
         rank: dims.len(),
@@ -1066,7 +1072,7 @@ pub unsafe extern "C" fn dg_backend_capabilities(
         }
         let mut precisions = [DgDataType::U8; 16];
         for (slot, precision) in capabilities.precisions.iter().copied().enumerate() {
-            precisions[slot] = c_dtype(precision);
+            precisions[slot] = c_dtype(precision)?;
         }
         unsafe {
             out.write(DgBackendCapabilities {
@@ -1458,6 +1464,18 @@ mod tests {
     use std::ffi::CString;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn unsupported_dtype_is_rejected_instead_of_mapped_to_u8() {
+        let dtype = DataType::new(TypeCode::OpaqueHandle, 8, 1);
+        let error = c_dtype(dtype).expect_err("opaque dtype must be unsupported");
+        assert_eq!(error.0, DgStatus::Unsupported);
+        assert!(error.1.contains("unsupported data type"));
+
+        let info = dg_runtime::TensorInfo::new(dg_core::Shape::new([1]), dtype);
+        let error = c_tensor_info(&info).expect_err("opaque tensor dtype must be unsupported");
+        assert_eq!(error.0, DgStatus::Unsupported);
+    }
 
     fn graph_spec() -> CString {
         CString::new(
