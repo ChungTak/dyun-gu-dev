@@ -24,7 +24,56 @@
 > VP8/VP9/AV1 覆盖（Req B，上游明确声明不在 native-free 范围）、以及统一 `PacketMetadata` trait
 > （Req C 的最后一小步）。
 
-## 1. 背景/目标
+---
+
+## 0. 重大修正（2026-07，方向纠偏）
+
+> **本节结论优先于下文 §1–§5 的「native-free 视频编解码」框架。** 下文（§2–§5、Req A/B/C）
+> 建立在一个**错误前提**上：把 MEDIA-01 的软件视频路径理解为「必须 native-free（纯 Rust、
+> 无系统库、无 native SDK）」，并据此向上游提出「新增 native-free 纯 Rust 视频编码器」（Req A）。
+> 经复核该前提不成立，现予纠正。
+
+**纠正后的正确认识（编解码器跟随推理硬件 + 软件回退）：**
+
+1. **avcodec-rs 已经覆盖真实视频编解码所需的全部后端**，无需任何额外的纯 Rust 软件编解码器：
+   - 软件：`ffmpeg`（`backend-ffmpeg`）、`x264`/`x265`/`openh264`/`libvpx`/`dav1d`/`svtav1`；
+   - 硬件：`rkmpp`/`librga`(RK)、`nvcodec`(NVIDIA NVDEC/NVENC)、`onevpl`(Intel)、`amf`(AMD)、`axcl`；
+   - 上游已用 feature 分组表达「软件 vs 硬件」：`software-default = [jpeg, libyuv, zune, video-device,
+     x264, x265, openh264, libvpx, dav1d, svtav1]`、`linux-hw = [onevpl, nvcodec, rkmpp, librga, amf]`。
+2. **编解码器应跟随推理硬件**（与 [design.md §6.5 端到端零拷贝](../design.md) 及示例配置
+   `decode { hw: auto, zero_copy: true }` 一致）：用 rknpu2 推理就优先 `rkmpp`/`RGA`，用 TensorRT 就
+   `nvcodec`(NVDEC)，Intel 就 `onevpl`/VAAPI——**同卡编解码 + 推理，避免跨设备拷贝**；不可能用其它
+   厂商的硬件能力做解码。
+3. **软件回退**：当编译期同时选择软件编解码时，回退到 `ffmpeg` 或 `x264`/`openh264` 等软件后端，
+   而不是纯 Rust 编解码器。
+4. **「默认 build 无外部 SDK」的约束靠 feature-gating 满足**，不靠 native-free 编解码器：`avcodec`
+   feature 及其所有编解码子 feature 默认关闭；CI 里始终可跑的软件路径是既有的 **JPEG/MJPEG（zune，
+   纯 Rust）+ 图像处理**，真实视频编解码在启用 ffmpeg/硬件 feature 的环境里验证。
+
+**因此对 MEDIA-01 的重新判定：**
+
+- **上游能力：满足。** avcodec-rs 已提供 ffmpeg + 各软件 + 各硬件编解码适配，MEDIA-01 的真实视频
+  decode/encode **不存在上游阻塞**。
+- **本仓库实现：方向需纠正。** 已合并的 PR #47 把 MEDIA-01 视频路径接到了「native-free 纯 Rust
+  H.264」，这是错误方向；正确做法是实现**编解码器后端选择器（跟随推理硬件 + 软件回退）**，全部
+  feature-gated。既有 JPEG/MJPEG + 图像处理路径仍然有效。
+
+**对上游 avcodec-rs 的调整请求（撤回 Req A + 建议移除纯 Rust 编解码器）：**
+
+- **撤回本文 Req A**（「新增 native-free 纯 Rust 视频 encoder」）——该需求基于错误前提，`dyun-gu-dev`
+  不需要、也不会启用纯 Rust 视频编解码器。
+- **建议上游移除/下线 `avcodec-backend-rust-h264`（`rusty_h264`/`rust_h264`）纯 Rust H.264 编解码器**：
+  它与「编解码跟随推理硬件、软件回退用 ffmpeg/x264」的定位重复，且引入额外维护面与依赖
+  （`rusty_h264`/`wide`/`safe_arch` 等）。对本项目而言应改为依赖 `ffmpeg`/硬件后端。
+  （说明：是否真正删除属上游决定；本项目的诉求是**不再要求、不再依赖**该后端。）
+
+**对本仓库的后续动作（另行确认后执行）：** 将 `dg-media-avcodec` 的依赖从 `native-free-software`
+preset 改为「按推理硬件选择的硬件后端 + `ffmpeg`/`x264` 软件回退」的 feature 组合，并实现 decode/encode
+element 的后端选择器；移除 PR #47 引入的纯 Rust H.264 接线与 RGB↔I420 桥接。
+
+---
+
+## 1. 背景/目标（历史记录，前提已被 §0 纠正）
 
 `dyun-gu-dev` 的 MEDIA-01（[design-remaining-tasks.md](../design-remaining-tasks.md)、[design.md §9.1](../design.md)）
 要求 `dg-media` 通过 `avcodec` feature 用 `RegistryBuilder` 驱动 `Decoder`/`Encoder`/`ImageProcessor`，
