@@ -5,9 +5,9 @@ use dg_openvino_sys::{
     Core, DeviceType, ElementType, InferRequest, Model, Node, PartialShape, Tensor as OvTensor,
 };
 use dg_runtime::{
-    supports_deployment, supports_device, supports_precision, BackendConfig, BackendDescriptor,
-    BackendKind, BackendOptions, Error, InferBackend, ModelSource, Result, RuntimeOption,
-    TensorInfo,
+    backend_capabilities, supports_deployment, supports_device, supports_precision, BackendConfig,
+    BackendDescriptor, BackendKind, BackendOptions, Error, InferBackend, ModelSource, Result,
+    RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 use serde::Deserialize;
 use tracing::trace;
@@ -181,6 +181,14 @@ impl Default for OpenVINOBackend {
 impl InferBackend for OpenVINOBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::OpenVINO
+    }
+
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        backend_capabilities(BackendKind::OpenVINO)
+            .map(RuntimeCapabilities::from_static)
+            .ok_or_else(|| {
+                Error::BackendUnavailable("OpenVINO capabilities unavailable".to_string())
+            })
     }
 
     fn init(&mut self, option: &RuntimeOption) -> Result<()> {

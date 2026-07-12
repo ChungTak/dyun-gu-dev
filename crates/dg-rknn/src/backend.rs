@@ -5,9 +5,9 @@ use std::ptr;
 
 use dg_core::{DataFormat, DataType, Shape, Tensor};
 use dg_runtime::{
-    supports_deployment, supports_device, supports_precision, BackendConfig, BackendDescriptor,
-    BackendKind, BackendOptions, Error, InferBackend, Result, RknnOptions, RuntimeOption,
-    TensorInfo,
+    backend_capabilities, supports_deployment, supports_device, supports_precision, BackendConfig,
+    BackendDescriptor, BackendKind, BackendOptions, Error, InferBackend, Result, RknnOptions,
+    RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 use serde::Deserialize;
 use tracing::{debug, trace, warn};
@@ -485,6 +485,12 @@ impl RknnBackend {
 impl InferBackend for RknnBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Rknn
+    }
+
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        backend_capabilities(BackendKind::Rknn)
+            .map(RuntimeCapabilities::from_static)
+            .ok_or_else(|| Error::BackendUnavailable("RKNN capabilities unavailable".to_string()))
     }
 
     fn init(&mut self, option: &RuntimeOption) -> Result<()> {

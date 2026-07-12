@@ -1,4 +1,7 @@
-use crate::{BackendConfig, Error, Result, RuntimeOption, TensorInfo};
+use crate::{
+    backend_capabilities, BackendConfig, Error, Result, RuntimeCapabilities, RuntimeOption,
+    TensorInfo,
+};
 
 /// Backend families available to the runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +32,19 @@ pub trait InferBackend: Send {
         _stream: Option<&dyn dg_core::Stream>,
     ) -> Result<Vec<dg_core::Tensor>> {
         self.run(inputs)
+    }
+
+    /// Probes backend capabilities after initialization.
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        Ok(backend_capabilities(self.kind())
+            .map(RuntimeCapabilities::from_static)
+            .unwrap_or_else(|| RuntimeCapabilities {
+                sdk_version: None,
+                devices: Vec::new(),
+                device_count: 0,
+                precisions: Vec::new(),
+                deploy_modes: Vec::new(),
+            }))
     }
 }
 

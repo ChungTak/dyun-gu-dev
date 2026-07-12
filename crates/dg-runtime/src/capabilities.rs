@@ -25,6 +25,44 @@ impl BackendCapabilities {
     }
 }
 
+/// Capabilities observed from a live backend or its no-hardware fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeCapabilities {
+    pub sdk_version: Option<String>,
+    pub devices: Vec<DeviceKind>,
+    pub device_count: usize,
+    pub precisions: Vec<DataType>,
+    pub deploy_modes: Vec<DeployMode>,
+}
+
+impl RuntimeCapabilities {
+    /// Converts static no-hardware capabilities into an owned runtime record.
+    pub fn from_static(capabilities: &BackendCapabilities) -> Self {
+        Self {
+            sdk_version: None,
+            devices: capabilities.devices.to_vec(),
+            device_count: capabilities.devices.len(),
+            precisions: capabilities.precisions.to_vec(),
+            deploy_modes: capabilities.deploy_modes.to_vec(),
+        }
+    }
+
+    /// Returns whether a precision is available at runtime.
+    pub fn supports_precision(&self, precision: DataType) -> bool {
+        self.precisions.contains(&precision)
+    }
+
+    /// Returns whether a device is available at runtime.
+    pub fn supports_device(&self, device: DeviceKind) -> bool {
+        self.devices.contains(&device)
+    }
+
+    /// Returns whether a deployment mode is available at runtime.
+    pub fn supports_deployment(&self, deploy_mode: DeployMode) -> bool {
+        self.deploy_modes.contains(&deploy_mode)
+    }
+}
+
 const MOCK_PRECISIONS: &[DataType] = &[
     DataType::F32,
     DataType::F16,

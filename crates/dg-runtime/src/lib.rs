@@ -19,7 +19,7 @@ pub use backend::{
 };
 pub use capabilities::{
     backend_capabilities, supports_deployment, supports_device, supports_precision,
-    BackendCapabilities,
+    BackendCapabilities, RuntimeCapabilities,
 };
 pub use error::{Error, Result};
 pub use mock::MockOptions;

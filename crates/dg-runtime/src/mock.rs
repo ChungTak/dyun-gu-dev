@@ -8,7 +8,7 @@ use crate::{
     capabilities::{supports_deployment, supports_device, supports_precision},
     error::{Error, Result},
     option::{BackendConfig, BackendOptions, ModelSource, RuntimeOption},
-    TensorInfo,
+    RuntimeCapabilities, TensorInfo,
 };
 
 /// Mock backend options for CI and integration tests.
@@ -156,6 +156,16 @@ impl InferBackend for MockBackend {
             outputs.push(output);
         }
         Ok(outputs)
+    }
+
+    fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        Ok(RuntimeCapabilities {
+            sdk_version: Some("mock-1".to_string()),
+            devices: vec![dg_core::DeviceKind::Cpu],
+            device_count: 1,
+            precisions: vec![DataType::F32],
+            deploy_modes: vec![dg_core::DeployMode::Host],
+        })
     }
 }
 

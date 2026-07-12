@@ -27,6 +27,8 @@ pub enum Error {
     BackendUnavailable(String),
     #[error("backend error: {0}")]
     Backend(String),
+    #[error("capability unsupported: {0}")]
+    CapabilityUnsupported(String),
     #[error("IO error: {0}")]
     Io(String),
 }
