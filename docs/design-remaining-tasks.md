@@ -143,12 +143,14 @@
 
 | ID | 状态 | 独立 PR 范围 | 验收条件 | 依赖 |
 |---|---|---|---|---|
-| OBS-01 | 未开始 | element 运行指标 | 每节点输出吞吐、处理时延、队列深度、drop/backpressure 计数；结构化 tracing 可测试，保留后续 Prometheus 接口 | 无 |
+| OBS-01 | 已完成 | element 运行指标 | 每节点输出吞吐、处理时延、队列深度、drop/backpressure 计数；结构化 tracing 可测试，保留后续 Prometheus 接口 | 无 |
 | TEST-01 | 未开始 | 精度回归 harness | 固定输入/参考输出、余弦相似度阈值、可复用 backend runner；mock 与 OpenVINO 进入通用 CI，硬件后端复用同一格式 | RT-02 |
 | TEST-02 | 未开始 | OpenVINO CPU 真实 CI | 安装/缓存 OpenVINO runtime，启用 backend feature，执行真实模型 load → infer → compare，并对 feature path clippy | SYS-01、TEST-01 |
 | TEST-03 | 未开始 | 补齐模型/码流 fuzz target | 除现有 config/C ABI 外，覆盖媒体码流/模型元数据等不可信解析面；CI 至少执行 `cargo fuzz check` | MEDIA-01 |
 | DEMO-01 | 未开始 | 无硬件多路流多算法综合 demo | `mock://` 多路输入经 decode/resize/inference/track/osd/push 跑通，CLI 集成测试验证，并记录 planned copy count | APP-01、MEDIA-02 |
 | DOC-01 | 未开始 | 最终文档与状态收敛 | README/user guide/design 与实际字段、feature、示例、限制一致；删除“已完成”但无实现的陈述 | 其他软件任务 |
+
+> OBS-01 说明：`dg-graph` 在 `ElementIo` 收发和 bounded pipe 背压路径采集每节点指标，运行报告提供快照并通过 `MetricsSink` 保留后续 Prometheus 导出接口。
 
 ## E. 需要真实硬件或自托管 runner 的最终验收
 
