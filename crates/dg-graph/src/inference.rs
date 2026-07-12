@@ -197,6 +197,7 @@ fn acquire_inference_lease(mut option: RuntimeOption) -> Result<(RuntimeOption, 
     option.device = Some(leased_kind);
     option.device_id = Some(device_id);
     option.core = CoreSelection::Single(lease.core_id());
+    option.core_mask = None;
     if option.deploy_mode.is_none() {
         option.deploy_mode = Some(scheduler.topology().deployment());
     }
