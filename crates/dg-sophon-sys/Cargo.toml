@@ -1,0 +1,16 @@
+[package]
+name = "dg-sophon-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+backend = []
+soc = ["backend"]
+
+[build-dependencies]
+bindgen.workspace = true

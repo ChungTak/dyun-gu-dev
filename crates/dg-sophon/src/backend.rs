@@ -20,18 +20,10 @@ use dg_runtime::{
 use serde::Deserialize;
 use tracing::{debug, trace};
 
+use dg_sophon_sys as sys;
+
 use crate::convert::{self, SophonDataType};
 use crate::validate::{validate_deploy_mode, validate_options};
-
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals,
-    dead_code
-)]
-mod sys {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
 
 /// Returns `true` when the real Sophon runtime is compiled in.
 pub const fn backend_enabled() -> bool {

@@ -5,22 +5,19 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-build = "build.rs"
 
 [features]
 default = []
-backend = ["dep:libc"]
+backend = ["dep:dg-sophon-sys", "dg-sophon-sys/backend", "dep:libc"]
 # Build for on-chip (SoC) deployment; the default targets Host (PCIe).
-soc = ["backend"]
+soc = ["backend", "dg-sophon-sys/soc"]
 
 [dependencies]
 dg-core = { path = "../dg-core" }
 dg-runtime = { path = "../dg-runtime" }
+dg-sophon-sys = { path = "../dg-sophon-sys", optional = true }
 inventory.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 libc = { workspace = true, optional = true }
-
-[build-dependencies]
-bindgen.workspace = true
