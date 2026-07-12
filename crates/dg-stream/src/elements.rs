@@ -255,6 +255,7 @@ impl Element for StreamPushElement {
                 Ok(DispatchResult::Accepted) => {}
                 Ok(DispatchResult::DroppedByPolicy) => {
                     debug!(node = %io.name, "frame dropped by backpressure policy");
+                    io.drop_packet()?;
                 }
                 Ok(DispatchResult::RejectedClosed) => {
                     return Err(dg_graph::Error::Runtime(
@@ -268,6 +269,7 @@ impl Element for StreamPushElement {
                     )));
                 }
             }
+            io.finish_packet()?;
             let keyframe_requests = self.sink.take_keyframe_requests();
             if keyframe_requests > 0 {
                 debug!(node = %io.name, keyframe_requests, "keyframe requested by remote peer");

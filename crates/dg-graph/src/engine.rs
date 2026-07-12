@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -13,6 +13,7 @@ use tracing::{error, info};
 
 use crate::element::{Element, ElementHandle, ElementIo, EosState};
 use crate::error::{Error, Result};
+use crate::metrics::{ElementMetrics, ElementMetricsSnapshot, MetricsSink};
 use crate::pipe::{DataPipe, PipeReceiver, PipeSender};
 use crate::registry::create_element;
 use crate::spec::{ConnectionSpec, GraphSpec, NodeSpec, ParallelType};
@@ -50,6 +51,15 @@ pub struct GraphReport {
     pub faces: BTreeMap<String, Vec<FaceDetection>>,
     pub tracks: BTreeMap<String, Vec<Track>>,
     pub ocr: BTreeMap<String, Vec<OcrText>>,
+    pub element_metrics: BTreeMap<String, ElementMetricsSnapshot>,
+}
+
+impl GraphReport {
+    pub fn export_metrics(&self, sink: &dyn MetricsSink) {
+        for (node, metrics) in &self.element_metrics {
+            sink.record(node, metrics);
+        }
+    }
 }
 
 type SinkMap = BTreeMap<String, Arc<Mutex<crate::element::SinkCollector>>>;
@@ -66,6 +76,7 @@ pub struct RunningGraph {
     workers: BTreeMap<String, LiveNode>,
     routes: RuntimeRoutes,
     sinks: SinkMap,
+    metrics: BTreeMap<String, Arc<ElementMetrics>>,
 }
 
 impl Graph {
@@ -157,8 +168,8 @@ impl Graph {
 
     /// Starts the graph without blocking the caller.
     pub fn start(&self, inputs: HashMap<String, Vec<Tensor>>) -> Result<RunningGraph> {
-        let (runtime, sinks) = RuntimeGraph::build(self.spec.clone(), inputs)?;
-        runtime.start(sinks)
+        let (runtime, sinks, metrics) = RuntimeGraph::build(self.spec.clone(), inputs)?;
+        runtime.start(sinks, metrics)
     }
 }
 
@@ -186,7 +197,10 @@ struct LiveNode {
 }
 
 impl RuntimeGraph {
-    fn build(spec: GraphSpec, inputs: HashMap<String, Vec<Tensor>>) -> Result<(Self, SinkMap)> {
+    fn build(
+        spec: GraphSpec,
+        inputs: HashMap<String, Vec<Tensor>>,
+    ) -> Result<(Self, SinkMap, BTreeMap<String, Arc<ElementMetrics>>)> {
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
         for node in &spec.nodes {
@@ -312,7 +326,10 @@ impl RuntimeGraph {
 
         let total_elements = nodes.values().map(|node| node.elements.len()).sum();
         let mut exec_nodes = Vec::with_capacity(total_elements);
+        let mut metrics = BTreeMap::new();
         for node in nodes.into_values() {
+            let node_metrics = Arc::new(ElementMetrics::default());
+            metrics.insert(node.name.clone(), node_metrics.clone());
             let eos = Arc::new(Mutex::new(EosState {
                 seen: false,
                 broadcasts: 0,
@@ -344,6 +361,8 @@ impl RuntimeGraph {
                     control: control.clone(),
                     send_backoff: Duration::from_millis(1),
                     eos: eos.clone(),
+                    metrics: node_metrics.clone(),
+                    packet_starts: std::cell::RefCell::new(VecDeque::new()),
                 };
                 exec_nodes.push(ExecNode {
                     name: node.name.clone(),
@@ -365,10 +384,15 @@ impl RuntimeGraph {
                 stop,
             },
             sinks,
+            metrics,
         ))
     }
 
-    fn start(self, sinks: SinkMap) -> Result<RunningGraph> {
+    fn start(
+        self,
+        sinks: SinkMap,
+        metrics: BTreeMap<String, Arc<ElementMetrics>>,
+    ) -> Result<RunningGraph> {
         let mut workers = BTreeMap::new();
         let mut grouped: BTreeMap<String, Vec<ExecNode>> = BTreeMap::new();
         for node in self.nodes {
@@ -406,6 +430,7 @@ impl RuntimeGraph {
             workers,
             routes: self.routes,
             sinks,
+            metrics,
         })
     }
 }
@@ -544,6 +569,7 @@ impl RunningGraph {
                 broadcasts: 0,
                 instances: prepared_node.elements.len(),
             }));
+            let node_metrics = Arc::new(ElementMetrics::default());
             let mut routes_in = HashMap::new();
             let mut routes_out = HashMap::new();
             for connection in &candidate.connections {
@@ -577,6 +603,8 @@ impl RunningGraph {
                     control: control.clone(),
                     send_backoff: Duration::from_millis(1),
                     eos: eos.clone(),
+                    metrics: node_metrics.clone(),
+                    packet_starts: std::cell::RefCell::new(VecDeque::new()),
                 };
                 let stop = self.stop.clone();
                 handles.push(thread::spawn(move || run_element(element, io, &stop)));
@@ -639,7 +667,7 @@ impl RunningGraph {
         if let Some(error) = first_error {
             return Err(error);
         }
-        collect_report(&self.sinks)
+        collect_report(&self.sinks, &self.metrics)
     }
 
     /// Alias for [`RunningGraph::finish`].
@@ -696,7 +724,10 @@ fn join_workers(workers: &mut Vec<thread::JoinHandle<Result<()>>>, cancelled: bo
     first_error.map_or(Ok(()), Err)
 }
 
-fn collect_report(sinks: &SinkMap) -> Result<GraphReport> {
+fn collect_report(
+    sinks: &SinkMap,
+    metrics: &BTreeMap<String, Arc<ElementMetrics>>,
+) -> Result<GraphReport> {
     let mut report = GraphReport::default();
     for (name, sink) in sinks {
         let guard = sink
@@ -743,6 +774,11 @@ fn collect_report(sinks: &SinkMap) -> Result<GraphReport> {
                 .flat_map(|batch| batch.iter().cloned())
                 .collect(),
         );
+    }
+    for (node, metrics) in metrics {
+        report
+            .element_metrics
+            .insert(node.clone(), metrics.snapshot());
     }
     Ok(report)
 }
