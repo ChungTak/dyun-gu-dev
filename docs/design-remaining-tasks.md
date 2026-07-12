@@ -112,6 +112,12 @@
 > `dg-runtime` 现有 backend factory；cbindgen 头文件与 `direct_backend.c`
 > 示例保持同步。
 
+> TEST-03 说明：新增 `runtime-backend-options` libFuzzer target，覆盖
+> SDK-free mock backend 的 JSON 模型/张量元数据选项解析，并将
+> `graph-spec`、`capi-load-string` 与该 target 纳入 CI 的 `cargo fuzz check`。
+> 当前默认构建没有独立的媒体容器/码流或模型头解析器；这些路径由可选
+> codec/vendor SDK 负责，因此未虚构不可达的 fuzz surface。
+
 > SCH-01 说明：`CoreSelection` 统一下沉到 `dg-core`，注册设备用于构建
 > topology；Graph inference 获取 lease 并回写 RuntimeOption 的 device/core/deploy；
 > 多实例负载均衡池、round-robin 和 stream affinity 在 SCH-02 实现。
@@ -168,7 +174,7 @@
 | OBS-01 | 已完成 | element 运行指标 | 每节点输出吞吐、处理时延、队列深度、drop/backpressure 计数；结构化 tracing 可测试，保留后续 Prometheus 接口 | 无 |
 | TEST-01 | 已完成 | 精度回归 harness | 固定输入/参考输出、余弦相似度阈值、可复用 backend runner；mock 与 OpenVINO 进入通用 CI，硬件后端复用同一格式 | RT-02 |
 | TEST-02 | 未开始 | OpenVINO CPU 真实 CI | 安装/缓存 OpenVINO runtime，启用 backend feature，执行真实模型 load → infer → compare，并对 feature path clippy | SYS-01、TEST-01 |
-| TEST-03 | 未开始 | 补齐模型/码流 fuzz target | 除现有 config/C ABI 外，覆盖媒体码流/模型元数据等不可信解析面；CI 至少执行 `cargo fuzz check` | MEDIA-01 |
+| TEST-03 | 已完成 | 补齐模型/码流 fuzz target | 除现有 config/C ABI 外，覆盖媒体码流/模型元数据等不可信解析面；CI 至少执行 `cargo fuzz check` | MEDIA-01 |
 | DEMO-01 | 未开始 | 无硬件多路流多算法综合 demo | `mock://` 多路输入经 decode/resize/inference/track/osd/push 跑通，CLI 集成测试验证，并记录 planned copy count | APP-01、MEDIA-02 |
 | DOC-01 | 未开始 | 最终文档与状态收敛 | README/user guide/design 与实际字段、feature、示例、限制一致；删除“已完成”但无实现的陈述 | 其他软件任务 |
 

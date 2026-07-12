@@ -42,6 +42,16 @@ jobs:
           toolchain: 1.96.1
       - run: cargo test --workspace
 
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz check graph-spec
+      - run: cargo +nightly fuzz check capi-load-string
+      - run: cargo +nightly fuzz check runtime-backend-options
+
   check:
     runs-on: ubuntu-latest
     strategy:
