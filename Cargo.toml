@@ -4,6 +4,7 @@ members = [
     "crates/dg-core",
     "crates/dg-runtime",
     "crates/dg-openvino",
+    "crates/dg-openvino-sys",
     "crates/dg-sophon",
     "crates/dg-rknn",
     "crates/dg-tensorrt",
