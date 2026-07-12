@@ -30,11 +30,11 @@ const MEDIA_OUTPUT: [PortSchema; 1] = [PortSchema {
     required: false,
 }];
 #[cfg(feature = "avcodec")]
-const DECODE_PARAM_FIELDS: &[&str] = &["width", "height", "channels", "codec"];
+const DECODE_PARAM_FIELDS: &[&str] = &["width", "height", "channels", "codec", "hw"];
 #[cfg(not(feature = "avcodec"))]
 const DECODE_PARAM_FIELDS: &[&str] = &["width", "height", "channels"];
 #[cfg(feature = "avcodec")]
-const ENCODE_PARAM_FIELDS: &[&str] = &["codec"];
+const ENCODE_PARAM_FIELDS: &[&str] = &["codec", "hw"];
 const RESIZE_PARAM_FIELDS: &[&str] = &["width", "height"];
 const OSD_PARAM_FIELDS: &[&str] = &["boxes", "color", "thickness"];
 const OSD_BOX_FIELDS: &[&str] = &["x", "y", "width", "height"];
@@ -62,13 +62,32 @@ const DECODE_PARAMS: &[ParamField] = &[
         ty: ParamType::Enum(&["jpeg", "mjpeg", "h264"]),
         required: false,
     },
+    #[cfg(feature = "avcodec")]
+    ParamField {
+        name: "hw",
+        ty: ParamType::Enum(&[
+            "auto", "rk", "rockchip", "rknn", "rknpu", "nv", "nvidia", "cuda", "intel", "vaapi",
+            "amd", "amf", "sw", "software", "cpu", "none",
+        ]),
+        required: false,
+    },
 ];
 #[cfg(feature = "avcodec")]
-const ENCODE_PARAMS: &[ParamField] = &[ParamField {
-    name: "codec",
-    ty: ParamType::Enum(&["jpeg", "mjpeg", "h264"]),
-    required: false,
-}];
+const ENCODE_PARAMS: &[ParamField] = &[
+    ParamField {
+        name: "codec",
+        ty: ParamType::Enum(&["jpeg", "mjpeg", "h264"]),
+        required: false,
+    },
+    ParamField {
+        name: "hw",
+        ty: ParamType::Enum(&[
+            "auto", "rk", "rockchip", "rknn", "rknpu", "nv", "nvidia", "cuda", "intel", "vaapi",
+            "amd", "amf", "sw", "software", "cpu", "none",
+        ]),
+        required: false,
+    },
+];
 #[cfg(not(feature = "avcodec"))]
 const ENCODE_PARAMS: &[ParamField] = EMPTY_PARAMS;
 const RESIZE_PARAMS: &[ParamField] = &[
@@ -309,11 +328,11 @@ impl<C: MediaCore> Element for MediaElement<C> {
 fn create_decode(node: &NodeSpec) -> Result<CreatedElement> {
     let (width, height, channels) = parse_decode(node)?;
     #[cfg(feature = "avcodec")]
-    let codec = parse_codec(node)?;
+    let (codec, hw) = parse_video_options(node)?;
     #[cfg(feature = "avcodec")]
     let core = {
         let _ = (width, height, channels);
-        AvcodecDecodeCore::new(codec)?
+        AvcodecDecodeCore::new(codec, hw)?
     };
     #[cfg(not(feature = "avcodec"))]
     let core = DecodeCore::new(width, height, channels);
@@ -326,13 +345,9 @@ fn create_decode(node: &NodeSpec) -> Result<CreatedElement> {
 fn create_encode(node: &NodeSpec) -> Result<CreatedElement> {
     validate_encode(node)?;
     #[cfg(feature = "avcodec")]
-    let codec = if node.params.is_null() {
-        crate::avcodec::codec_from_name(None).map_err(|err| Error::Config(err.to_string()))?
-    } else {
-        parse_codec(node)?
-    };
+    let (codec, hw) = parse_video_options(node)?;
     #[cfg(feature = "avcodec")]
-    let core = AvcodecEncodeCore::new(codec)?;
+    let core = AvcodecEncodeCore::new(codec, hw)?;
     #[cfg(not(feature = "avcodec"))]
     let core = EncodeCore::new();
     Ok(CreatedElement {
@@ -366,7 +381,7 @@ fn create_osd(node: &NodeSpec) -> Result<CreatedElement> {
 fn validate_decode(node: &NodeSpec) -> Result<()> {
     parse_decode(node)?;
     #[cfg(feature = "avcodec")]
-    parse_codec(node)?;
+    parse_video_options(node)?;
     Ok(())
 }
 
@@ -378,7 +393,7 @@ fn validate_encode(node: &NodeSpec) -> Result<()> {
     #[cfg(feature = "avcodec")]
     {
         reject_unknown_fields(params, ENCODE_PARAM_FIELDS)?;
-        parse_codec(node)?;
+        parse_video_options(node)?;
     }
     #[cfg(not(feature = "avcodec"))]
     reject_unknown_fields(params, &[])?;
@@ -400,10 +415,21 @@ fn parse_decode(node: &NodeSpec) -> Result<(usize, usize, usize)> {
 }
 
 #[cfg(feature = "avcodec")]
-fn parse_codec(node: &NodeSpec) -> Result<dg_media_avcodec::CodecId> {
+fn parse_video_options(
+    node: &NodeSpec,
+) -> Result<(dg_media_avcodec::CodecId, crate::avcodec::HwPreference)> {
+    if node.params.is_null() {
+        let codec =
+            crate::avcodec::codec_from_name(None).map_err(|err| Error::Config(err.to_string()))?;
+        return Ok((codec, crate::avcodec::HwPreference::Auto));
+    }
     let params = params_object(node)?;
     let name = params.get("codec").and_then(Value::as_str);
-    crate::avcodec::codec_from_name(name).map_err(|err| Error::Config(err.to_string()))
+    let codec =
+        crate::avcodec::codec_from_name(name).map_err(|err| Error::Config(err.to_string()))?;
+    let hw = crate::avcodec::HwPreference::parse(params.get("hw").and_then(Value::as_str))
+        .map_err(|err| Error::Config(err.to_string()))?;
+    Ok((codec, hw))
 }
 
 fn validate_resize(node: &NodeSpec) -> Result<()> {

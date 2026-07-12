@@ -58,14 +58,22 @@
   H.264」，这是错误方向；正确做法是实现**编解码器后端选择器（跟随推理硬件 + 软件回退）**，全部
   feature-gated。既有 JPEG/MJPEG + 图像处理路径仍然有效。
 
-**对上游 avcodec-rs 的调整请求（撤回 Req A + 建议移除纯 Rust 编解码器）：**
+**对上游 avcodec-rs 的调整请求（撤回 Req A + 要求删除纯 Rust 编解码器）：**
 
 - **撤回本文 Req A**（「新增 native-free 纯 Rust 视频 encoder」）——该需求基于错误前提，`dyun-gu-dev`
   不需要、也不会启用纯 Rust 视频编解码器。
-- **建议上游移除/下线 `avcodec-backend-rust-h264`（`rusty_h264`/`rust_h264`）纯 Rust H.264 编解码器**：
-  它与「编解码跟随推理硬件、软件回退用 ffmpeg/x264」的定位重复，且引入额外维护面与依赖
-  （`rusty_h264`/`wide`/`safe_arch` 等）。对本项目而言应改为依赖 `ffmpeg`/硬件后端。
-  （说明：是否真正删除属上游决定；本项目的诉求是**不再要求、不再依赖**该后端。）
+- **要求上游删除 `avcodec-backend-rust-h264`（`rusty_h264`/`rust_h264`）纯 Rust H.264 编解码器**，
+  以及随之引入的 `rust-h264` feature、`native-free-software` preset/`native_free_software_registry_builder()`、
+  `NATIVE_FREE_*` 常量与相关 native-free 校验 profile。理由：
+  1. **定位错误、职责重复。** 真实视频编解码应由「跟随推理硬件的硬件后端（rkmpp/nvcodec/onevpl/amf）+
+     ffmpeg/x264/openh264 软件回退」承担；纯 Rust H.264 是一个既不用硬件、也不如 ffmpeg/x264 成熟的
+     第三条冗余路径，没有生产价值。
+  2. **质量与维护风险。** 它引入 `rusty_h264`/`wide`/`safe_arch` 等额外依赖与持续维护面，纯 Rust H.264
+     的正确性/兼容性/性能都难以与成熟编码器看齐，长期是负债。
+  3. **避免被误当作缺省软件路径。** 保留它会诱导下游把纯 Rust 编解码当成「native-free 软件方案」，
+     与本项目及上游应有的架构方向相悖。
+- 本请求即由 [PR #47 之前提出的 Req A] 正式反转为**删除诉求**；`dyun-gu-dev` 已在本仓库移除对该后端及
+  `native-free-software` preset 的一切依赖（见下条）。
 
 **对本仓库的后续动作（另行确认后执行）：** 将 `dg-media-avcodec` 的依赖从 `native-free-software`
 preset 改为「按推理硬件选择的硬件后端 + `ffmpeg`/`x264` 软件回退」的 feature 组合，并实现 decode/encode

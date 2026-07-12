@@ -9,6 +9,15 @@ rust-version.workspace = true
 [features]
 default = []
 avcodec = ["dep:dg-media-avcodec", "dg-media-avcodec/avcodec"]
+codec-ffmpeg = ["avcodec", "dg-media-avcodec/codec-ffmpeg"]
+codec-x264 = ["avcodec", "dg-media-avcodec/codec-x264"]
+codec-x265 = ["avcodec", "dg-media-avcodec/codec-x265"]
+codec-openh264 = ["avcodec", "dg-media-avcodec/codec-openh264"]
+codec-rkmpp = ["avcodec", "dg-media-avcodec/codec-rkmpp"]
+codec-librga = ["avcodec", "dg-media-avcodec/codec-librga"]
+codec-nvcodec = ["avcodec", "dg-media-avcodec/codec-nvcodec"]
+codec-onevpl = ["avcodec", "dg-media-avcodec/codec-onevpl"]
+codec-amf = ["avcodec", "dg-media-avcodec/codec-amf"]
 
 [dependencies]
 dg-core = { path = "../dg-core" }

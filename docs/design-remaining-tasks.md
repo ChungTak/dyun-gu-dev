@@ -77,18 +77,18 @@
 | ELEM-01 | 未开始 | `filter` element | 注册可配置、可验证、Sans-I/O 的 filter；覆盖 pass/drop 和未知字段测试 | CFG-04 |
 | ELEM-02 | 未开始 | `http_push` element | 注册可配置 HTTP sink/driver；请求失败明确报错；网络 I/O 与 element 核心逻辑分层并可注入测试 driver | CFG-04 |
 
-> MEDIA-01 说明：已完成的验收覆盖的是 JPEG/MJPEG + 图像处理软件路径。真实**视频** decode/encode
-> 依赖上游 `avcodec-rs`。依赖已升到 `main` HEAD `8ef5a72`：现已提供 native-free、纯 Rust 的 H.264
-> **decode + encode** 闭环（host I420 ↔ H.264 Annex-B，保留 KEY flag/PTS/DTS/packet time_base 与
-> in-band SPS/PPS），`EncoderConfig.parameters`/`Packet.time_base`/`Encoder::stream_parameters()` 也已落地。
-> **方向纠偏（2026-07）：** 之前把 MEDIA-01 视频路径理解为「native-free 纯 Rust 编解码」并接入
-> `avcodec-backend-rust-h264`（PR #47）是**错误方向**。正确定位：**编解码器跟随推理硬件**（rknpu2→`rkmpp`/RGA、
-> TensorRT→`nvcodec`、Intel→`onevpl`/VAAPI，同卡编解码+推理、零拷贝），**软件回退用 `ffmpeg`/`x264`/`openh264`**，
-> 全部 feature-gated；「默认 build 无外部 SDK」由 feature 默认关闭保证，而非纯 Rust 编解码器。
-> avcodec-rs 已提供上述全部软件/硬件后端（`software-default`/`linux-hw` 分组），MEDIA-01 真实视频
-> decode/encode **不存在上游阻塞**。既有 JPEG/MJPEG（zune）+ 图像处理路径（原「已完成」验收）仍有效。
-> 待办：把 `dg-media` 的视频编解码改为「硬件优先 + ffmpeg/x264 软件回退」的后端选择器，移除 PR #47 的
-> 纯 Rust H.264 接线；并向上游撤回「native-free 纯 Rust encoder」需求。详见
+> MEDIA-01 说明：已实现真实 JPEG/MJPEG 与视频 decode/encode adapter。`dg-media` 通过
+> `default_registry_builder()` 注册当前编译进来的 avcodec 后端，并使用 `backend_hint` 按
+> 「跟随推理硬件优先、软件回退」顺序选择：`rkmpp`、`nvcodec`、`onevpl`、`amf`，再回退到
+> `ffmpeg`/`x264`/`openh264`。这些原生后端均 feature-gated 且默认关闭；默认构建只启用
+> `jpeg`/`zune` 视频编解码路径（另启用 SDK-free 的 `libyuv` CSC backend），因此 SDK-free
+> 交叉编译路径不依赖 FFmpeg 或硬件 SDK。`rust-h264`/
+> `native-free-software` 接线已移除。
+>
+> 对硬件解码可能产生的 YUV 图像，颜色空间转换不在 `dg-media` 手写实现，而是委托给
+> avcodec 的 `ImageProcessor` `Csc` 操作；当前通过 SDK 的 `libyuv` backend（无外部 SDK
+> 的 Cargo 构建依赖）转换为 `Rgb24`，再进入下游 `MediaFrame`。若运行时没有可用 CSC
+> processor，则显式返回错误，不静默降级。详见
 > [docs/upstream/avcodec-rs-media01-requirements.md §0](upstream/avcodec-rs-media01-requirements.md)。
 
 ## D. 可观测性、测试与交付
