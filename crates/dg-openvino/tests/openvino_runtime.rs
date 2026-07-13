@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
 use dg_runtime::{
-    BackendKind, BackendOptions, ModelSource, OpenVINOOptions, Runtime, RuntimeOption,
+    BackendKind, BackendOptions, ModelSource, OpenVINOOptions, RegressionCase, RegressionHarness,
+    Runtime, RuntimeOption,
 };
 
 fn python_command() -> Command {
@@ -200,6 +201,24 @@ fn run_openvino_dynamic_batch_model(model_path: PathBuf) {
     assert_eq!(outputs[0].buffer().read_bytes(), f32_bytes(&input_values));
 }
 
+fn run_openvino_regression_model(model_path: PathBuf) {
+    let option = RuntimeOption::new(
+        BackendKind::OpenVINO,
+        ModelSource::File(model_path),
+        BackendOptions::OpenVINO(OpenVINOOptions::default()),
+    )
+    .with_precision(DataType::F32)
+    .with_device(DeviceKind::Cpu);
+    let mut runtime = Runtime::new(option).expect("construct OpenVINO regression runtime");
+    let case = RegressionCase::from_json(include_str!("fixtures/openvino_identity_f32.json"))
+        .expect("load OpenVINO regression fixture");
+    let report = RegressionHarness::run(&mut runtime, &case).expect("run OpenVINO regression");
+    assert_eq!(report.case, "openvino_identity_f32");
+    assert!(report.max_absolute_error <= 0.000001);
+    assert!(report.max_relative_error <= 0.000001);
+    assert!(report.minimum_cosine_similarity >= 0.999999);
+}
+
 #[test]
 #[ignore]
 fn openvino_identity_model_runs_end_to_end() {
@@ -278,4 +297,46 @@ fn openvino_dynamic_batch_reshape_updates_outputs() {
         .status()
         .expect("spawn OpenVINO child test process");
     assert!(status.success(), "child OpenVINO process should succeed");
+}
+
+#[test]
+#[ignore]
+fn openvino_cpu_regression_runs_through_test01_harness() {
+    if std::env::var_os("DG_OPENVINO_E2E_CHILD").is_some() {
+        let model_path = std::env::var_os("DG_OPENVINO_E2E_MODEL_PATH")
+            .map(PathBuf::from)
+            .expect("model path should be provided");
+        run_openvino_regression_model(model_path);
+        return;
+    }
+
+    let temp_dir = unique_temp_dir();
+    std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let loader_dir = prepare_loader_dir(&temp_dir);
+    let lib_dir = openvino_lib_dir();
+    let model_path = create_identity_model(&temp_dir);
+
+    let current_exe = std::env::current_exe().expect("locate current test binary");
+    let current_ld_library_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let ld_library_path = format!(
+        "{}:{}:{}",
+        loader_dir.display(),
+        lib_dir.display(),
+        current_ld_library_path
+    );
+
+    let status = Command::new(current_exe)
+        .arg("--exact")
+        .arg("openvino_cpu_regression_runs_through_test01_harness")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("DG_OPENVINO_E2E_CHILD", "1")
+        .env("DG_OPENVINO_E2E_MODEL_PATH", &model_path)
+        .env("LD_LIBRARY_PATH", ld_library_path)
+        .status()
+        .expect("spawn OpenVINO regression child test process");
+    assert!(
+        status.success(),
+        "child OpenVINO regression test should succeed"
+    );
 }

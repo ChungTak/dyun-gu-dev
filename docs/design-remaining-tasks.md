@@ -118,6 +118,15 @@
 > 当前默认构建没有独立的媒体容器/码流或模型头解析器；这些路径由可选
 > codec/vendor SDK 负责，因此未虚构不可达的 fuzz surface。
 
+> TEST-02 说明：CI 的 `openvino` job 在 x86_64 Ubuntu runner 上通过
+> `actions/setup-python` 缓存并安装固定版本 `openvino==2026.2.1`，随后启用
+> `dg-openvino/backend` 执行 feature-path clippy。集成测试在运行时动态生成
+> 一个 `[1,4]` 的 OpenVINO identity IR 模型，使用
+> `crates/dg-openvino/tests/fixtures/openvino_identity_f32.json` 的 TEST-01
+> regression harness fixture 执行真实 CPU `load → infer → compare`，并检查
+> absolute/relative error 与 cosine similarity。该验收范围仅覆盖 OpenVINO CPU；
+> GPU、NPU、remote tensor 和硬件 zero-copy 不属于 TEST-02。
+
 > SCH-01 说明：`CoreSelection` 统一下沉到 `dg-core`，注册设备用于构建
 > topology；Graph inference 获取 lease 并回写 RuntimeOption 的 device/core/deploy；
 > 多实例负载均衡池、round-robin 和 stream affinity 在 SCH-02 实现。
@@ -182,7 +191,7 @@
 |---|---|---|---|---|
 | OBS-01 | 已完成 | element 运行指标 | 每节点输出吞吐、处理时延、队列深度、drop/backpressure 计数；结构化 tracing 可测试，保留后续 Prometheus 接口 | 无 |
 | TEST-01 | 已完成 | 精度回归 harness | 固定输入/参考输出、余弦相似度阈值、可复用 backend runner；mock/default path 进入通用 CI，需 SDK 的 backend 复用同一格式并在可用环境运行 | RT-02 |
-| TEST-02 | 未开始 | OpenVINO CPU 真实 CI | 安装/缓存 OpenVINO runtime，启用 backend feature，执行真实模型 load → infer → compare，并对 feature path clippy | SYS-01、TEST-01 |
+| TEST-02 | 已完成 | OpenVINO CPU 真实 CI | 安装/缓存 OpenVINO runtime，启用 backend feature，执行真实模型 load → infer → compare，并对 feature path clippy | SYS-01、TEST-01 |
 | TEST-03 | 已完成 | 补齐模型/码流 fuzz target | 除现有 config/C ABI 外，覆盖可达的 backend/model metadata 解析面；CI 至少执行 `cargo fuzz check`；默认构建没有独立的媒体容器解析器 | MEDIA-01 |
 | DEMO-01 | 已完成 | 无硬件多路流多算法综合 demo | `mock://` 多路输入经 decode/resize/inference/track/osd/push 跑通，CLI 集成测试验证，并记录 planned copy count | APP-01、MEDIA-02 |
 | DOC-01 | 已完成 | 最终文档与状态收敛 | README/user guide/design 与实际字段、feature、示例、限制一致；删除"已完成"但无实现的陈述 | 其他软件任务 |
@@ -202,8 +211,8 @@
 > 默认值及示例路径均已对齐。文档明确区分默认 SDK-free 录制式 raw-frame
 > adapter 与可选 avcodec/cheetah 路径，说明 zero-copy 只有满足句柄、完整布局和
 > 生命周期条件时才成立，其余情况显式 staging 或 Unsupported 并记录 copy count；
-> OpenVINO 真实 SDK/CI 与 HW-* 验收仍保持外部阻塞。已完成状态仅保留在有代码和
-> 测试依据的任务，`TEST-02` 仍为 `未开始`，`HW-01` 至 `HW-04` 仍为外部阻塞，
+> OpenVINO GPU/NPU、remote tensor 与 HW-* 验收仍保持外部阻塞。已完成状态仅保留在有代码和
+> 测试依据的任务，`TEST-02` 的 CPU CI 已完成，`HW-01` 至 `HW-04` 仍为外部阻塞，
 > `CFG-10` 仍为可选。
 
 ## E. 需要真实硬件或自托管 runner 的最终验收
