@@ -6,9 +6,10 @@ pub use external::{probe_external_export, try_import_external_image, ExternalExp
 
 #[cfg(feature = "avcodec-sdk")]
 pub use avcodec::{
-    default_registry_builder, VideoBackendPolicy, VideoSessionBuildError, VideoSessionBuildReport,
-    VideoSessionBundle, VideoSessionFactoryV2, VideoSessionRequest, VideoSessionRole,
-    VideoTranscodeOptions, VideoTranscoder, VideoTranscoderBuildReport, VideoTranscoderRequest,
+    default_registry_builder, VideoBackendPolicy, VideoMemoryPath, VideoSessionBuildError,
+    VideoSessionBuildReport, VideoSessionBundle, VideoSessionFactoryV2, VideoSessionRequest,
+    VideoSessionRole, VideoTranscodeModeReport, VideoTranscodeOptions, VideoTranscoder,
+    VideoTranscoderBuildReport, VideoTranscoderRequest,
 };
 
 #[cfg(feature = "avcodec-sdk")]

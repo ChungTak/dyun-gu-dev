@@ -10,8 +10,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use dg_core::{
-    BitstreamFormat, EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaCodecConfig, MediaInfo,
-    MediaKind as CoreMediaKind, MediaPayloadInfo, MediaTimeBase, MediaTiming, DataType,
+    BitstreamFormat, DataType, EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaCodecConfig,
+    MediaInfo, MediaKind as CoreMediaKind, MediaPayloadInfo, MediaTimeBase, MediaTiming,
 };
 use dg_graph::{
     CreatedElement, Element, ElementDescriptor, ElementHandle, ElementIo, NodeSpec, Packet,
@@ -328,12 +328,16 @@ fn packet_to_media_frame(packet: Packet) -> dg_graph::Result<MediaFrame> {
             frame.kind = MediaFrameKind::Image;
         }
     }
-    let legacy_pts = meta.tags.get(PTS_TAG).and_then(|value| value.parse::<i64>().ok());
-    let legacy_dts = meta.tags.get(DTS_TAG).and_then(|value| value.parse::<i64>().ok());
+    let legacy_pts = meta
+        .tags
+        .get(PTS_TAG)
+        .and_then(|value| value.parse::<i64>().ok());
+    let legacy_dts = meta
+        .tags
+        .get(DTS_TAG)
+        .and_then(|value| value.parse::<i64>().ok());
     if meta.media_info.is_none() && (legacy_pts.is_some() || legacy_dts.is_some()) {
-        warn!(
-            "stream push reading pts/dts from tags is deprecated; producers must set media_info"
-        );
+        warn!("stream push reading pts/dts from tags is deprecated; producers must set media_info");
     }
     frame.meta.stream_id = meta.stream_id;
     frame.meta.tags = meta.tags;
@@ -400,12 +404,7 @@ fn enrich_frame_media_info_from_tracks(
         .media_info
         .as_ref()
         .map(|info| info.is_keyframe())
-        .or_else(|| {
-            frame
-                .meta
-                .stream_metadata
-                .map(|legacy| legacy.keyframe)
-        })
+        .or_else(|| frame.meta.stream_metadata.map(|legacy| legacy.keyframe))
         .unwrap_or_else(|| {
             frame
                 .meta
@@ -430,9 +429,7 @@ fn enrich_frame_media_info_from_tracks(
 
     if let Some(existing) = frame.meta.media_info.as_ref() {
         if let MediaPayloadInfo::Encoded(existing_enc) = &existing.payload {
-            if existing_enc.codec != MediaCodec::Unknown
-                && existing_enc.codec != encoded.codec
-            {
+            if existing_enc.codec != MediaCodec::Unknown && existing_enc.codec != encoded.codec {
                 return Err(dg_graph::Error::Runtime(format!(
                     "frame media_info codec {:?} conflicts with track codec {:?}",
                     existing_enc.codec, encoded.codec
@@ -580,7 +577,10 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
         }
         CodecExtradata::AAC { asc } => {
             if !asc.is_empty() {
-                configs.push(MediaCodecConfig::new(BitstreamFormat::AacRaw, asc.to_vec())?);
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::AacRaw,
+                    asc.to_vec(),
+                )?);
             }
         }
         CodecExtradata::AV1 {
@@ -588,20 +588,32 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             codec_config,
         } => {
             if let Some(seq) = sequence_header {
-                configs.push(MediaCodecConfig::new(BitstreamFormat::Av1Obu, seq.to_vec())?);
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::Av1Obu,
+                    seq.to_vec(),
+                )?);
             }
             if let Some(cfg) = codec_config {
-                configs.push(MediaCodecConfig::new(BitstreamFormat::Av1Obu, cfg.to_vec())?);
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::Av1Obu,
+                    cfg.to_vec(),
+                )?);
             }
         }
         CodecExtradata::VP8 { config } => {
             if let Some(cfg) = config {
-                configs.push(MediaCodecConfig::new(BitstreamFormat::Vp8Frame, cfg.to_vec())?);
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::Vp8Frame,
+                    cfg.to_vec(),
+                )?);
             }
         }
         CodecExtradata::VP9 { config } => {
             if let Some(cfg) = config {
-                configs.push(MediaCodecConfig::new(BitstreamFormat::Vp9Frame, cfg.to_vec())?);
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::Vp9Frame,
+                    cfg.to_vec(),
+                )?);
             }
         }
         CodecExtradata::MP3 { .. } | CodecExtradata::Opus { .. } => {}

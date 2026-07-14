@@ -378,10 +378,11 @@ fn stream_metadata_from_media_info(info: &dg_core::MediaInfo) -> Result<MediaStr
             "cheetah push requires encoded media_info payload".into(),
         ));
     };
-    let track_id = encoded
-        .track_id
-        .unwrap_or(u64::from(encoded.stream_index));
-    let timebase = info.timing.time_base.unwrap_or(dg_core::MediaTimeBase::new(1, 1));
+    let track_id = encoded.track_id.unwrap_or(u64::from(encoded.stream_index));
+    let timebase = info
+        .timing
+        .time_base
+        .unwrap_or(dg_core::MediaTimeBase::new(1, 1));
     Ok(MediaStreamMetadata {
         track_id,
         media_kind: match encoded.media_kind {

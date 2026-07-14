@@ -48,18 +48,22 @@ external application
 
 ## 5. 全局完成定义
 
-- [ ] 01–15 的任务和验收全部完成，无未登记 TODO 或 UP2 阻塞。
-- [ ] dyun 固定到包含 avcodec-rs 115 P1–P6 的已验证 immutable revision。
-- [ ] `dg-media-avcodec` 的直接 codec 依赖只有 `avcodec` SDK。
-- [ ] 新入口只暴露 `avcodec-profile-*`，不要求用户选择 `codec-*`。
-- [ ] dyun 源码不存在 backend candidate 数组、自建 SessionBuilder 或 registry 选择循环。
-- [ ] decode/resize/encode 全部通过 `VideoSessionFactoryV2` 创建会话。
-- [ ] 融合转码通过 `VideoTranscoderRequest` 创建，不重做 Adapter Chain。
-- [ ] native-free/software 真实 JPEG、H264、H265 用例通过。
-- [ ] RKMPP/RGA、NVCodec、OneVPL、AMF 的声明与 capability、真实硬件结果一致。
-- [ ] RK 中间图像链 `copy_count == 0`；NV 只称 device-frame，不称完整 CUDA zero-copy。
-- [ ] CLI、C API、配置、示例和 Cargo feature 使用同一组 Profile 名。
-- [ ] 默认 workspace 在无 codec/native SDK 环境下可构建和测试。
+> 详细执行记录见 [EXECUTION_STATUS.md](EXECUTION_STATUS.md)（2026-07-14）。
+
+- [ ] 01–15 的任务和验收全部完成，无未登记 TODO 或 UP2 阻塞。（硬件真机与 software 本机 FFmpeg 仍开放）
+- [x] dyun 固定到包含 avcodec-rs 115 P1–P6 的已验证 immutable revision（`fc728aa…`）。
+- [x] `dg-media-avcodec` 的直接 codec 依赖只有 `avcodec` SDK。
+- [x] 新入口只暴露 `avcodec-profile-*`，不要求用户选择 `codec-*`。
+- [x] dyun 生产源码不存在 backend candidate 数组、自建 SessionBuilder 或 registry 选择循环（`legacy` 兼容模块除外）。
+- [x] decode/resize/encode 全部通过 `VideoSessionFactoryV2` 创建会话（含 Profile IO 域对齐与 processor 拓扑）。
+- [x] 融合转码通过 `VideoTranscoderRequest` 创建（库 API；图 element 因 `Registry: !Send` 未注册）。
+- [x] native-free 真实 JPEG、H264 用例通过。
+- [ ] software Profile 全量测试：本机 FFmpeg 8 触发 [UP2-FFMPEG-01](UP2-FFMPEG-01.md)（上游 `*const AVCodec`）；bindgen 环境见 `scripts/env-software-avcodec.sh`。
+- [ ] RKMPP/RGA、NVCodec、OneVPL、AMF 的声明与 capability、真实硬件结果一致。（descriptor+域对齐完成；真机未跑）
+- [ ] RK 中间图像链 `copy_count == 0`；NV 只称 device-frame，不称完整 CUDA zero-copy。（声明侧完成；真机测量待 runner）
+- [x] CLI、C API、配置、示例和 Cargo feature 使用同一组 Profile 名。
+- [x] 默认 workspace 在无 codec/native SDK 环境下可构建和测试。
+- [x] 生产路径无 legacy backend candidate 循环（仅保留 `hw`→Profile 兼容映射）。
 
 ## 6. 需求覆盖矩阵
 

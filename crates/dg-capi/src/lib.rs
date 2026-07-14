@@ -268,8 +268,10 @@ fn format_c_error_message(message: impl Into<String>) -> String {
 
 fn set_error(message: impl Into<String>) {
     let message = format_c_error_message(message);
-    let value = CString::new(message)
-        .unwrap_or_else(|_| CString::new("kind=Other operation=Unknown detail=unknown error").expect("literal has no NUL"));
+    let value = CString::new(message).unwrap_or_else(|_| {
+        CString::new("kind=Other operation=Unknown detail=unknown error")
+            .expect("literal has no NUL")
+    });
     LAST_ERROR.with(|last| *last.borrow_mut() = Some(value));
 }
 

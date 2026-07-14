@@ -19,6 +19,7 @@ use crate::avcodec::{
     DecodeCore as AvcodecDecodeCore, DecodeCoreConfig, EncodeCore as AvcodecEncodeCore,
     EncodeCoreConfig, ResizeCore as AvcodecResizeCore,
 };
+
 use crate::bridge::{graph_packet_to_media_frame, media_frame_to_graph_packet};
 use crate::ops::{DecodeCore, EncodeCore, MediaPoll, OsdBox, OsdCore, ResizeCore};
 #[cfg(feature = "avcodec-sdk")]
@@ -74,6 +75,7 @@ const RESIZE_PARAM_FIELDS: &[&str] = &[
     "drain_timeout_ms",
 ];
 const OSD_PARAM_FIELDS: &[&str] = &["boxes", "color", "thickness"];
+
 const OSD_BOX_FIELDS: &[&str] = &["x", "y", "width", "height"];
 #[cfg(not(feature = "avcodec-sdk"))]
 const EMPTY_PARAMS: &[ParamField] = &[];
@@ -305,7 +307,6 @@ inventory::submit! {
         create: create_osd,
     }
 }
-
 trait MediaCore: Send {
     fn can_accept_input(&self) -> bool {
         true
@@ -774,14 +775,31 @@ fn resolve_avcodec_profile(
         let (mapped, warning) = crate::legacy::resolve_legacy_hw(hw);
         if let Some(profile) = mapped {
             warn!(profile = %profile.name(), "{warning}");
-            if !profile.is_compiled() {
-                return Err(Error::Config(format!(
-                    "legacy hw maps to profile `{}` which is not compiled; enable `{}`",
-                    profile.name(),
-                    profile.cargo_feature()
-                )));
+            if profile.is_compiled() {
+                return Ok(profile);
             }
-            return Ok(profile);
+            // Compatibility: when only native-free is built, `hw=auto` → software would
+            // hard-fail; fall through to the single compiled default with an extra warning.
+            if matches!(
+                profile,
+                crate::profile::AvcodecProfile::Software
+                    | crate::profile::AvcodecProfile::NativeFree
+            ) {
+                let compiled = crate::profile::compiled_profiles();
+                if compiled.len() == 1 {
+                    warn!(
+                        requested = %profile.name(),
+                        fallback = %compiled[0].name(),
+                        "legacy hw mapped profile is not compiled; using sole compiled profile"
+                    );
+                    return Ok(compiled[0]);
+                }
+            }
+            return Err(Error::Config(format!(
+                "legacy hw maps to profile `{}` which is not compiled; enable `{}`",
+                profile.name(),
+                profile.cargo_feature()
+            )));
         }
     }
     resolve_profile(profile_name, legacy_avcodec_only).map_err(|err| Error::Config(err.to_string()))

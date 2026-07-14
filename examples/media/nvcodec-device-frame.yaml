@@ -8,9 +8,8 @@
 #   Host H264 Packet -> NV decoder -> CudaDevice NV12 Image
 #   CudaDevice NV12 Image -> NV encoder -> Host H264 Packet
 #
-# No media_resize: CUDA processor is unsupported; resize must fail as Unsupported
-# rather than download/upload. Session create is blocked until upstream device-frame
-# contract lands.
+# No media_resize: CUDA processor is unsupported; resize/CSC returns Unsupported
+# rather than download/upload. Requires avcodec-profile-nvcodec-device-frame + CUDA.
 apiVersion: dg/v1
 kind: Graph
 execution:

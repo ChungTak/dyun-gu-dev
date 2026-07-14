@@ -4,7 +4,7 @@
 #     --features media,avcodec-profile-software -- \
 #     validate --config examples/media/software-host.yaml
 #
-# MemoryDomain: Host. allow_staging: true. Not zero-copy.
+# MemoryDomain: Host. allow_staging: false (frozen host topology). Not zero-copy.
 # H264 requires bitrate; JPEG is omitted here so production video params are explicit.
 apiVersion: dg/v1
 kind: Graph

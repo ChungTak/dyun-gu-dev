@@ -10,6 +10,8 @@ mod async_core;
 #[cfg(feature = "avcodec-sdk")]
 mod avcodec;
 mod bridge;
+#[cfg(feature = "avcodec-sdk")]
+mod diagnostics;
 mod elements;
 #[cfg(feature = "avcodec-sdk")]
 mod error_ctx;
@@ -28,6 +30,8 @@ mod profile;
 mod session;
 mod stats;
 mod stream_metadata;
+#[cfg(feature = "avcodec-sdk")]
+mod transcoder;
 
 #[cfg(feature = "avcodec-sdk")]
 pub use avcodec::{
@@ -35,6 +39,8 @@ pub use avcodec::{
     EncodeCore as AvcodecEncodeCore, EncodeCoreConfig as AvcodecEncodeCoreConfig,
     ResizeCore as AvcodecResizeCore,
 };
+#[cfg(feature = "avcodec-sdk")]
+pub use diagnostics::{MediaSessionDiagnostics, MediaTranscoderDiagnostics};
 #[cfg(feature = "avcodec-sdk")]
 pub use error_ctx::{media_error_with_context, MediaErrorContext, MediaOperation};
 pub use frame::{MediaFrame, MediaFrameKind, MediaFrameMeta};
@@ -51,13 +57,16 @@ pub use planner::{
 };
 #[cfg(feature = "avcodec-sdk")]
 pub use profile::{
-    compiled_profiles, profile_to_sdk_descriptor, reject_profile_hw_conflict, resolve_profile,
-    AvcodecProfile,
+    compiled_profiles, profile_decoder_image_domain, profile_encoder_image_domain,
+    profile_to_sdk_descriptor, profile_to_sdk_descriptor_with_processor,
+    reject_memory_domain_conflict, reject_profile_hw_conflict, resolve_profile, AvcodecProfile,
 };
 pub use stats::MediaSessionStats;
 pub use stream_metadata::{
     MediaStreamCodec, MediaStreamFormat, MediaStreamKind, MediaStreamMetadata, MediaStreamTimebase,
 };
+#[cfg(feature = "avcodec-sdk")]
+pub use transcoder::{TranscodeCore as AvcodecTranscodeCore, TranscodeCoreConfig};
 
 pub use dg_core::{
     DataFormat, DataType, DeployMode, DeviceKind, ExternalDropGuard, ExternalHandle, MemoryDomain,

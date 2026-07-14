@@ -282,11 +282,7 @@ fn encode_h264_requires_nonzero_bitrate_at_load() {
         .connect("input.out -> encode.in")
         .build()
         .expect_err("h264 without bitrate must fail");
-    assert!(
-        missing.to_string().contains("bitrate"),
-        "{}",
-        missing
-    );
+    assert!(missing.to_string().contains("bitrate"), "{}", missing);
 
     let zero = GraphSpecBuilder::new()
         .add_node(node("input", "input", json!({})))

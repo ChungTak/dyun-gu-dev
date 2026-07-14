@@ -6,8 +6,9 @@ use dg_core::{
 use crate::async_core::{AsyncPump, BackendOps, PumpStep, SubmitResult};
 use crate::bridge::{
     avcodec_image_to_media_frame_with_processor, avcodec_packet_to_media_frame,
-    core_memory_domain_to_avcodec, media_frame_to_avcodec_image, media_frame_to_avcodec_packet,
+    media_frame_to_avcodec_image, media_frame_to_avcodec_packet,
 };
+use crate::diagnostics::MediaSessionDiagnostics;
 use crate::media_frame_timing;
 use crate::profile::AvcodecProfile;
 use crate::session::AvcodecSdkService;
@@ -24,7 +25,8 @@ use dg_media_avcodec::{
 
 type AvResult<T> = core::result::Result<T, AvError>;
 
-fn default_sdk_service() -> AvcodecSdkService {
+pub(crate) fn default_sdk_service() -> AvcodecSdkService {
+    // Registry only holds `&'static` backend factories; building is cheap.
     AvcodecSdkService::from_default_registry()
 }
 
@@ -174,7 +176,7 @@ fn core_bitstream_to_avcodec(format: CoreBitstreamFormat) -> Result<BitstreamFor
     }
 }
 
-fn stream_index_from_frame(frame: &MediaFrame) -> u32 {
+pub(crate) fn stream_index_from_frame(frame: &MediaFrame) -> u32 {
     frame
         .meta
         .media_info
@@ -186,7 +188,7 @@ fn stream_index_from_frame(frame: &MediaFrame) -> u32 {
         .unwrap_or(0)
 }
 
-fn time_base_from_frame(frame: &MediaFrame) -> Result<TimeBase> {
+pub(crate) fn time_base_from_frame(frame: &MediaFrame) -> Result<TimeBase> {
     let timing = media_frame_timing(&frame.meta);
     timing
         .time_base
@@ -194,7 +196,7 @@ fn time_base_from_frame(frame: &MediaFrame) -> Result<TimeBase> {
         .ok_or_else(|| Error::Media("packet metadata is missing time_base".into()))
 }
 
-fn codec_from_frame(frame: &MediaFrame, fallback: Option<CodecId>) -> Result<CodecId> {
+pub(crate) fn codec_from_frame(frame: &MediaFrame, fallback: Option<CodecId>) -> Result<CodecId> {
     if let Some(codec) = fallback {
         return Ok(codec);
     }
@@ -211,7 +213,7 @@ fn codec_from_frame(frame: &MediaFrame, fallback: Option<CodecId>) -> Result<Cod
     media_codec_to_codec_id(encoded.codec)
 }
 
-fn bitstream_from_frame(
+pub(crate) fn bitstream_from_frame(
     frame: &MediaFrame,
     fallback: Option<BitstreamFormat>,
 ) -> Result<BitstreamFormat> {
@@ -344,6 +346,14 @@ impl DecoderBackend {
             self.check_session_invariants(frame)?;
             return Ok(());
         }
+        // Plan 05/11: AMF host does not guarantee decode; only fallback may reach software.
+        if matches!(self.profile, AvcodecProfile::AmfHost) {
+            return Err(Error::Media(format!(
+                "profile `{}` does not guarantee decode; use `amf-host-fallback` or a \
+                 decode-capable profile (software/native-free/rkmpp/nvcodec/onevpl)",
+                self.profile.name()
+            )));
+        }
         let codec = codec_from_frame(frame, self.config_codec)?;
         let bitstream = bitstream_from_frame(frame, self.config_bitstream)?;
         let time_base = time_base_from_frame(frame).or_else(|_| {
@@ -356,10 +366,13 @@ impl DecoderBackend {
             }
         })?;
         let stream_index = stream_index_from_frame(frame);
+        crate::profile::reject_memory_domain_conflict(
+            self.profile,
+            "decoder image",
+            self.memory_domain,
+            crate::profile::profile_decoder_image_domain(self.profile),
+        )?;
         let mut config = DecoderConfig::new(codec, time_base);
-        if let Some(domain) = self.memory_domain {
-            config = config.with_memory_domain(core_memory_domain_to_avcodec(domain));
-        }
         if let Some(parameters) = codec_parameters_from_frame(frame, codec, bitstream)? {
             config = config.with_parameters(Some(parameters));
         }
@@ -373,10 +386,12 @@ impl DecoderBackend {
     }
 
     fn check_session_invariants(&self, frame: &MediaFrame) -> Result<()> {
-        let session_codec = self.codec.expect("decoder session must be initialized");
-        let session_format = self
-            .bitstream_format
-            .expect("decoder session must be initialized");
+        let session_codec = self.codec.ok_or_else(|| {
+            Error::Media("decoder session codec missing after initialization".into())
+        })?;
+        let session_format = self.bitstream_format.ok_or_else(|| {
+            Error::Media("decoder session bitstream missing after initialization".into())
+        })?;
         let packet_codec = codec_from_frame(frame, self.config_codec)?;
         if packet_codec != session_codec {
             return Err(Error::Media(format!(
@@ -410,6 +425,13 @@ impl DecoderBackend {
         if self.csc.is_some() {
             return Ok(());
         }
+        if !self.profile.supports_image_processor() {
+            return Err(Error::Media(format!(
+                "profile `{}` does not support image processor (CSC); configure a Host profile \
+                 or use a separate resize element",
+                self.profile.name()
+            )));
+        }
         let config = ImageProcessorConfig::new();
         let (processor, _report) =
             default_sdk_service().build_image_processor(self.profile, config, ImageOpKind::Csc)?;
@@ -424,19 +446,20 @@ impl BackendOps for DecoderBackend {
 
     fn convert_input(&mut self, frame: MediaFrame) -> Result<Packet> {
         self.ensure_decoder(&frame)?;
-        let codec = self.codec.expect("decoder session must be initialized");
-        let bitstream = self
-            .bitstream_format
-            .expect("decoder session must be initialized");
+        let codec = self.codec.ok_or_else(|| {
+            Error::Media("decoder session codec missing after initialization".into())
+        })?;
+        let bitstream = self.bitstream_format.ok_or_else(|| {
+            Error::Media("decoder session bitstream missing after initialization".into())
+        })?;
         let stream_index = self.stream_index;
         media_frame_to_avcodec_packet(frame, stream_index, codec, bitstream)
     }
 
     fn submit_value(&mut self, value: Packet) -> SubmitResult<Packet> {
-        let decoder = self
-            .decoder
-            .as_mut()
-            .expect("decoder must exist before submit");
+        let Some(decoder) = self.decoder.as_mut() else {
+            return SubmitResult::Error(AvError::NotInitialized);
+        };
         submit_result(value.clone(), decoder.submit_packet(value))
     }
 
@@ -445,7 +468,9 @@ impl BackendOps for DecoderBackend {
             return Ok(Poll::Pending);
         }
         if self.csc_pending {
-            let processor = self.csc.as_mut().expect("csc processor");
+            let Some(processor) = self.csc.as_mut() else {
+                return Err(AvError::InvalidState);
+            };
             match processor.poll_image() {
                 Ok(Poll::Ready(image)) => {
                     self.csc_pending = false;
@@ -462,24 +487,23 @@ impl BackendOps for DecoderBackend {
             }
         }
 
-        let decoder = self
-            .decoder
-            .as_mut()
-            .expect("decoder must exist before poll");
+        let Some(decoder) = self.decoder.as_mut() else {
+            return Ok(Poll::Pending);
+        };
         match decoder.poll_frame() {
             Ok(Poll::Ready(image)) => {
                 if let Some(dst) = self.output_format {
                     if image.format != dst {
                         self.ensure_csc(dst).map_err(map_av_error_to_av)?;
-                        let processor = self.csc.as_mut().expect("csc processor");
-                        processor
-                            .submit(ImageProcessRequest {
-                                src: image,
-                                op: ImageOp::Csc { dst_format: dst },
-                                aux: None,
-                                target_domain: None,
-                            })
-                            ?;
+                        let Some(processor) = self.csc.as_mut() else {
+                            return Err(AvError::InvalidState);
+                        };
+                        processor.submit(ImageProcessRequest {
+                            src: image,
+                            op: ImageOp::Csc { dst_format: dst },
+                            aux: None,
+                            target_domain: None,
+                        })?;
                         self.csc_pending = true;
                         return Ok(Poll::Pending);
                     }
@@ -560,6 +584,14 @@ impl DecodeCore {
         self.pump.stats()
     }
 
+    #[must_use]
+    pub fn session_diagnostics(&self) -> Option<MediaSessionDiagnostics> {
+        self.backend
+            .build_report
+            .as_ref()
+            .map(MediaSessionDiagnostics::from)
+    }
+
     pub fn submit_packet(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
@@ -581,7 +613,9 @@ impl DecodeCore {
         }
         match self.pump_step()? {
             PumpStep::OutputReady => {
-                let frame = self.pump.pop_output().expect("output after OutputReady");
+                let frame = self.pump.pop_output().ok_or_else(|| {
+                    Error::Media("decode pump reported OutputReady without queued frame".into())
+                })?;
                 if let Some((width, height, channels)) = self.output_assert {
                     validate_output_geometry(&frame, width, height, channels)?;
                 }
@@ -628,6 +662,7 @@ struct EncoderBackend {
     time_base: Option<MediaTimeBase>,
     memory_domain: Option<CoreMemoryDomain>,
     stream_index: u32,
+    build_report: Option<VideoSessionBuildReport>,
 }
 
 impl EncoderBackend {
@@ -642,6 +677,7 @@ impl EncoderBackend {
             time_base: config.time_base,
             memory_domain: config.memory_domain,
             stream_index: 0,
+            build_report: None,
         }
     }
 
@@ -685,7 +721,13 @@ impl EncoderBackend {
                 self.codec
             )));
         }
-        let mut config = EncoderConfig::new(
+        crate::profile::reject_memory_domain_conflict(
+            self.profile,
+            "encoder image",
+            self.memory_domain,
+            crate::profile::profile_encoder_image_domain(self.profile),
+        )?;
+        let config = EncoderConfig::new(
             self.codec,
             image.coded_width,
             image.coded_height,
@@ -693,11 +735,9 @@ impl EncoderBackend {
             time_base,
             bitrate,
         );
-        if let Some(domain) = self.memory_domain {
-            config = config.with_memory_domain(core_memory_domain_to_avcodec(domain));
-        }
-        let (encoder, _report) = default_sdk_service().build_encoder(self.profile, config)?;
+        let (encoder, report) = default_sdk_service().build_encoder(self.profile, config)?;
         self.encoder = Some(encoder);
+        self.build_report = Some(report);
         if let Some(info) = frame.meta.media_info.as_ref() {
             if let MediaPayloadInfo::Encoded(encoded) = &info.payload {
                 self.stream_index = encoded.stream_index;
@@ -716,10 +756,9 @@ impl BackendOps for EncoderBackend {
     }
 
     fn submit_value(&mut self, value: Image) -> SubmitResult<Image> {
-        let encoder = self
-            .encoder
-            .as_mut()
-            .expect("encoder must exist before submit");
+        let Some(encoder) = self.encoder.as_mut() else {
+            return SubmitResult::Error(AvError::NotInitialized);
+        };
         submit_result(value.clone(), encoder.submit_frame(value))
     }
 
@@ -841,6 +880,14 @@ impl EncodeCore {
         self.pump.stats()
     }
 
+    #[must_use]
+    pub fn session_diagnostics(&self) -> Option<MediaSessionDiagnostics> {
+        self.backend
+            .build_report
+            .as_ref()
+            .map(MediaSessionDiagnostics::from)
+    }
+
     pub fn submit_image(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
@@ -858,9 +905,12 @@ impl EncodeCore {
             return Ok(crate::ops::MediaPoll::Ready(frame));
         }
         match self.pump_step()? {
-            PumpStep::OutputReady => Ok(crate::ops::MediaPoll::Ready(
-                self.pump.pop_output().expect("output after OutputReady"),
-            )),
+            PumpStep::OutputReady => {
+                let frame = self.pump.pop_output().ok_or_else(|| {
+                    Error::Media("encode pump reported OutputReady without queued frame".into())
+                })?;
+                Ok(crate::ops::MediaPoll::Ready(frame))
+            }
             PumpStep::Pending => Ok(crate::ops::MediaPoll::Pending),
             PumpStep::EndOfStream => Ok(crate::ops::MediaPoll::EndOfStream),
         }
@@ -871,6 +921,7 @@ struct ResizeBackend {
     processor: Option<Box<dyn ImageProcessor>>,
     width: u32,
     height: u32,
+    build_report: Option<VideoSessionBuildReport>,
 }
 
 impl BackendOps for ResizeBackend {
@@ -890,18 +941,16 @@ impl BackendOps for ResizeBackend {
     }
 
     fn submit_value(&mut self, value: ImageProcessRequest) -> SubmitResult<ImageProcessRequest> {
-        let processor = self
-            .processor
-            .as_mut()
-            .expect("resize processor must exist");
+        let Some(processor) = self.processor.as_mut() else {
+            return SubmitResult::Error(AvError::NotInitialized);
+        };
         submit_result(value.clone(), processor.submit(value))
     }
 
     fn poll_output(&mut self) -> AvResult<Poll<MediaFrame>> {
-        let processor = self
-            .processor
-            .as_mut()
-            .expect("resize processor must exist");
+        let Some(processor) = self.processor.as_mut() else {
+            return Err(AvError::NotInitialized);
+        };
         match processor.poll_image() {
             Ok(Poll::Ready(image)) => {
                 let frame = avcodec_image_to_media_frame_with_processor(&image, None)
@@ -943,13 +992,24 @@ pub struct ResizeCore {
 
 impl ResizeCore {
     pub fn new(profile: AvcodecProfile, width: usize, height: usize) -> Result<Self> {
+        if !profile.supports_image_processor() {
+            return Err(Error::Media(format!(
+                "profile `{}` does not support image processor (resize)",
+                profile.name()
+            )));
+        }
         let width = u32::try_from(width)
             .map_err(|_| Error::Media("media_resize: width exceeds u32".to_string()))?;
         let height = u32::try_from(height)
             .map_err(|_| Error::Media("media_resize: height exceeds u32".to_string()))?;
+        if width == 0 || height == 0 {
+            return Err(Error::Media(
+                "media_resize: width and height must be non-zero".into(),
+            ));
+        }
         let sdk = default_sdk_service();
         let config = ImageProcessorConfig::new();
-        let (processor, _report) =
+        let (processor, report) =
             sdk.build_image_processor(profile, config, ImageOpKind::Resize)?;
         Ok(Self {
             pump: AsyncPump::new(),
@@ -957,6 +1017,7 @@ impl ResizeCore {
                 processor: Some(processor),
                 width,
                 height,
+                build_report: Some(report),
             },
         })
     }
@@ -978,6 +1039,14 @@ impl ResizeCore {
         self.pump.stats()
     }
 
+    #[must_use]
+    pub fn session_diagnostics(&self) -> Option<MediaSessionDiagnostics> {
+        self.backend
+            .build_report
+            .as_ref()
+            .map(MediaSessionDiagnostics::from)
+    }
+
     pub fn submit_image(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
@@ -995,9 +1064,12 @@ impl ResizeCore {
             return Ok(crate::ops::MediaPoll::Ready(frame));
         }
         match self.pump_step()? {
-            PumpStep::OutputReady => Ok(crate::ops::MediaPoll::Ready(
-                self.pump.pop_output().expect("output after OutputReady"),
-            )),
+            PumpStep::OutputReady => {
+                let frame = self.pump.pop_output().ok_or_else(|| {
+                    Error::Media("resize pump reported OutputReady without queued frame".into())
+                })?;
+                Ok(crate::ops::MediaPoll::Ready(frame))
+            }
             PumpStep::Pending => Ok(crate::ops::MediaPoll::Pending),
             PumpStep::EndOfStream => Ok(crate::ops::MediaPoll::EndOfStream),
         }

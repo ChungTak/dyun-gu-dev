@@ -42,6 +42,46 @@ jobs:
           toolchain: 1.96.1
       - run: cargo test --workspace
 
+  avcodec-profile-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: avcodec-profile-native-free
+            install_ffmpeg: false
+          - profile: avcodec-profile-software
+            install_ffmpeg: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.1
+      - name: Install FFmpeg development packages
+        if: matrix.install_ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            clang \
+            libclang-dev \
+            libavutil-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libswscale-dev \
+            libswresample-dev
+          echo "libavcodec=$(pkg-config --modversion libavcodec)"
+      - name: Check dg-media profile
+        env:
+          LIBYUV_TARGET: ubuntu-24.04_x86_64
+        run: cargo check -p dg-media --features ${{ matrix.profile }}
+      - name: Test dg-media profile
+        env:
+          LIBYUV_TARGET: ubuntu-24.04_x86_64
+        run: cargo test -p dg-media --features ${{ matrix.profile }}
+      # FFmpeg 8 + avcodec-rs fc728aa hits UP2-FFMPEG-01 (*const AVCodec).
+      # Job failure is intentional until upstream rev is bumped past the fix.
+
   openvino:
     runs-on: ubuntu-latest
     steps:

@@ -10,8 +10,9 @@
 #     -> librga resize -> DmaBuf NV12
 #     -> RKMPP encode -> Host H264 Packet
 #
-# Until avcodec-rs Profile V2 lands, session create returns a structured error
-# (kind=… profile=rkmpp-zero-copy). Do not claim copy_count==0 without hardware report.
+# Requires avcodec-profile-rkmpp-zero-copy + Rockchip runtime. Without hardware,
+# Factory V2 returns structured Unsupported/NotAvailable. Do not claim
+# copy_count==0 without a measured hardware TransferReport.
 apiVersion: dg/v1
 kind: Graph
 execution:

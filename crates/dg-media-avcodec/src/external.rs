@@ -13,12 +13,19 @@ pub struct ExternalExport {
 /// Probes whether external buffer export is available for the active profile.
 pub fn probe_external_export() -> ExternalExport {
     ExternalExport {
-        supported: false,
-        message: "external packet/image export requires UP-04 ExternalPacketDescriptor".into(),
+        supported: true,
+        message: "ExternalPacketDescriptor and ExternalImageDescriptor are available via \
+                  avcodec::core; dyun host bridge uses owned buffers unless an external handle \
+                  is explicitly imported"
+            .into(),
     }
 }
 
-/// Safe entry for external image construction; returns error until UP-04 lands.
+/// Safe entry for external image construction through the curated facade.
 pub fn try_import_external_image() -> Result<(), String> {
-    Err("external image import requires UP-04 ExternalPacketDescriptor and Profile V2".to_string())
+    Err(
+        "external image import is not wired in dyun bridge yet; use host buffers or extend \
+         bridge::import_avcodec_handle for device handles"
+            .to_string(),
+    )
 }

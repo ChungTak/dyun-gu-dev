@@ -95,6 +95,18 @@ impl AvcodecProfile {
         }
     }
 
+    /// Returns whether this profile exposes an image processor stage (resize/CSC).
+    #[must_use]
+    pub const fn supports_image_processor(self) -> bool {
+        !matches!(self, Self::NvcodecDeviceFrame)
+    }
+
+    /// AMF host profiles do not guarantee decode; only fallback may reach software decode.
+    #[must_use]
+    pub const fn supports_amf_decode(self) -> bool {
+        matches!(self, Self::AmfHostFallback)
+    }
+
     pub fn ensure_compiled(self) -> Result<()> {
         if !self.is_compiled() {
             return Err(Error::Config(format!(
@@ -233,6 +245,10 @@ fn io_memory_plan(profile: AvcodecProfile) -> VideoIoMemoryPlan {
 }
 
 /// Converts a dyun profile to the upstream SDK [`VideoProfileDescriptor`].
+///
+/// Host profiles leave the processor stage disabled so decode/encode-only requests
+/// do not auto-create a processor via `to_image_processor_config()`. Use
+/// [`profile_to_sdk_descriptor_with_processor`] when the request includes a processor.
 pub fn profile_to_sdk_descriptor(profile: AvcodecProfile) -> Result<VideoProfileDescriptor> {
     profile.ensure_compiled()?;
     let policy = backend_policy(profile);
@@ -252,13 +268,102 @@ pub fn profile_to_sdk_descriptor(profile: AvcodecProfile) -> Result<VideoProfile
     Ok(descriptor)
 }
 
+/// Profile descriptor with processor stage enabled for resize/CSC Factory requests.
+///
+/// - Host family profiles gain `Host → Host` processor domains.
+/// - RK zero-copy already declares `DrmPrime → DmaBuf`.
+/// - NV device-frame has no processor and returns [`Error::Config`].
+pub fn profile_to_sdk_descriptor_with_processor(
+    profile: AvcodecProfile,
+) -> Result<VideoProfileDescriptor> {
+    if !profile.supports_image_processor() {
+        return Err(Error::Config(format!(
+            "profile `{}` does not support image processor (resize/CSC)",
+            profile.name()
+        )));
+    }
+    let mut descriptor = profile_to_sdk_descriptor(profile)?;
+    if !descriptor.io.processor_enabled() {
+        // Plan 05: Host→Host processor for software / host hardware profiles.
+        let input = descriptor.io.decoder_image_output;
+        let output = descriptor.io.encoder_image_input;
+        descriptor.io = descriptor.io.with_processor(input, output);
+    }
+    descriptor.validate().map_err(|error| {
+        Error::Config(format!(
+            "profile `{}` processor topology validation failed: {error:?}",
+            profile.name()
+        ))
+    })?;
+    Ok(descriptor)
+}
+
+/// Expected decoder image domain for element `memory_domain` conflict checks.
+#[must_use]
+pub fn profile_decoder_image_domain(profile: AvcodecProfile) -> MemoryDomain {
+    io_memory_plan(profile).decoder_image_output
+}
+
+/// Expected encoder image domain for element `memory_domain` conflict checks.
+#[must_use]
+pub fn profile_encoder_image_domain(profile: AvcodecProfile) -> MemoryDomain {
+    io_memory_plan(profile).encoder_image_input
+}
+
+/// Rejects an element-level memory domain that conflicts with the frozen profile topology.
+pub fn reject_memory_domain_conflict(
+    profile: AvcodecProfile,
+    role: &str,
+    requested: Option<dg_core::MemoryDomain>,
+    expected: MemoryDomain,
+) -> Result<()> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let requested = match requested {
+        dg_core::MemoryDomain::Host => MemoryDomain::Host,
+        dg_core::MemoryDomain::DmaBuf => MemoryDomain::DmaBuf,
+        dg_core::MemoryDomain::DrmPrime => MemoryDomain::DrmPrime,
+        dg_core::MemoryDomain::CudaDevice => MemoryDomain::CudaDevice,
+        dg_core::MemoryDomain::VaapiSurface
+        | dg_core::MemoryDomain::MppBuffer
+        | dg_core::MemoryDomain::SophonDevice
+        | dg_core::MemoryDomain::Opaque => {
+            return Err(Error::Config(format!(
+                "unsupported memory_domain {requested:?} for avcodec profile `{}`",
+                profile.name()
+            )));
+        }
+    };
+    if requested != expected {
+        return Err(Error::Config(format!(
+            "element memory_domain {requested:?} conflicts with profile `{}` {role} topology \
+             {expected:?}",
+            profile.name()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compiled_profiles, profile_to_sdk_descriptor, reject_profile_hw_conflict, resolve_profile,
-        AvcodecProfile,
+        compiled_profiles, profile_to_sdk_descriptor, profile_to_sdk_descriptor_with_processor,
+        reject_profile_hw_conflict, resolve_profile, AvcodecProfile,
     };
     use dg_media_avcodec::MemoryDomain;
+
+    #[test]
+    fn nv_device_frame_has_no_processor() {
+        assert!(!AvcodecProfile::NvcodecDeviceFrame.supports_image_processor());
+        assert!(AvcodecProfile::NativeFree.supports_image_processor());
+    }
+
+    #[test]
+    fn amf_host_does_not_guarantee_decode() {
+        assert!(!AvcodecProfile::AmfHost.supports_amf_decode());
+        assert!(AvcodecProfile::AmfHostFallback.supports_amf_decode());
+    }
 
     #[test]
     fn parse_accepts_stable_profile_names() {
@@ -352,7 +457,23 @@ mod tests {
         assert_eq!(io.decoder_packet_input, MemoryDomain::Host);
         assert_eq!(io.decoder_image_output, MemoryDomain::Host);
         assert_eq!(io.encoder_image_input, MemoryDomain::Host);
+        // Base descriptor leaves processor disabled so decode-only does not auto-create one.
         assert!(!io.processor_enabled());
+    }
+
+    #[test]
+    fn host_processor_descriptor_enables_host_to_host() {
+        let descriptor = profile_to_sdk_descriptor_with_processor(AvcodecProfile::NativeFree)
+            .expect("native-free processor");
+        assert!(descriptor.io.processor_enabled());
+        assert_eq!(
+            descriptor.io.processor_image_input,
+            Some(MemoryDomain::Host)
+        );
+        assert_eq!(
+            descriptor.io.processor_image_output,
+            Some(MemoryDomain::Host)
+        );
     }
 
     #[test]

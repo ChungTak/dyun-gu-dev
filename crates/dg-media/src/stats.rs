@@ -36,7 +36,12 @@ impl MediaSessionStats {
         }
     }
 
-    pub fn record_transfer(&mut self, path_kind: crate::TransferPathKind, copy_count: usize, bytes: usize) {
+    pub fn record_transfer(
+        &mut self,
+        path_kind: crate::TransferPathKind,
+        copy_count: usize,
+        bytes: usize,
+    ) {
         match path_kind {
             crate::TransferPathKind::HostClone => {
                 self.host_clone_count = self.host_clone_count.saturating_add(1);
