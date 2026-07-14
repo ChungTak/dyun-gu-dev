@@ -2,7 +2,7 @@
 
 ## 1. 环境
 
-- Rust 1.96.1
+- Rust **1.94.1**（见仓库根 `rust-toolchain.toml` / workspace `rust-version`）
 - 默认/mock 路径无需厂商 SDK
 - OpenVINO、RKNN2、TensorRT、Sophon 真实后端需要相应 SDK 与运行设备
 
@@ -187,15 +187,50 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 ## 5. 媒体与流
 
 `dg-media` 注册 `media_decode`、`media_encode`、`media_resize`、`media_osd`。
-默认构建可用录制的内存帧验证完整图；`avcodec` feature 提供外部媒体 handle
-导入、同内存域共享和跨域 staging fallback。
+默认构建可用录制的内存帧验证完整图（**raw adapter**：只校验/relabel payload，
+不解析压缩码流）。
 
-启用 `dg-media` 的 `avcodec` feature 后，`media_decode` 与 `media_encode` 通过
-avcodec-rs `RegistryBuilder` 使用已编译的 codec backend；默认的可选 backend 是
-纯 Rust JPEG/MJPEG 软件 codec，`media_resize` 通过纯 Rust zune `ImageProcessor`
-执行，`media_osd` 始终使用本地实现。`codec` 参数为 `jpeg` 或 `mjpeg` 时可走
-该 SDK-free 路径；H.264 及硬件 codec 还需要对应的 codec feature 和运行时依赖。
-默认 `dg-media` feature 仍关闭 `avcodec`，继续使用原有 synthetic Sans-I/O cores。
+### 5.1 avcodec Profile
+
+真实 codec 需要选择一个 **`avcodec-profile-*` Cargo feature**，并在节点参数里写
+同名运行时 `profile`（例如 `native-free`、`software`、`rkmpp-host`）。
+
+| Cargo feature | 典型用途 |
+| --- | --- |
+| `avcodec-profile-native-free` | 纯 Rust JPEG + rust-h264 Host（推荐本地验证） |
+| `avcodec-profile-software` | FFmpeg/openh264 Host |
+| `avcodec-profile-rkmpp-host` / `-fallback` | Rockchip Host（fallback 才可回退软件） |
+| `avcodec-profile-rkmpp-zero-copy` | DrmPrime→RGA→DmaBuf 图像链（上游 Profile V2 门禁） |
+| `avcodec-profile-nvcodec-host` / `-fallback` | NV Host |
+| `avcodec-profile-nvcodec-device-frame` | CudaDevice NV12 device-frame（**不是**完整 CUDA 零拷贝） |
+| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | Intel/AMD Host |
+
+规则摘要：
+
+- 未写 `profile` 且只编译了一个 Profile 时自动选用；编译多个时必须显式选择。
+- 不能同时写 `profile` 与遗留 `hw`。
+- 旧 feature 名 `avcodec` 兼容映射到 native-free，并告警。
+- **零拷贝**必须同时有 MemoryDomain、external handle、plane layout、ownership guard
+  与 `TransferReport.copy_count == 0` 证据；不得仅凭 domain 同名宣称。
+
+示例图与 feature 对照见 [`examples/media/README.md`](../examples/media/README.md)。
+
+```bash
+# raw adapter（无 codec SDK）
+cargo run -p dg-cli --no-default-features --features media -- \
+  validate --config examples/media/raw-adapter.yaml
+
+# native-free JPEG（部分发行版需设置 LIBYUV_TARGET）
+LIBYUV_TARGET=ubuntu-24.04_x86_64 \
+cargo run -p dg-cli --no-default-features \
+  --features media,avcodec-profile-native-free -- \
+  validate --config examples/media/native-free-jpeg.yaml
+```
+
+`media_osd` 始终使用本地实现。图内媒体元数据以 `media_info`（codec、bitstream、
+PTS/DTS/timebase、plane layout）为准，不再用 graph `sequence` 或 tags 冒充时间戳。
+
+### 5.2 流
 
 `dg-stream` 注册 `rtsp_src`、`httpflv_src`、`rtmp_sink`、`webrtc_sink`。
 `mock://` URL 使用进程内 `MemoryStreamHub`，适合确定性测试；真实协议 URL 通过
@@ -204,14 +239,23 @@ track 已 Ready，并提供 H264/H265/H266/AAC 所需的 codec extradata。
 
 `dg-cli` 和 `dg-capi` 通过 `media` 与 `stream` feature 链接这些 registry；两个
 feature 默认启用，因此 `dg list-elements` 和 C API 的配置加载都能发现上述八个
-element。它们只链接无 SDK 的 stub 实现，不会启用 `avcodec` 或 `cheetah`；
-使用 `--no-default-features` 可构建不含 media/stream registry 的精简版本。
+element。它们默认**不**启用任何 `avcodec-profile-*` 或 `cheetah`；需要真实 codec
+时再显式打开 Profile feature。
 
 ## 6. C API
 
 头文件位于 `crates/dg-capi/include/dg_capi.h`，示例位于
 `crates/dg-capi/examples/basic.c`。句柄由对应的 `*_free` 函数释放，失败后可通过
 `dg_last_error()` 获取当前线程的错误信息。
+
+`dg_last_error()` 文本以稳定字段开头，便于脚本解析：
+
+- 媒体/会话失败：`kind=… profile=… role=… operation=… backend=… domain=… detail=…`
+  （与 `dg_media::MediaErrorContext` 一致）
+- 其他失败：`kind=Other operation=Unknown detail=…`
+
+Profile feature 与 CLI 同名（例如 `avcodec-profile-native-free`）；C ABI 本身不新增
+avcodec handle，仍通过 graph YAML/JSON 的 `profile` 参数选择后端。
 
 `dg_engine_reload_string` / `dg_engine_reload_file` 会对已构建图原位应用新配置，
 无需再次 `dg_engine_build`。为避免输入被不同配置解释，仍有待处理输入时 reload

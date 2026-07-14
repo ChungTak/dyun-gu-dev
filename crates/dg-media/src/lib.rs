@@ -5,26 +5,56 @@
 //! `dg-media` owns the framework's media-side buffer envelope and the decision
 //! logic for choosing zero-copy versus staging transfer paths.
 
-#[cfg(feature = "avcodec")]
+#[cfg(feature = "avcodec-sdk")]
+mod async_core;
+#[cfg(feature = "avcodec-sdk")]
 mod avcodec;
 mod bridge;
 mod elements;
+#[cfg(feature = "avcodec-sdk")]
+mod error_ctx;
+#[cfg(feature = "avcodec-sdk")]
+mod format_map;
 mod frame;
+#[cfg(feature = "avcodec-sdk")]
+mod legacy;
+mod media_meta;
 mod mock;
 mod ops;
 mod planner;
+#[cfg(feature = "avcodec-sdk")]
+mod profile;
+#[cfg(feature = "avcodec-sdk")]
+mod session;
+mod stats;
 mod stream_metadata;
 
-#[cfg(feature = "avcodec")]
-pub use avcodec::{DecodeCore as AvcodecDecodeCore, EncodeCore as AvcodecEncodeCore, HwPreference};
+#[cfg(feature = "avcodec-sdk")]
+pub use avcodec::{
+    DecodeCore as AvcodecDecodeCore, DecodeCoreConfig as AvcodecDecodeCoreConfig,
+    EncodeCore as AvcodecEncodeCore, EncodeCoreConfig as AvcodecEncodeCoreConfig,
+    ResizeCore as AvcodecResizeCore,
+};
+#[cfg(feature = "avcodec-sdk")]
+pub use error_ctx::{media_error_with_context, MediaErrorContext, MediaOperation};
 pub use frame::{MediaFrame, MediaFrameKind, MediaFrameMeta};
+#[cfg(feature = "avcodec-sdk")]
+#[allow(deprecated)]
+pub use legacy::{resolve_legacy_hw, HwPreference};
+pub use media_meta::{media_frame_timing, normalize_media_frame_meta};
 pub use mock::{MockMediaSink, MockMediaSource};
 pub use ops::{DecodeCore, EncodeCore, MediaPoll, OsdBox, OsdCore, ResizeCore};
 pub use planner::{
     preferred_memory_domain, CopyPath, FrameLayout, FrameTransferRequest, HandleKind, MemoryDtype,
-    MemoryFormat, Subsampling, TransferMode, TransferReport, ZeroCopyPlan, ZeroCopyPlanner,
-    ZeroCopyRequest,
+    MemoryFormat, Subsampling, TransferMode, TransferPathKind, TransferReport, ZeroCopyPlan,
+    ZeroCopyPlanner, ZeroCopyRequest,
 };
+#[cfg(feature = "avcodec-sdk")]
+pub use profile::{
+    compiled_profiles, profile_descriptor, reject_profile_hw_conflict, resolve_profile,
+    AvcodecProfile, ProfileDescriptor,
+};
+pub use stats::MediaSessionStats;
 pub use stream_metadata::{
     MediaStreamCodec, MediaStreamFormat, MediaStreamKind, MediaStreamMetadata, MediaStreamTimebase,
 };
@@ -39,7 +69,7 @@ pub use bridge::{
     BridgedMediaFrame,
 };
 
-#[cfg(feature = "avcodec")]
+#[cfg(feature = "avcodec-sdk")]
 pub use bridge::{
     avcodec_external_handle_to_core, avcodec_handle_to_buffer, avcodec_image_to_media_frame,
     avcodec_memory_domain_to_core, avcodec_packet_to_media_frame,

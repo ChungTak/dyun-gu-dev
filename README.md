@@ -17,8 +17,12 @@ cargo run -p dg-cli -- list-elements
 处理录制的原始帧 payload，不是通用压缩码流解析器。真实后端和可选 codec
 通过各 crate 的 feature 及对应 SDK/运行时环境启用。
 
+真实压缩编解码请启用同名 **`avcodec-profile-*`** feature，并在图节点里写
+`profile`（示例与 feature 对照见 [examples/media/README.md](examples/media/README.md)）。
+
 - [用户指南](docs/user-guide.md)
 - [设计方案与里程碑](docs/design.md)
+- [媒体 Profile 示例](examples/media/README.md)
 - [C API 示例](crates/dg-capi/examples/basic.c)
 
 ## 质量门禁

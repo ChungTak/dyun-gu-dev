@@ -1,7 +1,11 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
-#[cfg(feature = "avcodec")]
+mod external;
+
+pub use external::{probe_external_export, try_import_external_image, ExternalExport};
+
+#[cfg(feature = "avcodec-sdk")]
 pub use avcodec::core::*;
 
-#[cfg(feature = "avcodec")]
+#[cfg(feature = "avcodec-sdk")]
 pub use avcodec::default_registry_builder;

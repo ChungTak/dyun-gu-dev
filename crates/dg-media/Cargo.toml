@@ -8,16 +8,52 @@ rust-version.workspace = true
 
 [features]
 default = []
-avcodec = ["dep:dg-media-avcodec", "dg-media-avcodec/avcodec"]
-codec-ffmpeg = ["avcodec", "dg-media-avcodec/codec-ffmpeg"]
-codec-x264 = ["avcodec", "dg-media-avcodec/codec-x264"]
-codec-x265 = ["avcodec", "dg-media-avcodec/codec-x265"]
-codec-openh264 = ["avcodec", "dg-media-avcodec/codec-openh264"]
-codec-rkmpp = ["avcodec", "dg-media-avcodec/codec-rkmpp"]
-codec-librga = ["avcodec", "dg-media-avcodec/codec-librga"]
-codec-nvcodec = ["avcodec", "dg-media-avcodec/codec-nvcodec"]
-codec-onevpl = ["avcodec", "dg-media-avcodec/codec-onevpl"]
-codec-amf = ["avcodec", "dg-media-avcodec/codec-amf"]
+
+# Internal marker: enables dg-media-avcodec integration without selecting a profile.
+avcodec-sdk = ["dep:dg-media-avcodec", "dg-media-avcodec/avcodec-sdk"]
+
+# Legacy alias mapping to the native-free compatibility profile.
+avcodec = ["avcodec-profile-native-free"]
+
+# Profile features forwarded to dg-media-avcodec.
+avcodec-profile-native-free = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-native-free"]
+avcodec-profile-software = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-software"]
+avcodec-profile-rkmpp-host = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-rkmpp-host"]
+avcodec-profile-rkmpp-host-fallback = [
+    "avcodec-sdk",
+    "dg-media-avcodec/avcodec-profile-rkmpp-host-fallback",
+]
+avcodec-profile-nvcodec-host = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-nvcodec-host"]
+avcodec-profile-nvcodec-host-fallback = [
+    "avcodec-sdk",
+    "dg-media-avcodec/avcodec-profile-nvcodec-host-fallback",
+]
+avcodec-profile-onevpl-host = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-onevpl-host"]
+avcodec-profile-onevpl-host-fallback = [
+    "avcodec-sdk",
+    "dg-media-avcodec/avcodec-profile-onevpl-host-fallback",
+]
+avcodec-profile-amf-host = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-amf-host"]
+avcodec-profile-amf-host-fallback = [
+    "avcodec-sdk",
+    "dg-media-avcodec/avcodec-profile-amf-host-fallback",
+]
+avcodec-profile-rkmpp-zero-copy = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-rkmpp-zero-copy"]
+avcodec-profile-nvcodec-device-frame = [
+    "avcodec-sdk",
+    "dg-media-avcodec/avcodec-profile-nvcodec-device-frame",
+]
+
+# Legacy codec-* features retain direct backend enable semantics.
+codec-ffmpeg = ["avcodec-sdk", "dg-media-avcodec/codec-ffmpeg"]
+codec-x264 = ["avcodec-sdk", "dg-media-avcodec/codec-x264"]
+codec-x265 = ["avcodec-sdk", "dg-media-avcodec/codec-x265"]
+codec-openh264 = ["avcodec-sdk", "dg-media-avcodec/codec-openh264"]
+codec-rkmpp = ["avcodec-sdk", "dg-media-avcodec/codec-rkmpp"]
+codec-librga = ["avcodec-sdk", "dg-media-avcodec/codec-librga"]
+codec-nvcodec = ["avcodec-sdk", "dg-media-avcodec/codec-nvcodec"]
+codec-onevpl = ["avcodec-sdk", "dg-media-avcodec/codec-onevpl"]
+codec-amf = ["avcodec-sdk", "dg-media-avcodec/codec-amf"]
 
 [dependencies]
 dg-core = { path = "../dg-core" }

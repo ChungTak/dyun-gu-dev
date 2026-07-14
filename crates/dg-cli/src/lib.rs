@@ -11,6 +11,7 @@ use dg_media::{
     FrameLayout, FrameTransferRequest, HandleKind, MediaFrame, MemoryDtype, MemoryFormat,
     TransferReport, ZeroCopyPlanner,
 };
+#[cfg(feature = "stream")]
 use dg_stream::{
     CodecId, MediaKind, MemoryStreamHub, PublisherSink, Rational32, TrackInfo, TrackReadiness,
 };
@@ -53,6 +54,7 @@ pub enum Command {
         #[arg(long)]
         watch: bool,
     },
+    #[cfg(feature = "stream")]
     Demo {
         #[arg(long)]
         config: PathBuf,
@@ -82,6 +84,7 @@ pub fn run(cli: Cli) -> Result<()> {
             format,
             watch,
         } => run_graph_with_watch(&config, format, watch),
+        #[cfg(feature = "stream")]
         Command::Demo { config } => {
             let summary = run_demo(&config)?;
             println!(
@@ -110,6 +113,7 @@ pub struct DemoSummary {
 const DEMO_INPUTS: [&str; 2] = ["mock://demo/input-a", "mock://demo/input-b"];
 const DEMO_FRAME_COUNT: usize = 3;
 
+#[cfg(feature = "stream")]
 pub fn run_demo(path: &Path) -> Result<DemoSummary> {
     let spec = load_spec(path)?;
     let publishers = DEMO_INPUTS
@@ -136,6 +140,7 @@ pub fn run_demo(path: &Path) -> Result<DemoSummary> {
     })
 }
 
+#[cfg(feature = "stream")]
 fn seed_demo_stream(url: &str) -> Result<JoinHandle<Result<()>>> {
     let publisher = MemoryStreamHub::global().publish(url, Default::default())?;
     let mut track = TrackInfo::new(1, MediaKind::Video, CodecId::MJPEG, 90_000);

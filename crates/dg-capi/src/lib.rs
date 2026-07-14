@@ -249,10 +249,27 @@ impl Engine {
     }
 }
 
-fn set_error(message: impl Into<String>) {
+/// Formats a thread-local C error string with stable diagnostic fields.
+///
+/// Media failures already use `kind= profile= role= operation= backend= domain=`
+/// prefixes from `dg_media::MediaErrorContext`. Other failures are wrapped as
+/// `kind=Other operation=Unknown detail=…` so C callers can always parse fields.
+fn format_c_error_message(message: impl Into<String>) -> String {
     let message = message.into().replace('\0', " ");
+    if let Some(idx) = message.find("kind=") {
+        let tail = message[idx..].trim();
+        if tail.contains("operation=") {
+            return tail.to_string();
+        }
+        return format!("{tail} operation=Unknown");
+    }
+    format!("kind=Other operation=Unknown detail={message}")
+}
+
+fn set_error(message: impl Into<String>) {
+    let message = format_c_error_message(message);
     let value = CString::new(message)
-        .unwrap_or_else(|_| CString::new("unknown error").expect("literal has no NUL"));
+        .unwrap_or_else(|_| CString::new("kind=Other operation=Unknown detail=unknown error").expect("literal has no NUL"));
     LAST_ERROR.with(|last| *last.borrow_mut() = Some(value));
 }
 
@@ -1652,6 +1669,79 @@ connections:
         let status = unsafe { dg_engine_build(ptr::null_mut()) };
         assert_eq!(status, DgStatus::NullPointer);
         assert!(!dg_last_error().is_null());
+        let message = unsafe { CStr::from_ptr(dg_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            message.starts_with("kind="),
+            "dg_last_error must start with kind=: {message}"
+        );
+        assert!(
+            message.contains("operation="),
+            "dg_last_error must include operation=: {message}"
+        );
+    }
+
+    #[test]
+    fn format_c_error_message_preserves_media_fields() {
+        let formatted = format_c_error_message(
+            "element media_decode: kind=Unsupported profile=rkmpp-host role=decoder operation=Select backend=none detail=no candidate",
+        );
+        assert!(formatted.starts_with("kind=Unsupported"));
+        assert!(formatted.contains("profile=rkmpp-host"));
+        assert!(formatted.contains("operation=Select"));
+        assert!(formatted.contains("backend=none"));
+        assert!(!formatted.contains("element media_decode"));
+    }
+
+    #[test]
+    fn format_c_error_message_wraps_plain_text() {
+        let formatted = format_c_error_message("null engine pointer");
+        assert_eq!(
+            formatted,
+            "kind=Other operation=Unknown detail=null engine pointer"
+        );
+    }
+
+    #[cfg(feature = "avcodec-profile-native-free")]
+    #[test]
+    fn load_rejects_unknown_media_profile_with_structured_error() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        let spec = CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: decode
+    kind: media_decode
+    params:
+      profile: not-a-real-profile
+      codec: jpeg
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> decode.in
+  - decode.out -> sink.in
+"#,
+        )
+        .expect("spec");
+        assert_eq!(
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, spec.as_ptr()) },
+            DgStatus::ParseError
+        );
+        let message = unsafe { CStr::from_ptr(dg_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(message.starts_with("kind="), "{message}");
+        assert!(
+            message.contains("not-a-real-profile") || message.contains("unknown avcodec profile"),
+            "{message}"
+        );
+        unsafe { dg_engine_free(engine) };
     }
 
     #[test]

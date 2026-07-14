@@ -1,0 +1,38 @@
+# Software Host Profile (FFmpeg/openh264 + libyuv when the profile feature is built).
+# Build:
+#   cargo run -p dg-cli --no-default-features \
+#     --features media,avcodec-profile-software -- \
+#     validate --config examples/media/software-host.yaml
+#
+# MemoryDomain: Host. allow_staging: true. Not zero-copy.
+# H264 requires bitrate; JPEG is omitted here so production video params are explicit.
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: sequential
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: encode
+    kind: media_encode
+    params:
+      profile: software
+      codec: h264
+      bitrate: 1000000
+      time_base_num: 1
+      time_base_den: 30
+      bitstream_format: h264_annexb
+  - name: decode
+    kind: media_decode
+    params:
+      profile: software
+      codec: h264
+      bitstream_format: h264_annexb
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> encode.in
+  - encode.out -> decode.in
+  - decode.out -> sink.in

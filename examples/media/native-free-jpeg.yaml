@@ -1,0 +1,37 @@
+# Host JPEG encode → decode with native-free Profile (jpeg/zune/libyuv/rust-h264).
+# Build:
+#   LIBYUV_TARGET=ubuntu-24.04_x86_64 \
+#   cargo run -p dg-cli --no-default-features \
+#     --features media,avcodec-profile-native-free -- \
+#     validate --config examples/media/native-free-jpeg.yaml
+#
+# Expected: Host MemoryDomain, selected backends jpeg (+ libyuv if resize added).
+# Copy path: Host materialization; not claimed as zero-copy.
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: sequential
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: encode
+    kind: media_encode
+    params:
+      profile: native-free
+      codec: jpeg
+  - name: decode
+    kind: media_decode
+    params:
+      profile: native-free
+      codec: jpeg
+      width: 2
+      height: 2
+      channels: 3
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> encode.in
+  - encode.out -> decode.in
+  - decode.out -> sink.in

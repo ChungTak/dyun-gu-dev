@@ -1,0 +1,53 @@
+# RKMPP/RGA zero-copy image chain (UP-03 gated).
+# Build:
+#   cargo run -p dg-cli --no-default-features \
+#     --features media,avcodec-profile-rkmpp-zero-copy -- \
+#     validate --config examples/media/rkmpp-zero-copy.yaml
+#
+# Topology (image chain only; Host compressed ingress/egress excluded from copy_count):
+#   Host H264 Packet
+#     -> RKMPP decode -> DrmPrime NV12
+#     -> librga resize -> DmaBuf NV12
+#     -> RKMPP encode -> Host H264 Packet
+#
+# Until avcodec-rs Profile V2 lands, session create returns a structured error
+# (kind=… profile=rkmpp-zero-copy). Do not claim copy_count==0 without hardware report.
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: sequential
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: decode
+    kind: media_decode
+    params:
+      profile: rkmpp-zero-copy
+      codec: h264
+      bitstream_format: h264_annexb
+      memory_domain: drm_prime
+  - name: resize
+    kind: media_resize
+    params:
+      profile: rkmpp-zero-copy
+      width: 1280
+      height: 720
+      memory_domain: dmabuf
+  - name: encode
+    kind: media_encode
+    params:
+      profile: rkmpp-zero-copy
+      codec: h264
+      bitrate: 4000000
+      time_base_num: 1
+      time_base_den: 25
+      memory_domain: dmabuf
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> decode.in
+  - decode.out -> resize.in
+  - resize.out -> encode.in
+  - encode.out -> sink.in

@@ -1,0 +1,32 @@
+# SDK-free media path: media_decode only validates/relabels recorded raw frames.
+# Build: cargo run -p dg-cli --no-default-features --features media -- validate --config examples/media/raw-adapter.yaml
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: sequential
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: decode
+    kind: media_decode
+    params:
+      width: 2
+      height: 2
+      channels: 3
+  - name: resize
+    kind: media_resize
+    params:
+      width: 4
+      height: 4
+  - name: encode
+    kind: media_encode
+    params: {}
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> decode.in
+  - decode.out -> resize.in
+  - resize.out -> encode.in
+  - encode.out -> sink.in

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::stream_metadata::MediaStreamMetadata;
 use dg_core::{
-    Buffer, BufferDesc, DataFormat, DataType, DeviceKind, MemoryDomain, Result, Shape, Tensor,
-    TensorDesc,
+    Buffer, BufferDesc, DataFormat, DataType, DeviceKind, MediaInfo, MemoryDomain, Result, Shape,
+    Tensor, TensorDesc,
 };
 
 /// Media-side frame kind.
@@ -15,12 +15,17 @@ pub enum MediaFrameKind {
 }
 
 /// Metadata shared by media frames.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct MediaFrameMeta {
+    /// Deprecated top-level PTS; synchronized from [`Self::media_info`] when present.
     pub pts: Option<i64>,
+    /// Deprecated top-level DTS; synchronized from [`Self::media_info`] when present.
     pub dts: Option<i64>,
     pub stream_id: Option<String>,
     pub tags: BTreeMap<String, String>,
+    /// Authoritative encoded/image metadata for graph and backend transport.
+    pub media_info: Option<Box<MediaInfo>>,
+    /// Deprecated per-frame stream metadata; use [`Self::media_info`] for new producers.
     pub stream_metadata: Option<MediaStreamMetadata>,
 }
 
@@ -47,6 +52,29 @@ impl MediaFrame {
         domain: MemoryDomain,
         buffer: Buffer,
     ) -> Self {
+        Self::with_meta(
+            kind,
+            dtype,
+            format,
+            shape,
+            device,
+            domain,
+            buffer,
+            MediaFrameMeta::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_meta(
+        kind: MediaFrameKind,
+        dtype: DataType,
+        format: DataFormat,
+        shape: Vec<usize>,
+        device: DeviceKind,
+        domain: MemoryDomain,
+        buffer: Buffer,
+        meta: MediaFrameMeta,
+    ) -> Self {
         Self {
             kind,
             dtype,
@@ -55,7 +83,7 @@ impl MediaFrame {
             device,
             domain,
             buffer,
-            meta: MediaFrameMeta::default(),
+            meta,
         }
     }
 

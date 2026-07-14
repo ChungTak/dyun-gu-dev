@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dg_core::{Classification, Detection, FaceDetection, OcrText, Tensor, Track};
+use dg_core::{Classification, Detection, FaceDetection, MediaInfo, OcrText, Tensor, Track};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PacketMeta {
     pub sequence: u64,
     pub stream_id: Option<String>,
     pub tags: BTreeMap<String, String>,
+    pub media_info: Option<Box<MediaInfo>>,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +253,62 @@ mod tests {
             .write_from_slice(&[1, 2, 3, 4])
             .expect("write test tensor");
         tensor
+    }
+
+    #[test]
+    fn packet_meta_preserves_media_info_on_clone() {
+        use dg_core::{
+            EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaInfo, MediaKind, MediaTimeBase,
+            MediaTiming,
+        };
+
+        use super::PacketMeta;
+
+        let timing = MediaTiming {
+            pts: Some(42),
+            dts: None,
+            time_base: Some(MediaTimeBase::new(1, 90_000)),
+        };
+        let media_info = MediaInfo::encoded(
+            EncodedMediaInfo {
+                stream_index: 1,
+                track_id: Some(3),
+                media_kind: MediaKind::Video,
+                codec: MediaCodec::H265,
+                bitstream_format: dg_core::BitstreamFormat::H265AnnexB,
+                flags: EncodedPacketFlags {
+                    key: true,
+                    lost: false,
+                    corrupt: false,
+                },
+                codec_configs: Vec::new(),
+            },
+            timing,
+        )
+        .expect("media info");
+        let packet = Packet::tensor(test_tensor()).with_meta(PacketMeta {
+            sequence: 7,
+            stream_id: Some("s1".into()),
+            tags: Default::default(),
+            media_info: Some(Box::new(media_info)),
+        });
+        let cloned = packet.clone();
+        assert_eq!(
+            cloned
+                .meta
+                .media_info
+                .as_deref()
+                .map(MediaInfo::is_keyframe),
+            Some(true)
+        );
+        assert_eq!(
+            cloned
+                .meta
+                .media_info
+                .as_ref()
+                .and_then(|info| info.timing.pts),
+            Some(42)
+        );
     }
 
     #[test]

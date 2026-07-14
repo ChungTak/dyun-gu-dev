@@ -26,7 +26,7 @@ edition = "2021"
 version = "0.1.0"
 license = "Apache-2.0"
 repository = "https://github.com/dyun-gu-dev/dyun-gu-dev"
-rust-version = "1.96.1"
+rust-version = "1.94.1"
 
 [workspace.dependencies]
 half = "2"

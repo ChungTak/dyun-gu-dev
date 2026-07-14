@@ -6,25 +6,28 @@
 //! selection is delegated to [`crate::connector`]: `mock://` runs fully
 //! in-process, protocol schemes require the feature-gated cheetah runtime.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use dg_core::DataType;
+use dg_core::{
+    BitstreamFormat, EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaCodecConfig, MediaInfo,
+    MediaKind as CoreMediaKind, MediaPayloadInfo, MediaTimeBase, MediaTiming, DataType,
+};
 use dg_graph::{
     CreatedElement, Element, ElementDescriptor, ElementHandle, ElementIo, NodeSpec, Packet,
     PacketMeta, ParamField, ParamType, PortSchema,
 };
 use serde_json::{Map, Value};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::connector::{open_pull, open_push, validate_endpoint_url, PullEndpoint, StreamProtocol};
-use crate::hub::MEDIA_TAG;
+use crate::hub::{KEYFRAME_TAG, MEDIA_TAG};
 use crate::stream::SubscriberSourceSyncExt;
 use crate::stream::{
     BackpressurePolicy, DispatchResult, MediaFilter, PublisherOptions, PublisherSink,
     SubscriberOptions,
 };
-use crate::track::{TrackInfo, TrackReadiness};
+use crate::track::{CodecExtradata, CodecId as TrackCodec, TrackInfo, TrackReadiness};
 use dg_media::{MediaFrame, MediaFrameKind};
 
 const PULL_OUTPUT_PORT: PortSchema = PortSchema {
@@ -165,6 +168,7 @@ struct StreamPullElement {
 
 impl Element for StreamPullElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
+        let mut tracks_by_id: HashMap<u64, TrackInfo> = HashMap::new();
         for track in &self.endpoint.tracks {
             if track.readiness != TrackReadiness::Ready {
                 let _ = self.endpoint.source.close_blocking();
@@ -179,6 +183,7 @@ impl Element for StreamPullElement {
                     "track codec config invalid: {err}"
                 )));
             }
+            tracks_by_id.insert(track.track_id, track.clone());
         }
         let mut sequence = 0u64;
         loop {
@@ -189,7 +194,7 @@ impl Element for StreamPullElement {
             match self.endpoint.source.recv_blocking() {
                 Ok(Some(frame)) if frame.is_end_of_stream() => break,
                 Ok(Some(frame)) => {
-                    let packet = media_frame_to_packet(&frame, sequence)?;
+                    let packet = media_frame_to_packet(&frame, sequence, &tracks_by_id)?;
                     sequence = sequence.saturating_add(1);
                     io.send("out", packet)?;
                 }
@@ -278,7 +283,11 @@ impl Element for StreamPushElement {
     }
 }
 
-fn media_frame_to_packet(frame: &Arc<MediaFrame>, sequence: u64) -> dg_graph::Result<Packet> {
+fn media_frame_to_packet(
+    frame: &Arc<MediaFrame>,
+    sequence: u64,
+    tracks_by_id: &HashMap<u64, TrackInfo>,
+) -> dg_graph::Result<Packet> {
     let mut frame = match Arc::try_unwrap(Arc::clone(frame)) {
         Ok(frame) => frame,
         Err(shared) => shared.as_ref().clone(),
@@ -286,17 +295,17 @@ fn media_frame_to_packet(frame: &Arc<MediaFrame>, sequence: u64) -> dg_graph::Re
     if frame.shape.is_empty() {
         frame.shape = vec![frame.buffer.len()];
     }
-    let mut tags = frame.meta.tags.clone();
-    if let Some(pts) = frame.meta.pts {
-        tags.insert(PTS_TAG.to_string(), pts.to_string());
-    }
-    if let Some(dts) = frame.meta.dts {
-        tags.insert(DTS_TAG.to_string(), dts.to_string());
-    }
+    enrich_frame_media_info_from_tracks(&mut frame, tracks_by_id)?;
+    let mut frame_meta = frame.meta.clone();
+    dg_media::normalize_media_frame_meta(&mut frame_meta).map_err(|err| {
+        dg_graph::Error::Runtime(format!("media frame metadata normalization failed: {err}"))
+    })?;
+    // sequence is graph transport order; PTS lives only in media_info.timing.
     let meta = PacketMeta {
         sequence,
-        stream_id: frame.meta.stream_id.clone(),
-        tags,
+        stream_id: frame_meta.stream_id.clone(),
+        tags: frame_meta.tags.clone(),
+        media_info: frame_meta.media_info.clone(),
     };
     let tensor = frame.into_tensor()?;
     Ok(Packet::tensor(tensor).with_meta(meta))
@@ -309,19 +318,314 @@ fn packet_to_media_frame(packet: Packet) -> dg_graph::Result<MediaFrame> {
         .ok_or_else(|| dg_graph::Error::Runtime("expected tensor payload".to_string()))?;
     let mut frame = MediaFrame::from_tensor(tensor);
     if meta.tags.get(MEDIA_TAG).map(String::as_str) == Some("video") {
-        frame.kind = MediaFrameKind::Image;
+        // Compressed video is transported as Tensor payload with encoded media_info;
+        // Image kind is reserved for decoded pixel frames.
+        let is_image = meta
+            .media_info
+            .as_ref()
+            .is_some_and(|info| matches!(info.payload, MediaPayloadInfo::Image(_)));
+        if is_image {
+            frame.kind = MediaFrameKind::Image;
+        }
     }
-    frame.meta.pts = meta
-        .tags
-        .get(PTS_TAG)
-        .and_then(|value| value.parse::<i64>().ok());
-    frame.meta.dts = meta
-        .tags
-        .get(DTS_TAG)
-        .and_then(|value| value.parse::<i64>().ok());
+    let legacy_pts = meta.tags.get(PTS_TAG).and_then(|value| value.parse::<i64>().ok());
+    let legacy_dts = meta.tags.get(DTS_TAG).and_then(|value| value.parse::<i64>().ok());
+    if meta.media_info.is_none() && (legacy_pts.is_some() || legacy_dts.is_some()) {
+        warn!(
+            "stream push reading pts/dts from tags is deprecated; producers must set media_info"
+        );
+    }
     frame.meta.stream_id = meta.stream_id;
     frame.meta.tags = meta.tags;
+    frame.meta.media_info = meta.media_info;
+    if frame.meta.media_info.is_none() {
+        frame.meta.pts = legacy_pts;
+        frame.meta.dts = legacy_dts;
+    }
+    dg_media::normalize_media_frame_meta(&mut frame.meta).map_err(|err| {
+        dg_graph::Error::Runtime(format!("media frame metadata normalization failed: {err}"))
+    })?;
     Ok(frame)
+}
+
+/// Attaches track codec configs and validates the frame track against announced tracks.
+fn enrich_frame_media_info_from_tracks(
+    frame: &mut MediaFrame,
+    tracks_by_id: &HashMap<u64, TrackInfo>,
+) -> dg_graph::Result<()> {
+    if tracks_by_id.is_empty() {
+        return Ok(());
+    }
+    let track_id = match resolve_frame_track_id(frame) {
+        Ok(id) => id,
+        Err(_) if tracks_by_id.len() == 1 => {
+            // Single-track streams may omit per-frame track identity; bind to the only track.
+            *tracks_by_id.keys().next().expect("single track present")
+        }
+        Err(err) => return Err(err),
+    };
+    let track = tracks_by_id.get(&track_id).ok_or_else(|| {
+        dg_graph::Error::Runtime(format!(
+            "frame track_id {track_id} is not in announced TrackInfo set"
+        ))
+    })?;
+    if track.clock_rate == 0 {
+        return Err(dg_graph::Error::Runtime(format!(
+            "announced track {track_id} has invalid zero clock_rate"
+        )));
+    }
+
+    let configs = track_codec_configs(track).map_err(|err| {
+        dg_graph::Error::Runtime(format!("track {track_id} codec config build failed: {err}"))
+    })?;
+    let timing = MediaTiming {
+        pts: frame.meta.pts.or_else(|| {
+            frame
+                .meta
+                .media_info
+                .as_ref()
+                .and_then(|info| info.timing.pts)
+        }),
+        dts: frame.meta.dts.or_else(|| {
+            frame
+                .meta
+                .media_info
+                .as_ref()
+                .and_then(|info| info.timing.dts)
+        }),
+        time_base: Some(MediaTimeBase::new(1, track.clock_rate)),
+    };
+    let key = frame
+        .meta
+        .media_info
+        .as_ref()
+        .map(|info| info.is_keyframe())
+        .or_else(|| {
+            frame
+                .meta
+                .stream_metadata
+                .map(|legacy| legacy.keyframe)
+        })
+        .unwrap_or_else(|| {
+            frame
+                .meta
+                .tags
+                .get(KEYFRAME_TAG)
+                .is_some_and(|value| value == "true")
+        });
+
+    let encoded = EncodedMediaInfo {
+        stream_index: u32::try_from(track_id).unwrap_or(u32::MAX),
+        track_id: Some(track_id),
+        media_kind: track_media_kind(track),
+        codec: track_media_codec(track.codec),
+        bitstream_format: track_bitstream_format(track.codec),
+        flags: EncodedPacketFlags {
+            key,
+            lost: false,
+            corrupt: false,
+        },
+        codec_configs: configs,
+    };
+
+    if let Some(existing) = frame.meta.media_info.as_ref() {
+        if let MediaPayloadInfo::Encoded(existing_enc) = &existing.payload {
+            if existing_enc.codec != MediaCodec::Unknown
+                && existing_enc.codec != encoded.codec
+            {
+                return Err(dg_graph::Error::Runtime(format!(
+                    "frame media_info codec {:?} conflicts with track codec {:?}",
+                    existing_enc.codec, encoded.codec
+                )));
+            }
+            if let Some(existing_track) = existing_enc.track_id {
+                if existing_track != track_id {
+                    return Err(dg_graph::Error::Runtime(format!(
+                        "frame media_info track_id {existing_track} conflicts with resolved \
+                         track_id {track_id}"
+                    )));
+                }
+            }
+        }
+    }
+
+    let info = MediaInfo::encoded(encoded, timing).map_err(|err| {
+        dg_graph::Error::Runtime(format!("invalid media_info constructed from track: {err}"))
+    })?;
+    frame.meta.media_info = Some(Box::new(info));
+    frame.meta.pts = timing.pts;
+    frame.meta.dts = timing.dts;
+    Ok(())
+}
+
+fn resolve_frame_track_id(frame: &MediaFrame) -> dg_graph::Result<u64> {
+    if let Some(info) = frame.meta.media_info.as_ref() {
+        if let MediaPayloadInfo::Encoded(encoded) = &info.payload {
+            if let Some(track_id) = encoded.track_id {
+                return Ok(track_id);
+            }
+        }
+    }
+    if let Some(legacy) = frame.meta.stream_metadata {
+        return Ok(legacy.track_id);
+    }
+    if let Some(stream_id) = frame.meta.stream_id.as_deref() {
+        return stream_id.parse::<u64>().map_err(|_| {
+            dg_graph::Error::Runtime(format!(
+                "stream frame stream_id `{stream_id}` is not a valid track id"
+            ))
+        });
+    }
+    Err(dg_graph::Error::Runtime(
+        "stream frame has no track_id in media_info, stream_metadata, or stream_id".into(),
+    ))
+}
+
+fn track_media_kind(track: &TrackInfo) -> CoreMediaKind {
+    match track.media_kind {
+        crate::track::MediaKind::Video => CoreMediaKind::Video,
+        crate::track::MediaKind::Audio => CoreMediaKind::Audio,
+        crate::track::MediaKind::Data => CoreMediaKind::Data,
+        crate::track::MediaKind::Subtitle => CoreMediaKind::Subtitle,
+    }
+}
+
+fn track_media_codec(codec: TrackCodec) -> MediaCodec {
+    match codec {
+        TrackCodec::H264 => MediaCodec::H264,
+        TrackCodec::H265 => MediaCodec::H265,
+        TrackCodec::H266 => MediaCodec::H266,
+        TrackCodec::AV1 => MediaCodec::AV1,
+        TrackCodec::VP8 => MediaCodec::VP8,
+        TrackCodec::VP9 => MediaCodec::VP9,
+        TrackCodec::MJPEG => MediaCodec::MJPEG,
+        TrackCodec::AAC => MediaCodec::AAC,
+        TrackCodec::ADPCM => MediaCodec::ADPCM,
+        TrackCodec::Opus => MediaCodec::Opus,
+        TrackCodec::G711A => MediaCodec::G711A,
+        TrackCodec::G711U => MediaCodec::G711U,
+        TrackCodec::MP2 => MediaCodec::MP2,
+        TrackCodec::MP3 => MediaCodec::MP3,
+        TrackCodec::Unknown => MediaCodec::Unknown,
+    }
+}
+
+fn track_bitstream_format(codec: TrackCodec) -> BitstreamFormat {
+    match codec {
+        TrackCodec::H264 => BitstreamFormat::H264AnnexB,
+        TrackCodec::H265 | TrackCodec::H266 => BitstreamFormat::H265AnnexB,
+        TrackCodec::AV1 => BitstreamFormat::Av1Obu,
+        TrackCodec::VP8 => BitstreamFormat::Vp8Frame,
+        TrackCodec::VP9 => BitstreamFormat::Vp9Frame,
+        TrackCodec::MJPEG => BitstreamFormat::JpegInterchange,
+        TrackCodec::AAC => BitstreamFormat::AacRaw,
+        _ => BitstreamFormat::Unknown,
+    }
+}
+
+/// Builds Annex-B / OBU / ASC codec_config blobs from track extradata with size limits.
+fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfig>> {
+    const START: &[u8] = &[0, 0, 0, 1];
+    let mut configs = Vec::new();
+    match &track.extradata {
+        CodecExtradata::None | CodecExtradata::Raw(_) => {}
+        CodecExtradata::H264 { sps, pps, avcc } => {
+            if !sps.is_empty() || !pps.is_empty() {
+                let mut annexb = Vec::new();
+                for nal in sps.iter().chain(pps.iter()) {
+                    annexb_append_nal(&mut annexb, START, nal.as_ref())?;
+                }
+                if !annexb.is_empty() {
+                    configs.push(MediaCodecConfig::new(BitstreamFormat::H264AnnexB, annexb)?);
+                }
+            }
+            if let Some(avcc) = avcc {
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::H264Avcc,
+                    avcc.to_vec(),
+                )?);
+            }
+        }
+        CodecExtradata::H265 {
+            vps,
+            sps,
+            pps,
+            hvcc,
+        } => {
+            if !vps.is_empty() || !sps.is_empty() || !pps.is_empty() {
+                let mut annexb = Vec::new();
+                for nal in vps.iter().chain(sps.iter()).chain(pps.iter()) {
+                    annexb_append_nal(&mut annexb, START, nal.as_ref())?;
+                }
+                if !annexb.is_empty() {
+                    configs.push(MediaCodecConfig::new(BitstreamFormat::H265AnnexB, annexb)?);
+                }
+            }
+            if let Some(hvcc) = hvcc {
+                configs.push(MediaCodecConfig::new(
+                    BitstreamFormat::H265Hvcc,
+                    hvcc.to_vec(),
+                )?);
+            }
+        }
+        CodecExtradata::H266 { vps, sps, pps } => {
+            let mut annexb = Vec::new();
+            for nal in vps.iter().chain(sps.iter()).chain(pps.iter()) {
+                annexb_append_nal(&mut annexb, START, nal.as_ref())?;
+            }
+            if !annexb.is_empty() {
+                // H266 uses the same Annex-B packaging as H265 for transport.
+                configs.push(MediaCodecConfig::new(BitstreamFormat::H265AnnexB, annexb)?);
+            }
+        }
+        CodecExtradata::AAC { asc } => {
+            if !asc.is_empty() {
+                configs.push(MediaCodecConfig::new(BitstreamFormat::AacRaw, asc.to_vec())?);
+            }
+        }
+        CodecExtradata::AV1 {
+            sequence_header,
+            codec_config,
+        } => {
+            if let Some(seq) = sequence_header {
+                configs.push(MediaCodecConfig::new(BitstreamFormat::Av1Obu, seq.to_vec())?);
+            }
+            if let Some(cfg) = codec_config {
+                configs.push(MediaCodecConfig::new(BitstreamFormat::Av1Obu, cfg.to_vec())?);
+            }
+        }
+        CodecExtradata::VP8 { config } => {
+            if let Some(cfg) = config {
+                configs.push(MediaCodecConfig::new(BitstreamFormat::Vp8Frame, cfg.to_vec())?);
+            }
+        }
+        CodecExtradata::VP9 { config } => {
+            if let Some(cfg) = config {
+                configs.push(MediaCodecConfig::new(BitstreamFormat::Vp9Frame, cfg.to_vec())?);
+            }
+        }
+        CodecExtradata::MP3 { .. } | CodecExtradata::Opus { .. } => {}
+    }
+    Ok(configs)
+}
+
+fn annexb_append_nal(out: &mut Vec<u8>, start: &[u8], nal: &[u8]) -> dg_core::Result<()> {
+    let added = start
+        .len()
+        .checked_add(nal.len())
+        .ok_or_else(|| dg_core::Error::InvalidArgument("annex-b nal length overflow".into()))?;
+    let new_len = out
+        .len()
+        .checked_add(added)
+        .ok_or_else(|| dg_core::Error::InvalidArgument("annex-b join length overflow".into()))?;
+    if new_len > dg_core::MAX_CODEC_CONFIG_TOTAL_BYTES {
+        return Err(dg_core::Error::InvalidArgument(
+            "annex-b parameter sets exceed total codec config budget".into(),
+        ));
+    }
+    out.extend_from_slice(start);
+    out.extend_from_slice(nal);
+    Ok(())
 }
 
 fn create_rtsp_src(node: &NodeSpec) -> dg_graph::Result<CreatedElement> {

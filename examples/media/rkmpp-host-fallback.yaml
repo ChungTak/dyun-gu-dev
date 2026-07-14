@@ -1,0 +1,45 @@
+# RKMPP Host with software fallback Profile.
+# Build (Rockchip host or cross with SDK present):
+#   cargo run -p dg-cli --no-default-features \
+#     --features media,avcodec-profile-rkmpp-host-fallback -- \
+#     validate --config examples/media/rkmpp-host-fallback.yaml
+#
+# Selected backends prefer rkmpp/librga; fallback may use ffmpeg/libyuv.
+# TransferReport must record staging copy_count when Host materialization occurs.
+# Required (non-fallback) profile `rkmpp-host` must not silently select software.
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: sequential
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: decode
+    kind: media_decode
+    params:
+      profile: rkmpp-host-fallback
+      codec: h264
+      bitstream_format: h264_annexb
+  - name: resize
+    kind: media_resize
+    params:
+      profile: rkmpp-host-fallback
+      width: 640
+      height: 360
+  - name: encode
+    kind: media_encode
+    params:
+      profile: rkmpp-host-fallback
+      codec: h264
+      bitrate: 2000000
+      time_base_num: 1
+      time_base_den: 25
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> decode.in
+  - decode.out -> resize.in
+  - resize.out -> encode.in
+  - encode.out -> sink.in

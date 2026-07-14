@@ -206,6 +206,18 @@ impl Buffer {
         Arc::strong_count(&self.storage)
     }
 
+    /// Returns whether host bytes can be read without staging.
+    pub fn is_host_readable(&self) -> bool {
+        !matches!(
+            self.storage.as_ref(),
+            BufferStorage::External { bytes: None, .. }
+        )
+    }
+
+    /// Reads host bytes, cloning shared storage when necessary.
+    ///
+    /// Prefer [`Self::try_into_host_bytes`] when consuming an owned buffer.
+    /// Codec bridges should not use this helper.
     pub fn read_bytes(&self) -> Vec<u8> {
         self.storage.read_bytes()
     }
@@ -249,7 +261,23 @@ impl Buffer {
         Ok(bytes)
     }
 
+    /// Consumes the buffer and returns host bytes when readable.
+    ///
+    /// Unique host storage is moved without copying. Shared host storage clones
+    /// once. Device-only external storage returns [`Error::Buffer`].
+    pub fn try_into_host_bytes(self) -> Result<Vec<u8>> {
+        if !self.is_host_readable() {
+            return Err(Error::Buffer(
+                "buffer is not host-readable; staging is required".to_string(),
+            ));
+        }
+        Ok(self.into_host_bytes())
+    }
+
     /// Consumes the buffer and returns host bytes, moving them out when possible.
+    ///
+    /// Device-only external buffers yield an empty vector. Codec bridges must use
+    /// [`Self::try_into_host_bytes`] instead.
     pub fn into_host_bytes(self) -> Vec<u8> {
         let Self { storage, .. } = self;
         match Arc::try_unwrap(storage) {
@@ -307,5 +335,58 @@ impl Buffer {
 
     pub fn external(&self) -> ExternalHandle {
         self.external
+    }
+}
+
+#[cfg(test)]
+mod host_bytes_tests {
+    use super::{Buffer, BufferDesc, DeviceKind, Error, ExternalDropGuard, ExternalHandle};
+    use crate::MemoryDomain;
+
+    #[test]
+    fn is_host_readable_false_for_device_only_external() {
+        let buffer = Buffer::from_external(
+            DeviceKind::Cpu,
+            MemoryDomain::DmaBuf,
+            BufferDesc::new(4, 1),
+            ExternalHandle::from_raw(1),
+            ExternalDropGuard::new(|| {}),
+        )
+        .expect("external buffer");
+        assert!(!buffer.is_host_readable());
+        assert!(buffer.try_into_host_bytes().is_err());
+    }
+
+    #[test]
+    fn try_into_host_bytes_moves_unique_host_storage() {
+        let buffer = Buffer::from_host_bytes(DeviceKind::Cpu, BufferDesc::new(3, 1), vec![1, 2, 3])
+            .expect("host buffer");
+        assert!(buffer.is_host_readable());
+        let bytes = buffer.try_into_host_bytes().expect("into host bytes");
+        assert_eq!(bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn try_into_host_bytes_clones_shared_host_storage() {
+        let buffer = Buffer::from_host_bytes(DeviceKind::Cpu, BufferDesc::new(2, 1), vec![9, 8])
+            .expect("host buffer");
+        let shared = buffer.clone();
+        let bytes = buffer.try_into_host_bytes().expect("into host bytes");
+        assert_eq!(bytes, vec![9, 8]);
+        assert_eq!(shared.read_bytes(), vec![9, 8]);
+    }
+
+    #[test]
+    fn try_into_host_bytes_rejects_device_external() {
+        let buffer = Buffer::from_external(
+            DeviceKind::Cpu,
+            MemoryDomain::CudaDevice,
+            BufferDesc::new(8, 1),
+            ExternalHandle::from_raw(99),
+            ExternalDropGuard::new(|| {}),
+        )
+        .expect("cuda external");
+        let err = buffer.try_into_host_bytes().expect_err("expected error");
+        assert!(matches!(err, Error::Buffer(_)));
     }
 }

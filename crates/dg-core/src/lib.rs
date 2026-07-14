@@ -14,6 +14,7 @@ mod detection;
 mod device;
 mod error;
 mod format;
+mod media;
 mod memory;
 mod quantization;
 mod shape;
@@ -35,6 +36,13 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use format::DataFormat;
+pub use media::{
+    BitstreamFormat, ColorMatrix, ColorPrimaries, ColorRange, ColorTransfer, EncodedMediaInfo,
+    EncodedPacketFlags, ImageFlags, ImageMediaInfo, MediaCodec, MediaCodecConfig, MediaInfo,
+    MediaKind, MediaPayloadInfo, MediaPlaneLayout, MediaRect, MediaTags, MediaTimeBase,
+    MediaTiming, PixelFormat, SampleLayout, SampleType, MAX_CODEC_CONFIG_COUNT,
+    MAX_CODEC_CONFIG_ITEM_BYTES, MAX_CODEC_CONFIG_TOTAL_BYTES, MAX_IMAGE_PLANES,
+};
 pub use memory::{
     Allocator, CpuAllocator, ExternalDropGuard, ExternalHandle, MemoryDomain, MemoryPool,
 };

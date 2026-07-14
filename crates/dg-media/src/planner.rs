@@ -55,6 +55,16 @@ pub enum TransferMode {
     Staged,
 }
 
+/// Fine-grained transfer path classification for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransferPathKind {
+    OwnershipMove,
+    SharedExternal,
+    HostClone,
+    DomainStaging,
+    RowRepack,
+}
+
 /// Actual transfer decision and diagnostics for one bridge operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransferReport {
@@ -63,6 +73,8 @@ pub struct TransferReport {
     pub path: CopyPath,
     pub copy_count: usize,
     pub mode: TransferMode,
+    pub path_kind: TransferPathKind,
+    pub reason: Option<String>,
 }
 
 /// Inputs needed to decide whether an external frame can be shared.
@@ -209,6 +221,8 @@ impl ZeroCopyPlanner {
                 path,
                 copy_count: 0,
                 mode: TransferMode::Shared,
+                path_kind: TransferPathKind::SharedExternal,
+                reason: None,
             });
         }
         if !request.staging_supported {
@@ -240,6 +254,8 @@ impl ZeroCopyPlanner {
             copy_count: path.copy_count,
             path,
             mode: TransferMode::Staged,
+            path_kind: TransferPathKind::DomainStaging,
+            reason: None,
         };
         trace!(
             operation = %request.operation,

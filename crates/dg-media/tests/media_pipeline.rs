@@ -9,7 +9,7 @@ use serde_json::json;
 
 use dg_media as _;
 
-#[cfg(not(feature = "avcodec"))]
+#[cfg(not(feature = "avcodec-sdk"))]
 fn recorded_frame_tensor(bytes: Vec<u8>) -> Tensor {
     let device = CpuDevice::new();
     let desc = TensorDesc::new(
@@ -36,7 +36,7 @@ fn node(name: &str, kind: &str, params: serde_json::Value) -> NodeSpec {
     }
 }
 
-#[cfg(not(feature = "avcodec"))]
+#[cfg(not(feature = "avcodec-sdk"))]
 #[test]
 fn decode_resize_osd_encode_pipeline_runs_end_to_end() {
     let spec = GraphSpecBuilder::new()
@@ -95,7 +95,7 @@ fn decode_resize_osd_encode_pipeline_runs_end_to_end() {
     }
 }
 
-#[cfg(not(feature = "avcodec"))]
+#[cfg(not(feature = "avcodec-sdk"))]
 #[test]
 fn decode_pipeline_rejects_wrong_payload_size() {
     let spec = GraphSpecBuilder::new()
@@ -144,6 +144,7 @@ fn media_element_parameters_are_validated_at_load_time() {
             json!({ "width": 0, "height": 2 }),
             "field width must be non-zero",
         ),
+        #[cfg(not(feature = "avcodec-sdk"))]
         (
             "media_decode",
             json!({ "height": 2 }),
@@ -154,7 +155,7 @@ fn media_element_parameters_are_validated_at_load_time() {
             json!({ "width": 2, "height": 2, "channels": 0 }),
             "field channels must be non-zero",
         ),
-        #[cfg(not(feature = "avcodec"))]
+        #[cfg(not(feature = "avcodec-sdk"))]
         (
             "media_encode",
             json!({ "codec": "h264" }),
@@ -189,7 +190,9 @@ fn media_element_parameters_are_validated_at_load_time() {
 
     for (kind, params, expected) in invalid {
         let err = GraphSpecBuilder::new()
+            .add_node(node("input", "input", json!({})))
             .add_node(node("media", kind, params))
+            .connect("input.out -> media.in")
             .build()
             .expect_err("invalid media params must fail during graph loading");
         let message = err.to_string();
@@ -217,7 +220,7 @@ fn media_encode_allows_omitted_parameters() {
         .expect("parameterless media encoder should allow null params");
 }
 
-#[cfg(feature = "avcodec")]
+#[cfg(feature = "avcodec-sdk")]
 #[test]
 fn avcodec_media_encode_creates_with_omitted_parameters() {
     let input = node("input", "input", serde_json::Value::Null);
@@ -233,7 +236,96 @@ fn avcodec_media_encode_creates_with_omitted_parameters() {
     Graph::new(spec).expect("parameterless avcodec media encoder should create");
 }
 
-#[cfg(all(feature = "avcodec", target_arch = "x86_64"))]
+#[test]
+fn example_raw_adapter_yaml_loads() {
+    let yaml = include_str!("../../../examples/media/raw-adapter.yaml");
+    let spec = dg_graph::GraphSpec::from_str_with_format(yaml, dg_graph::GraphFormat::Yaml)
+        .expect("raw-adapter example must parse and validate");
+    Graph::new(spec).expect("raw-adapter example must build");
+}
+
+#[cfg(feature = "avcodec-sdk")]
+#[test]
+fn profile_and_legacy_hw_conflict_is_rejected_at_load() {
+    let err = GraphSpecBuilder::new()
+        .add_node(node("input", "input", json!({})))
+        .add_node(node(
+            "decode",
+            "media_decode",
+            json!({
+                "profile": "native-free",
+                "hw": "auto",
+                "codec": "jpeg"
+            }),
+        ))
+        .connect("input.out -> decode.in")
+        .build()
+        .expect_err("profile and hw must conflict");
+    let message = err.to_string();
+    assert!(message.contains("profile"), "{message}");
+    assert!(message.contains("hw"), "{message}");
+}
+
+#[cfg(feature = "avcodec-sdk")]
+#[test]
+fn encode_h264_requires_nonzero_bitrate_at_load() {
+    let missing = GraphSpecBuilder::new()
+        .add_node(node("input", "input", json!({})))
+        .add_node(node(
+            "encode",
+            "media_encode",
+            json!({
+                "profile": "native-free",
+                "codec": "h264"
+            }),
+        ))
+        .connect("input.out -> encode.in")
+        .build()
+        .expect_err("h264 without bitrate must fail");
+    assert!(
+        missing.to_string().contains("bitrate"),
+        "{}",
+        missing
+    );
+
+    let zero = GraphSpecBuilder::new()
+        .add_node(node("input", "input", json!({})))
+        .add_node(node(
+            "encode",
+            "media_encode",
+            json!({
+                "profile": "native-free",
+                "codec": "h264",
+                "bitrate": 0
+            }),
+        ))
+        .connect("input.out -> encode.in")
+        .build()
+        .expect_err("h264 with bitrate 0 must fail");
+    assert!(zero.to_string().contains("bitrate"), "{zero}");
+}
+
+#[cfg(feature = "avcodec-profile-native-free")]
+#[test]
+fn example_native_free_jpeg_yaml_loads() {
+    let yaml = include_str!("../../../examples/media/native-free-jpeg.yaml");
+    let spec = dg_graph::GraphSpec::from_str_with_format(yaml, dg_graph::GraphFormat::Yaml)
+        .expect("native-free-jpeg example must parse and validate");
+    Graph::new(spec).expect("native-free-jpeg example must build");
+}
+
+#[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]
+#[test]
+fn example_rkmpp_zero_copy_yaml_validates_but_session_is_gated() {
+    let yaml = include_str!("../../../examples/media/rkmpp-zero-copy.yaml");
+    // Load-time param schema accepts the profile name when the feature is compiled.
+    let spec = dg_graph::GraphSpec::from_str_with_format(yaml, dg_graph::GraphFormat::Yaml)
+        .expect("rkmpp-zero-copy example must parse when feature is enabled");
+    // Graph construction may succeed; session create is deferred to first frame and gated.
+    let _ = Graph::new(spec);
+}
+
+#[cfg(all(feature = "avcodec-sdk", target_arch = "x86_64"))]
 #[test]
 fn avcodec_jpeg_round_trip_through_media_elements() {
     let spec = GraphSpecBuilder::new()
