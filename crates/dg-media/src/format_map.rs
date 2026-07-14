@@ -120,14 +120,8 @@ pub fn is_multiplane_pixel(format: CorePixel) -> bool {
 }
 
 pub fn packet_to_encoded_media_info(packet: &Packet) -> Result<EncodedMediaInfo> {
-    let stream_index = u32::try_from(packet.stream_index).map_err(|_| {
-        Error::Media(format!(
-            "packet stream_index {} exceeds u32 range",
-            packet.stream_index
-        ))
-    })?;
     Ok(EncodedMediaInfo {
-        stream_index,
+        stream_index: packet.stream_index,
         track_id: None,
         media_kind: MediaKind::Video,
         codec: avcodec_codec_to_core(packet.codec),

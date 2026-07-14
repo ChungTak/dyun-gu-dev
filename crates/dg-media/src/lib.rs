@@ -51,8 +51,8 @@ pub use planner::{
 };
 #[cfg(feature = "avcodec-sdk")]
 pub use profile::{
-    compiled_profiles, profile_descriptor, reject_profile_hw_conflict, resolve_profile,
-    AvcodecProfile, ProfileDescriptor,
+    compiled_profiles, profile_to_sdk_descriptor, reject_profile_hw_conflict, resolve_profile,
+    AvcodecProfile,
 };
 pub use stats::MediaSessionStats;
 pub use stream_metadata::{

@@ -318,11 +318,7 @@ pub fn avcodec_packet_to_media_frame_with_transfer(
     )?;
     frame.meta.media_info = Some(Box::new(format_map::packet_to_media_info(packet)?));
     normalize_media_frame_meta(&mut frame.meta)?;
-    let copy_count = if packet.data.handle.domain() == dg_media_avcodec::MemoryDomain::Host {
-        1
-    } else {
-        1
-    };
+    let copy_count = 1;
     Ok(BridgedMediaFrame {
         frame,
         transfer: staged_host_transfer_with_copies(
@@ -378,12 +374,8 @@ pub fn media_frame_to_avcodec_packet_with_transfer(
     let copy_count = usize::from(frame.buffer.ref_count() > 1);
     let bytes = frame.buffer.try_into_host_bytes()?;
     // from_host_bytes first argument is buffer_id, not stream_index.
-    let mut packet = dg_media_avcodec::Packet::from_host_bytes(
-        0,
-        resolved_codec,
-        resolved_format,
-        bytes,
-    );
+    let mut packet =
+        dg_media_avcodec::Packet::from_host_bytes(0, resolved_codec, resolved_format, bytes);
     packet.stream_index = resolved_stream_index;
     packet.pts = timing.pts;
     packet.dts = timing.dts;
@@ -394,13 +386,13 @@ pub fn media_frame_to_avcodec_packet_with_transfer(
         if let Ok(encoded) = format_map::encoded_info_from_media_info(info) {
             let mut flags = dg_media_avcodec::PacketFlags::NONE;
             if encoded.flags.key {
-                flags = flags | dg_media_avcodec::PacketFlags::KEY;
+                flags |= dg_media_avcodec::PacketFlags::KEY;
             }
             if encoded.flags.lost {
-                flags = flags | dg_media_avcodec::PacketFlags::LOST;
+                flags |= dg_media_avcodec::PacketFlags::LOST;
             }
             if encoded.flags.corrupt {
-                flags = flags | dg_media_avcodec::PacketFlags::CORRUPT;
+                flags |= dg_media_avcodec::PacketFlags::CORRUPT;
             }
             packet.flags = flags;
         }
@@ -449,6 +441,7 @@ pub(crate) fn avcodec_image_to_media_frame_with_processor(
                     dst_format: dg_media_avcodec::ImageInfo::Rgb24,
                 },
                 aux: None,
+                target_domain: None,
             })
             .map_err(crate::avcodec::map_av_error)?;
         match processor.poll_image() {
@@ -500,10 +493,7 @@ pub(crate) fn avcodec_image_to_media_frame_with_processor(
         DeviceKind::Cpu,
         host,
     )?;
-    frame.meta.media_info = Some(Box::new(format_map::image_to_media_info(
-        &image,
-        host_len,
-    )?));
+    frame.meta.media_info = Some(Box::new(format_map::image_to_media_info(&image, host_len)?));
     // Rebuild plane layouts after potential tight repack so they match the buffer.
     if let Some(info) = frame.meta.media_info.as_mut() {
         if let dg_core::MediaPayloadInfo::Image(image_info) = &mut info.payload {
@@ -782,7 +772,8 @@ fn media_frame_to_avcodec_image_from_layout(
         .map_err(|err| dg_core::Error::Media(err.to_string()))?;
 
     if format_map::is_multiplane_pixel(image_info.pixel_format) {
-        if image_info.pixel_format == dg_core::PixelFormat::Yuv420P && image_info.planes.len() == 3 {
+        if image_info.pixel_format == dg_core::PixelFormat::Yuv420P && image_info.planes.len() == 3
+        {
             let y = &image_info.planes[0];
             let u = &image_info.planes[1];
             let v = &image_info.planes[2];
@@ -1104,9 +1095,7 @@ mod tests {
             MediaTiming,
         };
 
-        use super::{
-            avcodec_packet_to_media_frame, media_frame_to_avcodec_packet_with_transfer,
-        };
+        use super::{avcodec_packet_to_media_frame, media_frame_to_avcodec_packet_with_transfer};
         use crate::{MediaFrame, MediaFrameKind};
 
         let timing = MediaTiming {

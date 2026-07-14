@@ -1,6 +1,9 @@
-//! Runtime avcodec profile selection and descriptor mapping.
+//! Runtime avcodec profile selection and SDK Profile V2 mapping.
 
-use dg_core::{Error, MemoryDomain, Result};
+use dg_core::{Error, Result};
+use dg_media_avcodec::{
+    MemoryDomain, ProfileName, VideoBackendPolicy, VideoIoMemoryPlan, VideoProfileDescriptor,
+};
 
 /// Stable runtime profile name matching `avcodec-profile-*` Cargo feature suffixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -17,17 +20,6 @@ pub enum AvcodecProfile {
     OnevplHostFallback,
     AmfHost,
     AmfHostFallback,
-}
-
-/// Profile-level backend and memory policy consumed by session builders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProfileDescriptor {
-    pub decode_backend_hints: &'static [&'static str],
-    pub encode_backend_hints: &'static [&'static str],
-    pub processor_backend_hints: &'static [&'static str],
-    pub allow_fallback: bool,
-    pub memory_domain: MemoryDomain,
-    pub allow_staging: bool,
 }
 
 impl AvcodecProfile {
@@ -103,26 +95,21 @@ impl AvcodecProfile {
         }
     }
 
-    /// Returns an error for profiles blocked on upstream UP-* deliverables.
-    pub fn ensure_session_create_supported(self) -> Result<()> {
-        match self {
-            Self::RkmppZeroCopy => Err(Error::Media(
-                "profile `rkmpp-zero-copy` requires upstream UP-03 Profile V2 Session Factory; \
-                 session creation is not available yet"
-                    .to_string(),
-            )),
-            Self::NvcodecDeviceFrame => Err(Error::Media(
-                "profile `nvcodec-device-frame` requires upstream UP-06 nvcodec-device-frame \
-                 contract; session creation is not available yet"
-                    .to_string(),
-            )),
-            _ => Ok(()),
+    pub fn ensure_compiled(self) -> Result<()> {
+        if !self.is_compiled() {
+            return Err(Error::Config(format!(
+                "profile `{}` is not compiled; enable cargo feature `{}`",
+                self.name(),
+                self.cargo_feature()
+            )));
         }
+        Ok(())
     }
 }
 
 /// Returns every profile compiled into the current binary.
 #[must_use]
+#[allow(clippy::vec_init_then_push)]
 pub fn compiled_profiles() -> Vec<AvcodecProfile> {
     let mut profiles = Vec::new();
     #[cfg(feature = "avcodec-profile-native-free")]
@@ -165,29 +152,16 @@ pub fn reject_profile_hw_conflict(profile: Option<&str>, hw: Option<&str>) -> Re
 }
 
 /// Resolves the active profile from explicit config or compiled defaults.
-///
-/// When `legacy_avcodec_only` is true the legacy `avcodec` feature path maps to
-/// [`AvcodecProfile::NativeFree`] for compatibility.
 pub fn resolve_profile(name: Option<&str>, legacy_avcodec_only: bool) -> Result<AvcodecProfile> {
     if let Some(name) = name {
         let profile = AvcodecProfile::parse(name)?;
-        if !profile.is_compiled() {
-            return Err(Error::Config(format!(
-                "profile `{name}` is not compiled; enable cargo feature `{}`",
-                profile.cargo_feature()
-            )));
-        }
+        profile.ensure_compiled()?;
         return Ok(profile);
     }
 
     if legacy_avcodec_only {
         let profile = AvcodecProfile::NativeFree;
-        if !profile.is_compiled() {
-            return Err(Error::Config(
-                "legacy `avcodec` feature requires the native-free profile to be compiled"
-                    .to_string(),
-            ));
-        }
+        profile.ensure_compiled()?;
         return Ok(profile);
     }
 
@@ -210,115 +184,81 @@ pub fn resolve_profile(name: Option<&str>, legacy_avcodec_only: bool) -> Result<
     }
 }
 
-/// Maps a profile to backend hints and memory policy without duplicating upstream id lists.
-#[must_use]
-pub fn profile_descriptor(profile: AvcodecProfile) -> ProfileDescriptor {
+fn backend_policy(profile: AvcodecProfile) -> VideoBackendPolicy {
     match profile {
-        AvcodecProfile::NativeFree => ProfileDescriptor {
-            decode_backend_hints: &["jpeg", "zune", "rust-h264"],
-            encode_backend_hints: &["jpeg", "rust-h264"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::Software => ProfileDescriptor {
-            decode_backend_hints: &["jpeg", "zune", "ffmpeg", "openh264"],
-            encode_backend_hints: &["jpeg", "ffmpeg", "x264", "x265", "openh264"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::RkmppHost => ProfileDescriptor {
-            decode_backend_hints: &["rkmpp"],
-            encode_backend_hints: &["rkmpp"],
-            processor_backend_hints: &["librga"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::RkmppHostFallback => ProfileDescriptor {
-            decode_backend_hints: &["rkmpp", "ffmpeg", "openh264"],
-            encode_backend_hints: &["rkmpp", "ffmpeg", "x264", "openh264"],
-            processor_backend_hints: &["librga", "libyuv"],
-            allow_fallback: true,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::RkmppZeroCopy => ProfileDescriptor {
-            decode_backend_hints: &["rkmpp"],
-            encode_backend_hints: &["rkmpp"],
-            processor_backend_hints: &["librga"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::DrmPrime,
-            allow_staging: false,
-        },
-        AvcodecProfile::NvcodecHost => ProfileDescriptor {
-            decode_backend_hints: &["nvcodec"],
-            encode_backend_hints: &["nvcodec"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::NvcodecHostFallback => ProfileDescriptor {
-            decode_backend_hints: &["nvcodec", "ffmpeg", "openh264"],
-            encode_backend_hints: &["nvcodec", "ffmpeg", "x264", "openh264"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: true,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::NvcodecDeviceFrame => ProfileDescriptor {
-            decode_backend_hints: &["nvcodec"],
-            encode_backend_hints: &["nvcodec"],
-            processor_backend_hints: &[],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::CudaDevice,
-            allow_staging: false,
-        },
-        AvcodecProfile::OnevplHost => ProfileDescriptor {
-            decode_backend_hints: &["onevpl"],
-            encode_backend_hints: &["onevpl"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::OnevplHostFallback => ProfileDescriptor {
-            decode_backend_hints: &["onevpl", "ffmpeg", "openh264"],
-            encode_backend_hints: &["onevpl", "ffmpeg", "x264", "openh264"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: true,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::AmfHost => ProfileDescriptor {
-            decode_backend_hints: &["amf"],
-            encode_backend_hints: &["amf"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: false,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
-        AvcodecProfile::AmfHostFallback => ProfileDescriptor {
-            decode_backend_hints: &["amf", "ffmpeg", "openh264"],
-            encode_backend_hints: &["amf", "ffmpeg", "x264", "openh264"],
-            processor_backend_hints: &["libyuv"],
-            allow_fallback: true,
-            memory_domain: MemoryDomain::Host,
-            allow_staging: true,
-        },
+        AvcodecProfile::NativeFree | AvcodecProfile::Software => VideoBackendPolicy::software(),
+        AvcodecProfile::RkmppHost => VideoBackendPolicy::rkmpp_host(false),
+        AvcodecProfile::RkmppHostFallback => VideoBackendPolicy::rkmpp_host(true),
+        AvcodecProfile::RkmppZeroCopy => VideoBackendPolicy::rkmpp_zero_copy(),
+        AvcodecProfile::NvcodecHost => VideoBackendPolicy::nvcodec_host(false),
+        AvcodecProfile::NvcodecHostFallback => VideoBackendPolicy::nvcodec_host(true),
+        AvcodecProfile::NvcodecDeviceFrame => VideoBackendPolicy::nvcodec_device_frame(),
+        AvcodecProfile::OnevplHost => VideoBackendPolicy::onevpl_host(false),
+        AvcodecProfile::OnevplHostFallback => VideoBackendPolicy::onevpl_host(true),
+        AvcodecProfile::AmfHost => VideoBackendPolicy::amf_host(false),
+        AvcodecProfile::AmfHostFallback => VideoBackendPolicy::amf_host(true),
     }
+}
+
+fn io_memory_plan(profile: AvcodecProfile) -> VideoIoMemoryPlan {
+    match profile {
+        AvcodecProfile::NativeFree
+        | AvcodecProfile::Software
+        | AvcodecProfile::RkmppHost
+        | AvcodecProfile::RkmppHostFallback
+        | AvcodecProfile::NvcodecHost
+        | AvcodecProfile::NvcodecHostFallback
+        | AvcodecProfile::OnevplHost
+        | AvcodecProfile::OnevplHostFallback
+        | AvcodecProfile::AmfHost
+        | AvcodecProfile::AmfHostFallback => VideoIoMemoryPlan::new()
+            .with_decoder_packet_input(MemoryDomain::Host)
+            .with_decoder_image_output(MemoryDomain::Host)
+            .with_encoder_image_input(MemoryDomain::Host)
+            .with_encoder_packet_output(MemoryDomain::Host),
+        AvcodecProfile::RkmppZeroCopy => VideoIoMemoryPlan::new()
+            .with_decoder_packet_input(MemoryDomain::Host)
+            .with_decoder_image_output(MemoryDomain::DrmPrime)
+            .with_processor(MemoryDomain::DrmPrime, MemoryDomain::DmaBuf)
+            .with_encoder_image_input(MemoryDomain::DmaBuf)
+            .with_encoder_packet_output(MemoryDomain::Host)
+            .with_allow_staging(false),
+        AvcodecProfile::NvcodecDeviceFrame => VideoIoMemoryPlan::new()
+            .with_decoder_packet_input(MemoryDomain::Host)
+            .with_decoder_image_output(MemoryDomain::CudaDevice)
+            .with_encoder_image_input(MemoryDomain::CudaDevice)
+            .with_encoder_packet_output(MemoryDomain::Host)
+            .with_allow_staging(false),
+    }
+}
+
+/// Converts a dyun profile to the upstream SDK [`VideoProfileDescriptor`].
+pub fn profile_to_sdk_descriptor(profile: AvcodecProfile) -> Result<VideoProfileDescriptor> {
+    profile.ensure_compiled()?;
+    let policy = backend_policy(profile);
+    let descriptor = VideoProfileDescriptor::new(
+        ProfileName::Borrowed(profile.name()),
+        io_memory_plan(profile),
+    )
+    .with_decoder_policy(policy.decoder)
+    .with_processor_policy(policy.image_processor)
+    .with_encoder_policy(policy.encoder);
+    descriptor.validate().map_err(|error| {
+        Error::Config(format!(
+            "profile `{}` validation failed: {error:?}",
+            profile.name()
+        ))
+    })?;
+    Ok(descriptor)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        compiled_profiles, profile_descriptor, reject_profile_hw_conflict, resolve_profile,
+        compiled_profiles, profile_to_sdk_descriptor, reject_profile_hw_conflict, resolve_profile,
         AvcodecProfile,
     };
+    use dg_media_avcodec::MemoryDomain;
 
     #[test]
     fn parse_accepts_stable_profile_names() {
@@ -381,25 +321,44 @@ mod tests {
     }
 
     #[test]
-    fn profile_descriptor_marks_fallback_profiles() {
-        let host = profile_descriptor(AvcodecProfile::RkmppHost);
-        let fallback = profile_descriptor(AvcodecProfile::RkmppHostFallback);
-        assert!(!host.allow_fallback);
-        assert!(fallback.allow_fallback);
-        assert!(host.allow_staging);
-        assert!(!profile_descriptor(AvcodecProfile::RkmppZeroCopy).allow_staging);
+    #[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]
+    fn zero_copy_profile_topology_is_frozen() {
+        let descriptor = profile_to_sdk_descriptor(AvcodecProfile::RkmppZeroCopy)
+            .expect("rkmpp-zero-copy must compile when feature enabled");
+        let io = descriptor.io;
+        assert_eq!(io.decoder_packet_input, MemoryDomain::Host);
+        assert_eq!(io.decoder_image_output, MemoryDomain::DrmPrime);
+        assert_eq!(io.processor_image_input, Some(MemoryDomain::DrmPrime));
+        assert_eq!(io.processor_image_output, Some(MemoryDomain::DmaBuf));
+        assert_eq!(io.encoder_image_input, MemoryDomain::DmaBuf);
+        assert!(!io.allow_staging);
     }
 
     #[test]
-    fn gated_profiles_block_session_create() {
-        assert!(AvcodecProfile::RkmppZeroCopy
-            .ensure_session_create_supported()
-            .is_err());
-        assert!(AvcodecProfile::NvcodecDeviceFrame
-            .ensure_session_create_supported()
-            .is_err());
-        assert!(AvcodecProfile::NativeFree
-            .ensure_session_create_supported()
-            .is_ok());
+    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
+    fn nv_device_frame_profile_has_no_processor() {
+        let descriptor = profile_to_sdk_descriptor(AvcodecProfile::NvcodecDeviceFrame)
+            .expect("nvcodec-device-frame must compile when feature enabled");
+        assert_eq!(descriptor.io.decoder_image_output, MemoryDomain::CudaDevice);
+        assert!(!descriptor.io.processor_enabled());
+        assert!(!descriptor.io.allow_staging);
+    }
+
+    #[test]
+    fn host_profiles_use_host_topology() {
+        let descriptor =
+            profile_to_sdk_descriptor(AvcodecProfile::NativeFree).expect("native-free profile");
+        let io = descriptor.io;
+        assert_eq!(io.decoder_packet_input, MemoryDomain::Host);
+        assert_eq!(io.decoder_image_output, MemoryDomain::Host);
+        assert_eq!(io.encoder_image_input, MemoryDomain::Host);
+        assert!(!io.processor_enabled());
+    }
+
+    #[test]
+    fn all_compiled_profiles_map_to_valid_descriptors() {
+        for profile in compiled_profiles() {
+            profile_to_sdk_descriptor(profile).expect("compiled profile must map");
+        }
     }
 }

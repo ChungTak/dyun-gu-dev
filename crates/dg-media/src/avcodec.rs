@@ -10,22 +10,22 @@ use crate::bridge::{
 };
 use crate::media_frame_timing;
 use crate::profile::AvcodecProfile;
-use crate::session::{AvcodecSessionBuilder, SessionBuildReport};
+use crate::session::AvcodecSdkService;
 use crate::MediaFrame;
+use dg_media_avcodec::VideoSessionBuildReport;
 
 use tracing::warn;
 
 use dg_media_avcodec::{
     AvError, AvErrorContext, AvErrorKind, BitstreamFormat, BufferHandle, BufferSlice, CodecId,
     CodecParameters, Decoder, DecoderConfig, Encoder, EncoderConfig, Image, ImageInfo, ImageOp,
-    ImageOpKind, ImageProcessRequest, ImageProcessor, ImageProcessorConfig, Packet, Poll, Registry,
-    TimeBase,
+    ImageOpKind, ImageProcessRequest, ImageProcessor, ImageProcessorConfig, Packet, Poll, TimeBase,
 };
 
 type AvResult<T> = core::result::Result<T, AvError>;
 
-pub fn registry() -> Registry {
-    dg_media_avcodec::default_registry_builder().build()
+fn default_sdk_service() -> AvcodecSdkService {
+    AvcodecSdkService::from_default_registry()
 }
 
 pub fn codec_from_name(name: Option<&str>) -> Result<CodecId> {
@@ -62,10 +62,7 @@ pub fn map_av_error(error: AvError) -> Error {
     map_av_error_with_operation(error, crate::MediaOperation::Submit)
 }
 
-pub fn map_av_error_with_operation(
-    error: AvError,
-    operation: crate::MediaOperation,
-) -> Error {
+pub fn map_av_error_with_operation(error: AvError, operation: crate::MediaOperation) -> Error {
     use crate::{media_error_with_context, MediaErrorContext};
 
     if let AvError::WithContext {
@@ -75,7 +72,7 @@ pub fn map_av_error_with_operation(
     {
         return append_av_error_context(
             map_av_error_with_operation(*inner, operation),
-            context,
+            *context,
             operation,
         );
     }
@@ -100,9 +97,7 @@ pub fn map_av_error_with_operation(
         AvError::Classified { kind, detail } => {
             ("Backend", format!("avcodec {kind:?}: {detail:?}"))
         }
-        AvError::ExternalError(code) => {
-            ("Backend", format!("avcodec external error code {code}"))
-        }
+        AvError::ExternalError(code) => ("Backend", format!("avcodec external error code {code}")),
         AvError::WithContext { .. } => unreachable!("handled above"),
     };
 
@@ -323,7 +318,7 @@ struct DecoderBackend {
     config_codec: Option<CodecId>,
     config_bitstream: Option<BitstreamFormat>,
     memory_domain: Option<CoreMemoryDomain>,
-    build_report: Option<SessionBuildReport>,
+    build_report: Option<VideoSessionBuildReport>,
 }
 
 impl DecoderBackend {
@@ -368,9 +363,7 @@ impl DecoderBackend {
         if let Some(parameters) = codec_parameters_from_frame(frame, codec, bitstream)? {
             config = config.with_parameters(Some(parameters));
         }
-        let registry = registry();
-        let builder = AvcodecSessionBuilder::new(&registry, self.profile);
-        let (decoder, report) = builder.build_decoder(config)?;
+        let (decoder, report) = default_sdk_service().build_decoder(self.profile, config)?;
         self.decoder = Some(decoder);
         self.codec = Some(codec);
         self.bitstream_format = Some(bitstream);
@@ -418,9 +411,8 @@ impl DecoderBackend {
             return Ok(());
         }
         let config = ImageProcessorConfig::new();
-        let registry = registry();
-        let builder = AvcodecSessionBuilder::new(&registry, self.profile);
-        let (processor, _report) = builder.build_image_processor(config, ImageOpKind::Csc)?;
+        let (processor, _report) =
+            default_sdk_service().build_image_processor(self.profile, config, ImageOpKind::Csc)?;
         self.csc = Some(processor);
         let _ = dst_format;
         Ok(())
@@ -485,8 +477,9 @@ impl BackendOps for DecoderBackend {
                                 src: image,
                                 op: ImageOp::Csc { dst_format: dst },
                                 aux: None,
+                                target_domain: None,
                             })
-                            .map_err(|error| error)?;
+                            ?;
                         self.csc_pending = true;
                         return Ok(Poll::Pending);
                     }
@@ -703,9 +696,7 @@ impl EncoderBackend {
         if let Some(domain) = self.memory_domain {
             config = config.with_memory_domain(core_memory_domain_to_avcodec(domain));
         }
-        let registry = registry();
-        let builder = AvcodecSessionBuilder::new(&registry, self.profile);
-        let (encoder, _report) = builder.build_encoder(config)?;
+        let (encoder, _report) = default_sdk_service().build_encoder(self.profile, config)?;
         self.encoder = Some(encoder);
         if let Some(info) = frame.meta.media_info.as_ref() {
             if let MediaPayloadInfo::Encoded(encoded) = &info.payload {
@@ -880,8 +871,6 @@ struct ResizeBackend {
     processor: Option<Box<dyn ImageProcessor>>,
     width: u32,
     height: u32,
-    #[allow(dead_code)]
-    profile: AvcodecProfile,
 }
 
 impl BackendOps for ResizeBackend {
@@ -896,6 +885,7 @@ impl BackendOps for ResizeBackend {
                 height: self.height,
             },
             aux: None,
+            target_domain: None,
         })
     }
 
@@ -957,17 +947,16 @@ impl ResizeCore {
             .map_err(|_| Error::Media("media_resize: width exceeds u32".to_string()))?;
         let height = u32::try_from(height)
             .map_err(|_| Error::Media("media_resize: height exceeds u32".to_string()))?;
-        let registry = registry();
-        let builder = AvcodecSessionBuilder::new(&registry, profile);
+        let sdk = default_sdk_service();
         let config = ImageProcessorConfig::new();
-        let (processor, _report) = builder.build_image_processor(config, ImageOpKind::Resize)?;
+        let (processor, _report) =
+            sdk.build_image_processor(profile, config, ImageOpKind::Resize)?;
         Ok(Self {
             pump: AsyncPump::new(),
             backend: ResizeBackend {
                 processor: Some(processor),
                 width,
                 height,
-                profile,
             },
         })
     }
@@ -1044,18 +1033,15 @@ mod tests {
     #[test]
     fn annexb_join_preserves_start_codes() {
         let joined = super::annexb_join_nals(&[&[0x67, 0x42], &[0x68, 0xce]]).expect("join");
-        assert_eq!(
-            joined,
-            vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce]
-        );
+        assert_eq!(joined, vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce]);
     }
 
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn native_free_h264_encode_decode_preserves_timing_and_stream_index() {
         use dg_core::{
-            ImageMediaInfo, MediaInfo, MediaPayloadInfo, MediaPlaneLayout, MediaRect, MediaTimeBase,
-            MediaTiming, PixelFormat, SampleLayout, SampleType,
+            ImageMediaInfo, MediaInfo, MediaPayloadInfo, MediaPlaneLayout, MediaRect,
+            MediaTimeBase, MediaTiming, PixelFormat, SampleLayout, SampleType,
         };
 
         use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
