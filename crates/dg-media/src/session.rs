@@ -1,407 +1,229 @@
-//! Avcodec session assembly via upstream `VideoSessionFactoryV2`.
+//! V3 avcodec [`VideoSdk`] service wrapper.
+//!
+//! This module exposes a thin, owned-session service that forwards dyun business configuration
+//! to the upstream high-level `VideoSdk` facade. It does not expose the upstream `Registry`, does
+//! not assemble low-level SDK requests, and does not perform backend policy or memory-domain
+//! stamping.
+
+use std::sync::Arc;
 
 use dg_core::{Error, Result};
 
+use crate::profile::AvcodecProfile;
+use crate::{media_error_with_context, MediaErrorContext, MediaOperation};
+
+#[cfg(feature = "avcodec-sdk")]
 use dg_media_avcodec::{
-    Decoder, DecoderConfig, Encoder, EncoderConfig, ImageOpKind, ImageProcessor,
-    ImageProcessorConfig, MemoryDomain, Registry, VideoProfileDescriptor, VideoSessionBuildError,
-    VideoSessionBuildReport, VideoSessionBundle, VideoSessionFactoryV2, VideoSessionRequest,
-    VideoSessionRole,
+    ImageProcessorRequest, OwnedVideoBuildReport, VideoBuildError, VideoDecoderRequest,
+    VideoDecoderSession, VideoEncoderRequest, VideoEncoderSession, VideoImageProcessorSession,
+    VideoRole, VideoSdk, VideoTranscodeRequest, VideoTranscoderSession,
 };
 
-use crate::avcodec::map_av_error;
-use crate::profile::{
-    profile_to_sdk_descriptor, profile_to_sdk_descriptor_with_processor, AvcodecProfile,
-};
-
-/// Shared SDK service holding a registry and building sessions through Factory V2.
+/// Owned avcodec video SDK service.
+///
+/// Internally holds a [`VideoSdk`] facade. Construction uses the default built-in backend
+/// registry; tests may inject a pre-built SDK via [`Self::with_sdk`].
 pub struct AvcodecSdkService {
-    registry: Registry,
+    #[cfg(feature = "avcodec-sdk")]
+    sdk: VideoSdk,
+    #[cfg(not(feature = "avcodec-sdk"))]
+    _marker: (),
 }
 
 impl AvcodecSdkService {
-    #[must_use]
-    pub fn new(registry: Registry) -> Self {
-        Self { registry }
+    /// Creates a new service backed by the default upstream `VideoSdk`.
+    pub fn new() -> Result<Self> {
+        Self::try_new()
     }
 
-    #[must_use]
-    pub fn from_default_registry() -> Self {
-        Self::new(dg_media_avcodec::default_registry_builder().build())
+    #[cfg(feature = "avcodec-sdk")]
+    fn try_new() -> Result<Self> {
+        let sdk = VideoSdk::new().map_err(map_video_build_error)?;
+        Ok(Self { sdk })
     }
 
-    pub fn build(&self, request: &VideoSessionRequest) -> Result<VideoSessionBundle> {
-        VideoSessionFactoryV2::new(&self.registry)
-            .build(request)
-            .map_err(map_session_build_error)
+    #[cfg(not(feature = "avcodec-sdk"))]
+    fn try_new() -> Result<Self> {
+        Err(Error::Config(
+            "avcodec SDK is not enabled; enable an `avcodec-profile-*` feature".to_string(),
+        ))
     }
 
-    pub fn build_decoder(
-        &self,
-        profile: AvcodecProfile,
-        config: DecoderConfig,
-    ) -> Result<(Box<dyn Decoder>, VideoSessionBuildReport)> {
-        let sdk_profile = profile_to_sdk_descriptor(profile)?;
-        let config = align_decoder_config(config, &sdk_profile)?;
-        let bundle = self.build(&VideoSessionRequest {
-            profile: sdk_profile,
-            decoder: Some(config),
-            processor: None,
-            encoder: None,
-        })?;
-        let decoder = bundle
-            .decoder
-            .ok_or_else(|| Error::Media("decoder session missing from factory bundle".into()))?;
-        Ok((decoder, bundle.report))
+    #[cfg(feature = "avcodec-sdk")]
+    #[allow(dead_code)] // used by integration tests
+    /// Creates a service wrapping a pre-constructed `VideoSdk` (used by tests).
+    pub fn with_sdk(sdk: VideoSdk) -> Self {
+        Self { sdk }
     }
 
-    pub fn build_encoder(
-        &self,
-        profile: AvcodecProfile,
-        config: EncoderConfig,
-    ) -> Result<(Box<dyn Encoder>, VideoSessionBuildReport)> {
-        let sdk_profile = profile_to_sdk_descriptor(profile)?;
-        let config = align_encoder_config(config, &sdk_profile)?;
-        let bundle = self.build(&VideoSessionRequest {
-            profile: sdk_profile,
-            decoder: None,
-            processor: None,
-            encoder: Some(config),
-        })?;
-        let encoder = bundle
-            .encoder
-            .ok_or_else(|| Error::Media("encoder session missing from factory bundle".into()))?;
-        Ok((encoder, bundle.report))
-    }
-
-    pub fn build_image_processor(
-        &self,
-        profile: AvcodecProfile,
-        config: ImageProcessorConfig,
-        target_op: ImageOpKind,
-    ) -> Result<(Box<dyn ImageProcessor>, VideoSessionBuildReport)> {
-        // Processor requests need a descriptor whose IO plan enables the processor stage;
-        // host profiles leave processor domains unset on the base descriptor.
-        let sdk_profile = profile_to_sdk_descriptor_with_processor(profile)?;
-        let config = align_processor_config(config.with_target_op(target_op), &sdk_profile)?;
-        let bundle = self.build(&VideoSessionRequest {
-            profile: sdk_profile,
-            decoder: None,
-            processor: Some(config),
-            encoder: None,
-        })?;
-        let processor = bundle.processor.ok_or_else(|| {
-            Error::Media("image processor session missing from factory bundle".into())
-        })?;
-        Ok((processor, bundle.report))
-    }
-}
-
-/// Stamps decoder config domains/staging from the profile IO plan (Factory V2 contract).
-pub(crate) fn align_decoder_config(
-    config: DecoderConfig,
-    profile: &VideoProfileDescriptor,
-) -> Result<DecoderConfig> {
-    reject_explicit_domain_conflict(
-        "decoder image",
-        config.memory_domain,
-        profile.io.decoder_image_output,
-        /*default_is_host*/ true,
-    )?;
-    if let Some(packet_domain) = config.packet_input_domain {
-        if packet_domain != profile.io.decoder_packet_input {
-            return Err(domain_conflict(
-                "decoder packet",
-                packet_domain,
-                profile.io.decoder_packet_input,
-            ));
+    #[cfg(feature = "avcodec-sdk")]
+    #[allow(dead_code)] // used by integration tests
+    /// Creates a service wrapping a pre-constructed `VideoSdk` built from a shared `Registry`.
+    pub fn with_registry(registry: Arc<dg_media_avcodec::Registry>) -> Self {
+        Self {
+            sdk: VideoSdk::with_registry(registry),
         }
     }
-    if config.allow_staging != profile.io.allow_staging {
-        // Default DecoderConfig uses allow_staging=false; only reject non-default mismatches
-        // after stamping is applied — Factory rejects any residual mismatch.
-        if config.allow_staging && !profile.io.allow_staging {
-            return Err(Error::Config(format!(
-                "profile `{}` forbids staging (allow_staging=false); cannot enable staging on decoder",
-                profile.name
-            )));
-        }
+
+    /// Creates a decoder session from the selected profile and upstream request.
+    #[cfg(feature = "avcodec-sdk")]
+    pub fn create_decoder(
+        &self,
+        profile: AvcodecProfile,
+        request: VideoDecoderRequest,
+    ) -> Result<(VideoDecoderSession, OwnedVideoBuildReport)> {
+        let profile = profile.to_sdk()?;
+        let created = self
+            .sdk
+            .create_decoder(profile, request)
+            .map_err(map_video_build_error)?;
+        Ok(created.into_parts())
     }
-    Ok(config
-        .with_memory_domain(profile.io.decoder_image_output)
-        .with_packet_input_domain(profile.io.decoder_packet_input)
-        .with_allow_staging(profile.io.allow_staging))
+
+    /// Creates an encoder session from the selected profile and upstream request.
+    #[cfg(feature = "avcodec-sdk")]
+    pub fn create_encoder(
+        &self,
+        profile: AvcodecProfile,
+        request: VideoEncoderRequest,
+    ) -> Result<(VideoEncoderSession, OwnedVideoBuildReport)> {
+        let profile = profile.to_sdk()?;
+        let created = self
+            .sdk
+            .create_encoder(profile, request)
+            .map_err(map_video_build_error)?;
+        Ok(created.into_parts())
+    }
+
+    /// Creates an image-processor session from the selected profile and upstream request.
+    #[cfg(feature = "avcodec-sdk")]
+    pub fn create_image_processor(
+        &self,
+        profile: AvcodecProfile,
+        request: ImageProcessorRequest,
+    ) -> Result<(VideoImageProcessorSession, OwnedVideoBuildReport)> {
+        let profile = profile.to_sdk()?;
+        let created = self
+            .sdk
+            .create_image_processor(profile, request)
+            .map_err(map_video_build_error)?;
+        Ok(created.into_parts())
+    }
+
+    /// Creates a transcoder session from the selected profile and upstream request.
+    #[cfg(feature = "avcodec-sdk")]
+    pub fn create_transcoder(
+        &self,
+        profile: AvcodecProfile,
+        request: VideoTranscodeRequest,
+    ) -> Result<(VideoTranscoderSession, OwnedVideoBuildReport)> {
+        let profile = profile.to_sdk()?;
+        let created = self
+            .sdk
+            .create_transcoder(profile, request)
+            .map_err(map_video_build_error)?;
+        Ok(created.into_parts())
+    }
 }
 
-/// Stamps encoder config domains/staging from the profile IO plan.
-pub(crate) fn align_encoder_config(
-    config: EncoderConfig,
-    profile: &VideoProfileDescriptor,
-) -> Result<EncoderConfig> {
-    reject_explicit_domain_conflict(
-        "encoder image",
-        config.memory_domain,
-        profile.io.encoder_image_input,
-        true,
-    )?;
-    if config.allow_staging && !profile.io.allow_staging {
-        return Err(Error::Config(format!(
-            "profile `{}` forbids staging (allow_staging=false); cannot enable staging on encoder",
-            profile.name
-        )));
+impl Default for AvcodecSdkService {
+    fn default() -> Self {
+        // Panic here mirrors the old factory default and is only used in contexts where the
+        // caller already assumes the SDK is present; normal construction should call `new()`.
+        Self::new().expect("AvcodecSdkService::new failed")
     }
-    Ok(config
-        .with_memory_domain(profile.io.encoder_image_input)
-        .with_packet_output_domain(profile.io.encoder_packet_output)
-        .with_allow_staging(profile.io.allow_staging))
 }
 
-/// Stamps processor config domains/staging from a processor-enabled profile IO plan.
-pub(crate) fn align_processor_config(
-    config: ImageProcessorConfig,
-    profile: &VideoProfileDescriptor,
-) -> Result<ImageProcessorConfig> {
-    let (input, output) = match (
-        profile.io.processor_image_input,
-        profile.io.processor_image_output,
-    ) {
-        (Some(input), Some(output)) => (input, output),
-        _ => {
-            return Err(Error::Config(format!(
-                "profile `{}` does not enable an image processor stage",
-                profile.name
-            )));
-        }
-    };
-    // Defaults are Host; only treat non-Host as explicit overrides when topology is non-Host.
-    if config.memory_domain != MemoryDomain::Host && config.memory_domain != input {
-        return Err(domain_conflict("processor", config.memory_domain, input));
-    }
-    if config.allow_staging && !profile.io.allow_staging {
-        return Err(Error::Config(format!(
-            "profile `{}` forbids staging (allow_staging=false); cannot enable staging on processor",
-            profile.name
-        )));
-    }
-    let target_op = config.target_op.unwrap_or(ImageOpKind::Resize);
-    Ok(config
-        .with_memory_domain(input)
-        .with_input_memory_domain(input)
-        .with_output_memory_domain(output)
-        .with_allow_staging(profile.io.allow_staging)
-        .with_target_op(target_op))
-}
+#[cfg(feature = "avcodec-sdk")]
+pub(crate) fn map_video_build_error(error: VideoBuildError) -> Error {
+    use dg_media_avcodec::VideoRole;
 
-fn reject_explicit_domain_conflict(
-    role: &str,
-    configured: MemoryDomain,
-    expected: MemoryDomain,
-    treat_host_as_default: bool,
-) -> Result<()> {
-    if configured == expected {
-        return Ok(());
-    }
-    // DecoderConfig/EncoderConfig default to Host. When the profile expects a non-Host domain
-    // and the caller left the default Host, we overwrite — that is not a conflict.
-    if treat_host_as_default && configured == MemoryDomain::Host && expected != MemoryDomain::Host {
-        return Ok(());
-    }
-    // Explicit non-default that disagrees with the profile is a topology violation.
-    if configured != MemoryDomain::Host || expected == MemoryDomain::Host {
-        return Err(domain_conflict(role, configured, expected));
-    }
-    Ok(())
-}
-
-fn domain_conflict(role: &str, configured: MemoryDomain, expected: MemoryDomain) -> Error {
-    Error::Config(format!(
-        "{role} memory domain {configured:?} conflicts with profile topology {expected:?}"
-    ))
-}
-
-fn map_session_build_error(error: VideoSessionBuildError) -> Error {
-    use crate::{media_error_with_context, MediaErrorContext, MediaOperation};
-    use dg_media_avcodec::AvError;
-
-    let role = match error.role {
-        VideoSessionRole::Decoder => "decoder",
-        VideoSessionRole::Encoder => "encoder",
-        VideoSessionRole::ImageProcessor => "image_processor",
-    };
     let operation = match error.role {
-        VideoSessionRole::Decoder => MediaOperation::CreateDecoder,
-        VideoSessionRole::Encoder => MediaOperation::CreateEncoder,
-        VideoSessionRole::ImageProcessor => MediaOperation::CreateProcessor,
+        Some(VideoRole::Decoder) => MediaOperation::CreateDecoder,
+        Some(VideoRole::Encoder) => MediaOperation::CreateEncoder,
+        Some(VideoRole::ImageProcessor) => MediaOperation::CreateProcessor,
+        _ => MediaOperation::Select,
     };
-    let backend = error
-        .failure
-        .as_ref()
-        .and_then(|failure| {
-            failure
-                .trace
-                .selected_backend
-                .or(failure.trace.backend_hint)
-        })
-        .unwrap_or("none");
-    let diagnosis = error
-        .failure
-        .as_ref()
-        .map(|failure| format!("{:?}", failure.diagnosis))
-        .unwrap_or_else(|| "none".to_string());
 
-    // Factory V2 attaches profile/domain on AvError::WithContext for topology failures.
-    let (profile, codec, source_domain, target_domain, allow_staging) = match &error.error {
-        AvError::WithContext { context, .. } => (
-            context.profile_name.clone(),
-            context.codec,
-            context.source_domain,
-            context.target_domain,
-            context.allow_staging,
-        ),
-        _ => (None, None, None, None, None),
+    let detail = if let Some(source_err) = error.source.as_ref() {
+        format!("{} (source: {source_err:?})", error.message)
+    } else {
+        error.message.clone()
     };
-    let detail = format!(
-        "session build failed for role {role} (diagnosis={diagnosis}): {}",
-        map_av_error(error.error)
-    );
-    let mut ctx = MediaErrorContext::new("Unsupported", operation, detail)
-        .with_backend(backend)
-        .with_role(role);
-    if let Some(profile) = profile {
-        ctx = ctx.with_profile(profile);
+
+    let mut context = MediaErrorContext::new("video build failed", operation, detail)
+        .with_profile(error.profile.unwrap_or("unknown"));
+
+    if let Some(role) = error.role {
+        context = context.with_role(map_video_role(role));
     }
-    if let Some(codec) = codec {
-        ctx = ctx.with_codec(format!("{codec:?}"));
+
+    if let Some(selection) = error.selection_failure.as_ref() {
+        let backend = selection
+            .trace
+            .selected_backend
+            .or(selection.trace.backend_hint)
+            .unwrap_or("none");
+        context = context.with_backend(backend);
     }
-    ctx = ctx.with_domains(
-        source_domain.and_then(av_domain_to_core),
-        target_domain.and_then(av_domain_to_core),
-        allow_staging,
-    );
-    media_error_with_context(ctx)
+
+    if let Some(codec) = error.codec {
+        context = context.with_codec(format!("{codec:?}"));
+    }
+
+    let source = error
+        .source_domain
+        .map(crate::bridge::avcodec_memory_domain_to_core);
+    let target = error
+        .target_domain
+        .map(crate::bridge::avcodec_memory_domain_to_core);
+    context = context.with_domains(source, target, error.allow_staging);
+
+    media_error_with_context(context)
 }
 
-fn av_domain_to_core(domain: MemoryDomain) -> Option<dg_core::MemoryDomain> {
-    match domain {
-        MemoryDomain::Host => Some(dg_core::MemoryDomain::Host),
-        MemoryDomain::DmaBuf => Some(dg_core::MemoryDomain::DmaBuf),
-        MemoryDomain::DrmPrime => Some(dg_core::MemoryDomain::DrmPrime),
-        MemoryDomain::CudaDevice => Some(dg_core::MemoryDomain::CudaDevice),
-        _ => None,
+#[cfg(feature = "avcodec-sdk")]
+fn map_video_role(role: VideoRole) -> &'static str {
+    match role {
+        VideoRole::Decoder => "decoder",
+        VideoRole::Encoder => "encoder",
+        VideoRole::ImageProcessor => "image-processor",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use dg_media_avcodec::{
-        CodecId, DecoderConfig, ImageOpKind, ImageProcessorConfig, MemoryDomain, TimeBase,
-    };
-    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
-    use dg_media_avcodec::{EncoderConfig, ImageInfo};
-
-    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
-    use super::align_encoder_config;
-    #[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]
-    use super::align_processor_config;
-    use super::{align_decoder_config, AvcodecSdkService};
-    use crate::profile::{
-        profile_to_sdk_descriptor, profile_to_sdk_descriptor_with_processor, AvcodecProfile,
-    };
+    use super::*;
 
     #[test]
-    fn native_free_decoder_builds_with_factory_v2() {
-        let service = AvcodecSdkService::from_default_registry();
-        let config = DecoderConfig::new(CodecId::Jpeg, TimeBase::new(1, 25));
-        let (_decoder, report) = service
-            .build_decoder(AvcodecProfile::NativeFree, config)
-            .expect("jpeg decoder must be available in native-free profile");
-        assert_eq!(report.policy_name, "native-free");
-        assert!(report.decoder_backend.is_some());
-    }
-
-    #[test]
-    fn native_free_resize_processor_builds_with_factory_v2() {
-        let service = AvcodecSdkService::from_default_registry();
-        let (_processor, report) = service
-            .build_image_processor(
-                AvcodecProfile::NativeFree,
-                ImageProcessorConfig::new(),
-                ImageOpKind::Resize,
-            )
-            .expect("host profiles must enable processor topology for resize");
-        assert_eq!(report.policy_name, "native-free");
-        assert!(report.image_processor_backend.is_some());
-    }
-
-    #[test]
-    fn align_decoder_stamps_host_topology() {
-        let profile = profile_to_sdk_descriptor(AvcodecProfile::NativeFree).expect("profile");
-        let config = align_decoder_config(
-            DecoderConfig::new(CodecId::H264, TimeBase::new(1, 25)),
-            &profile,
-        )
-        .expect("align");
-        assert_eq!(config.memory_domain, MemoryDomain::Host);
-        assert_eq!(config.packet_input_domain(), MemoryDomain::Host);
-        assert!(!config.allow_staging);
-    }
-
-    #[test]
-    #[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]
-    fn align_decoder_stamps_zero_copy_image_domain() {
-        let profile = profile_to_sdk_descriptor(AvcodecProfile::RkmppZeroCopy).expect("profile");
-        let config = align_decoder_config(
-            DecoderConfig::new(CodecId::H264, TimeBase::new(1, 25)),
-            &profile,
-        )
-        .expect("align");
-        assert_eq!(config.memory_domain, MemoryDomain::DrmPrime);
-        assert_eq!(config.packet_input_domain(), MemoryDomain::Host);
-        assert!(!config.allow_staging);
-    }
-
-    #[test]
-    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
-    fn align_encoder_stamps_cuda_device_domain() {
-        let profile =
-            profile_to_sdk_descriptor(AvcodecProfile::NvcodecDeviceFrame).expect("profile");
-        let config = align_encoder_config(
-            EncoderConfig::new(
+    fn video_build_error_contains_profile_context() {
+        // `VideoBuildError` is only available inside the SDK; exercise `map_video_build_error`
+        // through a real build path that fails because the `software` profile is not compiled.
+        #[cfg(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free"))]
+        {
+            use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+            let service = AvcodecSdkService::new().expect("sdk");
+            let request = VideoEncoderRequest::new(
                 CodecId::H264,
-                64,
-                64,
-                ImageInfo::Nv12,
-                TimeBase::new(1, 25),
-                100_000,
-            ),
-            &profile,
-        )
-        .expect("align");
-        assert_eq!(config.memory_domain, MemoryDomain::CudaDevice);
-        assert!(!config.allow_staging);
-    }
-
-    #[test]
-    #[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]
-    fn align_processor_stamps_drm_to_dmabuf() {
-        let profile =
-            profile_to_sdk_descriptor_with_processor(AvcodecProfile::RkmppZeroCopy).expect("p");
-        let config = align_processor_config(ImageProcessorConfig::new(), &profile).expect("align");
-        assert_eq!(config.input_memory_domain(), MemoryDomain::DrmPrime);
-        assert_eq!(config.output_memory_domain(), MemoryDomain::DmaBuf);
-        assert!(!config.allow_staging);
-    }
-
-    #[test]
-    fn device_frame_rejects_processor_descriptor() {
-        let result = profile_to_sdk_descriptor_with_processor(AvcodecProfile::NvcodecDeviceFrame);
-        #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
-        {
-            assert!(result.is_err());
+                32,
+                32,
+                ImageInfo::Yuv420p,
+                TimeBase::new(1, 30),
+                1_000_000,
+            )
+            .expect("valid request");
+            let err = match service.create_encoder(AvcodecProfile::Software, request) {
+                Err(err) => err,
+                Ok(_) => panic!("software not compiled"),
+            };
+            let text = err.to_string();
+            assert!(text.contains("software"), "{text}");
         }
-        #[cfg(not(feature = "avcodec-profile-nvcodec-device-frame"))]
+
+        // Keep the test body non-empty when the SDK is disabled.
+        #[cfg(not(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free")))]
         {
-            assert!(result.is_err());
+            let _ = AvcodecProfile::NativeFree;
         }
     }
 }

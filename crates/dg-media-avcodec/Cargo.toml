@@ -29,16 +29,5 @@ avcodec-profile-amf-host-fallback = ["avcodec-sdk", "avcodec/profile-amf-host-fa
 avcodec-profile-rkmpp-zero-copy = ["avcodec-sdk", "avcodec/profile-rkmpp-zero-copy"]
 avcodec-profile-nvcodec-device-frame = ["avcodec-sdk", "avcodec/profile-nvcodec-device-frame"]
 
-# Legacy codec-* features retain direct backend enable semantics.
-codec-ffmpeg = ["avcodec-sdk", "avcodec/ffmpeg"]
-codec-x264 = ["avcodec-sdk", "avcodec/x264"]
-codec-x265 = ["avcodec-sdk", "avcodec/x265"]
-codec-openh264 = ["avcodec-sdk", "avcodec/openh264"]
-codec-rkmpp = ["avcodec-sdk", "avcodec/rkmpp"]
-codec-librga = ["avcodec-sdk", "avcodec/librga"]
-codec-nvcodec = ["avcodec-sdk", "avcodec/nvcodec"]
-codec-onevpl = ["avcodec-sdk", "avcodec/onevpl"]
-codec-amf = ["avcodec-sdk", "avcodec/amf"]
-
 [dependencies]
-avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "fc728aa9ea3e0a85401d2cd4de1b762ffcf92a51", package = "avcodec", default-features = false, optional = true }
+avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "84a2832796717f46a1009ee064c914b0ad66ac19", package = "avcodec", default-features = false, optional = true }

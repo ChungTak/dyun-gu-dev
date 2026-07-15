@@ -56,11 +56,7 @@ pub use planner::{
     ZeroCopyPlanner, ZeroCopyRequest,
 };
 #[cfg(feature = "avcodec-sdk")]
-pub use profile::{
-    compiled_profiles, profile_decoder_image_domain, profile_encoder_image_domain,
-    profile_to_sdk_descriptor, profile_to_sdk_descriptor_with_processor,
-    reject_memory_domain_conflict, reject_profile_hw_conflict, resolve_profile, AvcodecProfile,
-};
+pub use profile::{compiled_profiles, reject_profile_hw_conflict, resolve_profile, AvcodecProfile};
 pub use stats::MediaSessionStats;
 pub use stream_metadata::{
     MediaStreamCodec, MediaStreamFormat, MediaStreamKind, MediaStreamMetadata, MediaStreamTimebase,

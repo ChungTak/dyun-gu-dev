@@ -1,13 +1,13 @@
 //! Owned diagnostics snapshots from SDK session and transcoder build reports.
 
+#[cfg(feature = "avcodec-sdk")]
 use dg_media_avcodec::{
-    MemoryDomain, VideoIoMemoryPlan, VideoSessionBuildReport, VideoTranscodeModeReport,
-    VideoTranscoderBuildReport,
+    OwnedVideoBuildReport, VideoTranscodeModeReport, VideoTranscoderBuildReport,
 };
 
-/// Owned snapshot of a Factory V2 session build report for logging and CLI export.
+/// Owned snapshot of a session build report for logging and CLI export.
 ///
-/// Plan 12: reports Profile, selected backends, I/O domains, staging plan, and legacy warning.
+/// Reports Profile, selected backends, I/O domains, staging plan, and legacy warning.
 /// Does not include pointers, fds, or media payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaSessionDiagnostics {
@@ -28,20 +28,45 @@ pub struct MediaSessionDiagnostics {
     pub legacy_warning: Option<String>,
 }
 
-impl From<&VideoSessionBuildReport> for MediaSessionDiagnostics {
-    fn from(report: &VideoSessionBuildReport) -> Self {
-        let (allow_staging, memory_path) = match report.memory_path {
-            dg_media_avcodec::VideoMemoryPath::Host { allow_staging } => {
-                (Some(allow_staging), "host".to_string())
-            }
-            dg_media_avcodec::VideoMemoryPath::ZeroCopy { domain } => {
-                (Some(false), format!("zero_copy:{domain:?}"))
-            }
-        };
-        let domains = report.io.map(IoDomainLabels::from_plan).unwrap_or_default();
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct IoDomainLabels {
+    decoder_packet_input: Option<String>,
+    decoder_image_output: Option<String>,
+    processor_image_input: Option<String>,
+    processor_image_output: Option<String>,
+    encoder_image_input: Option<String>,
+    encoder_packet_output: Option<String>,
+}
+
+#[cfg(feature = "avcodec-sdk")]
+impl From<&OwnedVideoBuildReport> for MediaSessionDiagnostics {
+    fn from(report: &OwnedVideoBuildReport) -> Self {
+        let allow_staging = report.io.as_ref().map(|io| io.allow_staging);
+        let memory_path = report
+            .io
+            .as_ref()
+            .map_or_else(|| "none".to_string(), |io| format!("{io:?}"));
+        let domains = report
+            .io
+            .as_ref()
+            .map(|io| {
+                fn label(domain: dg_media_avcodec::MemoryDomain) -> String {
+                    format!("{domain:?}")
+                }
+                IoDomainLabels {
+                    decoder_packet_input: Some(label(io.decoder_packet_input)),
+                    decoder_image_output: Some(label(io.decoder_image_output)),
+                    processor_image_input: io.processor_image_input.map(label),
+                    processor_image_output: io.processor_image_output.map(label),
+                    encoder_image_input: Some(label(io.encoder_image_input)),
+                    encoder_packet_output: Some(label(io.encoder_packet_output)),
+                }
+            })
+            .unwrap_or_default();
+
         Self {
-            profile_name: report.policy_name.clone(),
-            policy_name: report.policy_name.clone(),
+            profile_name: report.profile.to_string(),
+            policy_name: report.profile.to_string(),
             decoder_backend: report.decoder_backend.map(str::to_string),
             encoder_backend: report.encoder_backend.map(str::to_string),
             image_processor_backend: report.image_processor_backend.map(str::to_string),
@@ -53,33 +78,7 @@ impl From<&VideoSessionBuildReport> for MediaSessionDiagnostics {
             processor_image_output: domains.processor_image_output,
             encoder_image_input: domains.encoder_image_input,
             encoder_packet_output: domains.encoder_packet_output,
-            legacy_warning: report.legacy_alias_warning.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct IoDomainLabels {
-    decoder_packet_input: Option<String>,
-    decoder_image_output: Option<String>,
-    processor_image_input: Option<String>,
-    processor_image_output: Option<String>,
-    encoder_image_input: Option<String>,
-    encoder_packet_output: Option<String>,
-}
-
-impl IoDomainLabels {
-    fn from_plan(plan: VideoIoMemoryPlan) -> Self {
-        fn label(domain: MemoryDomain) -> String {
-            format!("{domain:?}")
-        }
-        Self {
-            decoder_packet_input: Some(label(plan.decoder_packet_input)),
-            decoder_image_output: Some(label(plan.decoder_image_output)),
-            processor_image_input: plan.processor_image_input.map(label),
-            processor_image_output: plan.processor_image_output.map(label),
-            encoder_image_input: Some(label(plan.encoder_image_input)),
-            encoder_packet_output: Some(label(plan.encoder_packet_output)),
+            legacy_warning: None,
         }
     }
 }
@@ -92,6 +91,7 @@ pub struct MediaTranscoderDiagnostics {
     pub adapter_stages: usize,
 }
 
+#[cfg(feature = "avcodec-sdk")]
 impl From<&VideoTranscoderBuildReport> for MediaTranscoderDiagnostics {
     fn from(report: &VideoTranscoderBuildReport) -> Self {
         let mode = match report.mode {
@@ -107,47 +107,27 @@ impl From<&VideoTranscoderBuildReport> for MediaTranscoderDiagnostics {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::MediaSessionDiagnostics;
-    use dg_media_avcodec::{
-        MemoryDomain, SelectionTrace, VideoIoMemoryPlan, VideoMemoryPath, VideoSessionBuildReport,
-    };
-
+#[cfg(feature = "avcodec-sdk")]
+mod session_diagnostics_tests {
     #[test]
     fn session_diagnostics_copies_backend_fields() {
-        let decoder_trace = SelectionTrace {
-            backend_hint: None,
-            selected_backend: Some("jpeg"),
-            steps: Vec::new(),
+        use super::MediaSessionDiagnostics;
+        let report = dg_media_avcodec::OwnedVideoBuildReport {
+            profile: "native-free",
+            intent: dg_media_avcodec::VideoIntent::Decoder,
+            decoder_backend: Some("jpeg"),
+            encoder_backend: None,
+            image_processor_backend: Some("libyuv"),
+            io: None,
+            fallback_allowed: false,
+            transcoder: None,
+            selections: Vec::new(),
+            role_reports: Vec::new(),
         };
-        let processor_trace = SelectionTrace {
-            backend_hint: None,
-            selected_backend: Some("libyuv"),
-            steps: Vec::new(),
-        };
-        let io = VideoIoMemoryPlan::new()
-            .with_decoder_packet_input(MemoryDomain::Host)
-            .with_decoder_image_output(MemoryDomain::Host)
-            .with_encoder_image_input(MemoryDomain::Host)
-            .with_encoder_packet_output(MemoryDomain::Host);
-        let report = VideoSessionBuildReport::new(
-            "native-free".to_string(),
-            VideoMemoryPath::Host {
-                allow_staging: false,
-            },
-            Some(&decoder_trace),
-            Some(&processor_trace),
-            None,
-            Some(io),
-            None,
-        );
         let diag = MediaSessionDiagnostics::from(&report);
         assert_eq!(diag.policy_name, "native-free");
         assert_eq!(diag.decoder_backend.as_deref(), Some("jpeg"));
         assert_eq!(diag.image_processor_backend.as_deref(), Some("libyuv"));
-        assert_eq!(diag.allow_staging, Some(false));
-        assert_eq!(diag.decoder_image_output.as_deref(), Some("Host"));
-        assert!(diag.processor_image_input.is_none());
+        assert_eq!(diag.allow_staging, None);
     }
 }
