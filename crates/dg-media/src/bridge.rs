@@ -979,28 +979,6 @@ mod tests {
             assert!(matches!(err, dg_core::Error::Unsupported(message)
                 if message.contains("MppBuffer") && message.contains("Host")));
         }
-
-        #[test]
-        fn staging_fallback_copies_through_registered_hook() {
-            dg_media_avcodec::register_stage_to_host_hook(
-                dg_media_avcodec::MemoryDomain::DmaBuf,
-                |handle, dst| {
-                    dst.fill(u8::try_from(handle.id()).unwrap_or(0));
-                    Ok(())
-                },
-            );
-            let handle =
-                dg_media_avcodec::BufferHandle::new(5, dg_media_avcodec::MemoryDomain::DmaBuf, 4);
-            let imported = import_avcodec_handle(&handle, DeviceKind::Cpu, MemoryDomain::Host)
-                .expect("stage to host");
-            assert!(!imported.zero_copy);
-            assert_eq!(imported.path.copy_count, 1);
-            assert_eq!(
-                imported.path.domains,
-                vec![MemoryDomain::DmaBuf, MemoryDomain::Host]
-            );
-            assert_eq!(imported.buffer.read_bytes(), vec![5, 5, 5, 5]);
-        }
     }
 
     #[test]

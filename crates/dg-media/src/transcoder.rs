@@ -1,4 +1,4 @@
-//! Fusion video transcoder core via upstream `VideoTranscoderRequest`.
+//! Fusion video transcoder core via the upstream V3 `VideoSdk` high-level transcoder session.
 
 use dg_core::{
     BitstreamFormat as CoreBitstreamFormat, Error, MediaCodec, MediaPayloadInfo, MediaTimeBase,
@@ -6,22 +6,31 @@ use dg_core::{
 };
 
 use dg_media_avcodec::{
-    CodecId, DecoderConfig, EncoderConfig, ImageInfo, Packet, Poll, Registry, TimeBase,
-    VideoTranscodeOptions, VideoTranscoder, VideoTranscoderBuildReport, VideoTranscoderRequest,
+    BitstreamFormat, CodecId, ImageInfo, OwnedVideoBuildReport, Packet, Poll, TimeBase,
+    VideoDecoderRequest, VideoEncoderRequest, VideoRuntimeError, VideoTranscodeRequest,
+    VideoTranscoderSession,
 };
 
 use crate::async_core::{AsyncPump, BackendOps, PumpStep, SubmitResult};
 use crate::avcodec::{
-    bitstream_format_from_codec, bitstream_from_frame, codec_from_frame, map_av_error,
-    stream_index_from_frame, time_base_from_frame,
+    bitstream_format_from_codec, bitstream_from_frame, codec_from_frame, stream_index_from_frame,
+    time_base_from_frame,
 };
 use crate::bridge::{avcodec_packet_to_media_frame, media_frame_to_avcodec_packet};
 use crate::diagnostics::MediaTranscoderDiagnostics;
-use crate::profile::{profile_to_sdk_descriptor, AvcodecProfile};
-use crate::session::{align_decoder_config, align_encoder_config};
+use crate::profile::AvcodecProfile;
+use crate::session::{map_video_build_error, AvcodecSdkService};
 use crate::MediaFrame;
 
 type AvResult<T> = core::result::Result<T, dg_media_avcodec::AvError>;
+
+fn default_sdk_service() -> Result<AvcodecSdkService> {
+    AvcodecSdkService::new()
+}
+
+fn map_video_runtime_error(error: VideoRuntimeError) -> dg_media_avcodec::AvError {
+    error.source
+}
 
 /// Configuration for a fused packet-to-packet transcoder element.
 #[derive(Clone, Debug)]
@@ -29,8 +38,8 @@ pub struct TranscodeCoreConfig {
     pub profile: AvcodecProfile,
     pub input_codec: Option<CodecId>,
     pub output_codec: Option<CodecId>,
-    pub input_bitstream: Option<dg_media_avcodec::BitstreamFormat>,
-    pub output_bitstream: Option<dg_media_avcodec::BitstreamFormat>,
+    pub input_bitstream: Option<BitstreamFormat>,
+    pub output_bitstream: Option<BitstreamFormat>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub bitrate: Option<u32>,
@@ -39,19 +48,18 @@ pub struct TranscodeCoreConfig {
 }
 
 struct TranscodeBackend {
-    registry: &'static Registry,
     profile: AvcodecProfile,
-    transcoder: Option<VideoTranscoder<'static>>,
-    build_report: Option<VideoTranscoderBuildReport>,
+    transcoder: Option<VideoTranscoderSession>,
+    build_report: Option<OwnedVideoBuildReport>,
     input_codec: Option<CodecId>,
     output_codec: CodecId,
-    input_bitstream: Option<dg_media_avcodec::BitstreamFormat>,
-    output_bitstream: dg_media_avcodec::BitstreamFormat,
+    input_bitstream: Option<BitstreamFormat>,
+    output_bitstream: BitstreamFormat,
     stream_index: u32,
     config_input_codec: Option<CodecId>,
     config_output_codec: Option<CodecId>,
-    config_input_bitstream: Option<dg_media_avcodec::BitstreamFormat>,
-    config_output_bitstream: Option<dg_media_avcodec::BitstreamFormat>,
+    config_input_bitstream: Option<BitstreamFormat>,
+    config_output_bitstream: Option<BitstreamFormat>,
     config_width: Option<u32>,
     config_height: Option<u32>,
     bitrate: Option<u32>,
@@ -66,7 +74,6 @@ impl TranscodeBackend {
             .output_bitstream
             .unwrap_or(bitstream_format_from_codec(output_codec)?);
         Ok(Self {
-            registry: leak_registry(),
             profile: config.profile,
             transcoder: None,
             build_report: None,
@@ -124,31 +131,30 @@ impl TranscodeBackend {
             .map(|tb| TimeBase::new(tb.num, tb.den))
             .unwrap_or(time_base);
 
-        let sdk_profile = profile_to_sdk_descriptor(self.profile)?;
-        let decoder =
-            align_decoder_config(DecoderConfig::new(input_codec, resolved_tb), &sdk_profile)?;
-        let encoder = align_encoder_config(
-            EncoderConfig::new(
-                output_codec,
-                width,
-                height,
-                ImageInfo::Yuv420p,
-                resolved_tb,
-                bitrate,
-            ),
-            &sdk_profile,
-        )?;
-        let options = VideoTranscodeOptions {
-            allow_linked: self.allow_linked,
-            ..VideoTranscodeOptions::default()
-        };
-        let request = VideoTranscoderRequest::new(sdk_profile, decoder, encoder, options);
-        let transcoder =
-            VideoTranscoder::new_with_request(self.registry, request).map_err(map_av_error)?;
-        if let Some(report) = transcoder.build_report().cloned() {
-            self.build_report = Some(report);
+        let mut decoder =
+            VideoDecoderRequest::new(input_codec, resolved_tb).map_err(map_video_build_error)?;
+        if let Some(parameters) =
+            crate::avcodec::codec_parameters_from_frame(frame, input_codec, input_bitstream)?
+        {
+            decoder = decoder.with_parameters(Some(parameters));
         }
+
+        let encoder = VideoEncoderRequest::new(
+            output_codec,
+            width,
+            height,
+            ImageInfo::Yuv420p,
+            resolved_tb,
+            bitrate,
+        )
+        .map_err(map_video_build_error)?;
+
+        let request =
+            VideoTranscodeRequest::new(decoder, encoder).with_allow_linked(self.allow_linked);
+        let (transcoder, report) =
+            default_sdk_service()?.create_transcoder(self.profile, request)?;
         self.transcoder = Some(transcoder);
+        self.build_report = Some(report);
         self.input_codec = Some(input_codec);
         self.input_bitstream = Some(input_bitstream);
         self.output_codec = output_codec;
@@ -197,7 +203,10 @@ impl BackendOps for TranscodeBackend {
         let Some(transcoder) = self.transcoder.as_mut() else {
             return SubmitResult::Error(dg_media_avcodec::AvError::NotInitialized);
         };
-        match transcoder.submit_packet(value.clone()) {
+        match transcoder
+            .submit_packet(value.clone())
+            .map_err(map_video_runtime_error)
+        {
             Ok(()) => SubmitResult::Accepted,
             Err(error) if error.kind() == dg_media_avcodec::AvErrorKind::Again => {
                 SubmitResult::Again(value)
@@ -210,8 +219,8 @@ impl BackendOps for TranscodeBackend {
         let Some(transcoder) = self.transcoder.as_mut() else {
             return Ok(Poll::Pending);
         };
-        match transcoder.poll_packet() {
-            Ok(Poll::Ready(packet)) => {
+        match transcoder.poll_packet().map_err(map_video_runtime_error)? {
+            Poll::Ready(packet) => {
                 let mut frame = avcodec_packet_to_media_frame(&packet)
                     .map_err(|err| dg_media_avcodec::AvError::BackendMessage(err.to_string()))?;
                 if let Some(info) = frame.meta.media_info.as_mut() {
@@ -228,22 +237,12 @@ impl BackendOps for TranscodeBackend {
                         };
                         encoded.stream_index = self.stream_index;
                         encoded.bitstream_format = match self.output_bitstream {
-                            dg_media_avcodec::BitstreamFormat::H264AnnexB => {
-                                CoreBitstreamFormat::H264AnnexB
-                            }
-                            dg_media_avcodec::BitstreamFormat::H265AnnexB => {
-                                CoreBitstreamFormat::H265AnnexB
-                            }
-                            dg_media_avcodec::BitstreamFormat::Vp8Frame => {
-                                CoreBitstreamFormat::Vp8Frame
-                            }
-                            dg_media_avcodec::BitstreamFormat::Vp9Frame => {
-                                CoreBitstreamFormat::Vp9Frame
-                            }
-                            dg_media_avcodec::BitstreamFormat::Av1Obu => {
-                                CoreBitstreamFormat::Av1Obu
-                            }
-                            dg_media_avcodec::BitstreamFormat::JpegInterchange => {
+                            BitstreamFormat::H264AnnexB => CoreBitstreamFormat::H264AnnexB,
+                            BitstreamFormat::H265AnnexB => CoreBitstreamFormat::H265AnnexB,
+                            BitstreamFormat::Vp8Frame => CoreBitstreamFormat::Vp8Frame,
+                            BitstreamFormat::Vp9Frame => CoreBitstreamFormat::Vp9Frame,
+                            BitstreamFormat::Av1Obu => CoreBitstreamFormat::Av1Obu,
+                            BitstreamFormat::JpegInterchange => {
                                 CoreBitstreamFormat::JpegInterchange
                             }
                             _ => CoreBitstreamFormat::Unknown,
@@ -254,15 +253,14 @@ impl BackendOps for TranscodeBackend {
                     .map_err(|err| dg_media_avcodec::AvError::BackendMessage(err.to_string()))?;
                 Ok(Poll::Ready(frame))
             }
-            Ok(Poll::Pending) => Ok(Poll::Pending),
-            Ok(Poll::EndOfStream) => Ok(Poll::EndOfStream),
-            Err(error) => Err(error),
+            Poll::Pending => Ok(Poll::Pending),
+            Poll::EndOfStream => Ok(Poll::EndOfStream),
         }
     }
 
     fn flush_backend(&mut self) -> AvResult<()> {
         if let Some(transcoder) = self.transcoder.as_mut() {
-            transcoder.flush()
+            transcoder.flush().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -270,7 +268,7 @@ impl BackendOps for TranscodeBackend {
 
     fn reset_backend(&mut self) -> AvResult<()> {
         if let Some(transcoder) = self.transcoder.as_mut() {
-            transcoder.reset()
+            transcoder.reset().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -279,18 +277,6 @@ impl BackendOps for TranscodeBackend {
     fn flush_required(&self) -> bool {
         self.transcoder.is_some()
     }
-}
-
-/// Leaks a registry for the transcoder lifetime.
-///
-/// Upstream `VideoTranscoder` borrows `Registry`. `Registry` is not `Sync` (factory trait
-/// objects), so a process-wide `static` is rejected by `#![forbid(unsafe_code)]` without
-/// unsafe Sync impls. One leak per `TranscodeCore` is acceptable for the fusion library API;
-/// graph workloads should prefer the decode/resize/encode element chain.
-fn leak_registry() -> &'static Registry {
-    Box::leak(Box::new(
-        dg_media_avcodec::default_registry_builder().build(),
-    ))
 }
 
 /// Fusion transcoder core. Prefer the decode/resize/encode graph chain when `Send` is required
@@ -330,6 +316,7 @@ impl TranscodeCore {
         self.backend
             .build_report
             .as_ref()
+            .and_then(|report| report.transcoder.as_ref())
             .map(MediaTranscoderDiagnostics::from)
     }
 

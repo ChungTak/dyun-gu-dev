@@ -65,8 +65,8 @@ fn dg_media_avcodec_is_only_direct_codec_dependency() {
     );
     let avcodec_manifest = include_str!("../../dg-media-avcodec/Cargo.toml");
     assert!(
-        avcodec_manifest.contains("rev = \"fc728aa9ea3e0a85401d2cd4de1b762ffcf92a51\""),
-        "dg-media-avcodec must pin fc728aa revision"
+        avcodec_manifest.contains("rev = \"84a2832796717f46a1009ee064c914b0ad66ac19\""),
+        "dg-media-avcodec must pin 84a2832 V3 RC revision"
     );
     assert!(
         avcodec_manifest.contains("profile-native-free"),

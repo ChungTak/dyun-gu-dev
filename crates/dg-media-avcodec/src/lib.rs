@@ -6,19 +6,24 @@ pub use external::{probe_external_export, try_import_external_image, ExternalExp
 
 #[cfg(feature = "avcodec-sdk")]
 pub use avcodec::{
-    default_registry_builder, VideoBackendPolicy, VideoMemoryPath, VideoSessionBuildError,
-    VideoSessionBuildReport, VideoSessionBundle, VideoSessionFactoryV2, VideoSessionRequest,
-    VideoSessionRole, VideoTranscodeModeReport, VideoTranscodeOptions, VideoTranscoder,
-    VideoTranscoderBuildReport, VideoTranscoderRequest,
+    CreatedDecoder, CreatedEncoder, CreatedImageProcessor, CreatedTranscoder,
+    ImageProcessorRequest, OwnedVideoBuildReport, VideoBuildError, VideoBuildStage,
+    VideoDecoderRequest, VideoDecoderSession, VideoEncoderRequest, VideoEncoderSession,
+    VideoImageProcessorSession, VideoIntent, VideoProcessingSpec, VideoProfile, VideoRole,
+    VideoRuntimeDiagnostics, VideoRuntimeError, VideoRuntimeRole, VideoSdk, VideoTranscodeOptions,
+    VideoTranscodeRequest, VideoTranscoderSession,
 };
 
 #[cfg(feature = "avcodec-sdk")]
+pub use avcodec::{VideoTranscodeModeReport, VideoTranscoderBuildReport};
+
+#[cfg(feature = "avcodec-sdk")]
 pub use avcodec::core::{
-    register_stage_to_host_hook, AvError, AvErrorContext, AvErrorDetail, AvErrorKind, AvOperation,
-    AvResult, BackendSelectionPolicy, BitstreamFormat, BufferHandle, BufferSlice, CodecId,
-    CodecParameters, Decoder, DecoderConfig, Encoder, EncoderConfig, ExternalBufferDescriptor,
-    ExternalHandle, ExternalImageDescriptor, ExternalPacketDescriptor, Image, ImageInfo, ImageOp,
-    ImageOpKind, ImagePlane, ImageProcessRequest, ImageProcessor, ImageProcessorConfig,
-    MemoryDomain, Packet, PacketFlags, Poll, ProfileName, Registry, SelectionFailureDiagnosis,
-    SelectionFailureReport, SelectionTrace, TimeBase, VideoIoMemoryPlan, VideoProfileDescriptor,
+    AvError, AvErrorContext, AvErrorDetail, AvErrorKind, AvOperation, AvResult,
+    BackendSelectionPolicy, BitstreamFormat, BufferHandle, BufferSlice, CodecId, CodecParameters,
+    Decoder, DecoderConfig, Encoder, EncoderConfig, ExternalBufferDescriptor, ExternalHandle,
+    ExternalImageDescriptor, ExternalPacketDescriptor, Image, ImageInfo, ImageOp, ImageOpKind,
+    ImagePlane, ImageProcessRequest, ImageProcessor, ImageProcessorConfig, MemoryDomain, Packet,
+    PacketFlags, Poll, ProfileName, Registry, SelectionFailureDiagnosis, SelectionFailureReport,
+    SelectionTrace, TimeBase,
 };

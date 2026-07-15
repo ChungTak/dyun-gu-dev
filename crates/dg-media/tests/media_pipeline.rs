@@ -131,28 +131,37 @@ fn media_elements_are_registered() {
     }
 }
 
+#[allow(unused_mut)]
+fn with_profile(mut params: serde_json::Value) -> serde_json::Value {
+    #[cfg(feature = "avcodec-sdk")]
+    if let Some(map) = params.as_object_mut() {
+        map.insert("profile".to_string(), json!("native-free"));
+    }
+    params
+}
+
 #[test]
 fn media_element_parameters_are_validated_at_load_time() {
     let invalid = [
         (
             "media_decode",
-            json!({ "width": 2, "height": 2, "unknown": true }),
+            with_profile(json!({ "width": 2, "height": 2, "unknown": true })),
             "unknown field `unknown`",
         ),
         (
             "media_decode",
-            json!({ "width": 0, "height": 2 }),
+            with_profile(json!({ "width": 0, "height": 2 })),
             "field width must be non-zero",
         ),
         #[cfg(not(feature = "avcodec-sdk"))]
         (
             "media_decode",
-            json!({ "height": 2 }),
+            with_profile(json!({ "height": 2 })),
             "field width is required",
         ),
         (
             "media_decode",
-            json!({ "width": 2, "height": 2, "channels": 0 }),
+            with_profile(json!({ "width": 2, "height": 2, "channels": 0 })),
             "field channels must be non-zero",
         ),
         #[cfg(not(feature = "avcodec-sdk"))]
@@ -163,7 +172,7 @@ fn media_element_parameters_are_validated_at_load_time() {
         ),
         (
             "media_resize",
-            json!({ "width": 4, "height": "4" }),
+            with_profile(json!({ "width": 4, "height": "4" })),
             "field height must be a non-negative integer",
         ),
         (
@@ -224,8 +233,11 @@ fn media_encode_allows_omitted_parameters() {
 #[test]
 fn avcodec_media_encode_creates_with_omitted_parameters() {
     let input = node("input", "input", serde_json::Value::Null);
-    let mut encode = node("encode", "media_encode", json!({}));
-    encode.params = serde_json::Value::Null;
+    let encode = node(
+        "encode",
+        "media_encode",
+        json!({ "profile": "native-free" }),
+    );
     let spec = GraphSpecBuilder::new()
         .add_node(input)
         .add_node(encode)
@@ -236,6 +248,7 @@ fn avcodec_media_encode_creates_with_omitted_parameters() {
     Graph::new(spec).expect("parameterless avcodec media encoder should create");
 }
 
+#[cfg(not(feature = "avcodec-sdk"))]
 #[test]
 fn example_raw_adapter_yaml_loads() {
     let yaml = include_str!("../../../examples/media/raw-adapter.yaml");
@@ -326,11 +339,16 @@ fn example_rkmpp_zero_copy_yaml_validates_but_session_is_gated() {
 fn avcodec_jpeg_round_trip_through_media_elements() {
     let spec = GraphSpecBuilder::new()
         .add_node(node("input", "input", json!({})))
-        .add_node(node("encode", "media_encode", json!({ "codec": "jpeg" })))
+        .add_node(node(
+            "encode",
+            "media_encode",
+            json!({ "profile": "native-free", "codec": "jpeg" }),
+        ))
         .add_node(node(
             "decode",
             "media_decode",
             json!({
+                "profile": "native-free",
                 "width": 2,
                 "height": 2,
                 "channels": 3,

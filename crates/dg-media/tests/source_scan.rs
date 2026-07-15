@@ -1,4 +1,5 @@
-//! Production source scan for forbidden backend-selection patterns (plan 02 §4).
+//! Production source scan for forbidden backend-selection and V2 assembly patterns
+//! (plan 03 §INT3-04).
 #![cfg(feature = "avcodec-sdk")]
 
 use std::fs;
@@ -10,26 +11,32 @@ const FORBIDDEN: &[&str] = &[
     "BackendSelectionPolicy::Required",
     "BackendSelectionPolicy::Ordered",
     "AvcodecSessionBuilder",
-];
-
-/// Production modules that must not re-implement SDK backend selection.
-const SCAN_ROOTS: &[&str] = &[
-    "src/avcodec.rs",
-    "src/session.rs",
-    "src/profile.rs",
-    "src/transcoder.rs",
-    "src/diagnostics.rs",
-    "src/elements.rs",
-    "src/bridge.rs",
-    "src/legacy.rs",
+    // Plan 03 source guard: no V2 assembly or legacy registry leaking allowed.
+    "default_registry_builder",
+    "RegistryBuilder",
+    "VideoSessionFactoryV2",
+    "VideoBackendPolicy",
+    "VideoProfileDescriptor",
+    "VideoIoMemoryPlan",
+    "VideoTranscoderRequest",
+    "leak_registry",
 ];
 
 fn read_sources() -> String {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut combined = String::new();
-    for rel in SCAN_ROOTS {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-        combined.push_str(&fs::read_to_string(&path).unwrap_or_default());
-        combined.push('\n');
+    for entry in std::fs::read_dir(src_dir).expect("read src dir") {
+        let entry = entry.expect("entry");
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            let name = path.file_name().unwrap().to_string_lossy();
+            // legacy.rs is allowed to keep deprecated selection samples.
+            if name == "legacy.rs" {
+                continue;
+            }
+            combined.push_str(&fs::read_to_string(&path).unwrap_or_default());
+            combined.push('\n');
+        }
     }
     combined
 }

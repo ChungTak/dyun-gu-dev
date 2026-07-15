@@ -27,16 +27,6 @@ avcodec-profile-amf-host-fallback = ["media", "dg-media/avcodec-profile-amf-host
 avcodec-profile-rkmpp-zero-copy = ["media", "dg-media/avcodec-profile-rkmpp-zero-copy"]
 avcodec-profile-nvcodec-device-frame = ["media", "dg-media/avcodec-profile-nvcodec-device-frame"]
 
-# Legacy codec-* features.
-codec-ffmpeg = ["media", "dg-media/codec-ffmpeg"]
-codec-x264 = ["media", "dg-media/codec-x264"]
-codec-x265 = ["media", "dg-media/codec-x265"]
-codec-openh264 = ["media", "dg-media/codec-openh264"]
-codec-rkmpp = ["media", "dg-media/codec-rkmpp"]
-codec-librga = ["media", "dg-media/codec-librga"]
-codec-nvcodec = ["media", "dg-media/codec-nvcodec"]
-codec-onevpl = ["media", "dg-media/codec-onevpl"]
-codec-amf = ["media", "dg-media/codec-amf"]
 openvino = ["dep:dg-openvino", "dg-openvino/backend"]
 rknn = ["dep:dg-rknn", "dg-rknn/backend"]
 tensorrt = ["dep:dg-tensorrt", "dg-tensorrt/backend"]

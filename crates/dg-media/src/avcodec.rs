@@ -5,29 +5,29 @@ use dg_core::{
 
 use crate::async_core::{AsyncPump, BackendOps, PumpStep, SubmitResult};
 use crate::bridge::{
-    avcodec_image_to_media_frame_with_processor, avcodec_packet_to_media_frame,
-    media_frame_to_avcodec_image, media_frame_to_avcodec_packet,
+    avcodec_image_to_media_frame, avcodec_packet_to_media_frame, media_frame_to_avcodec_image,
+    media_frame_to_avcodec_packet,
 };
 use crate::diagnostics::MediaSessionDiagnostics;
 use crate::media_frame_timing;
 use crate::profile::AvcodecProfile;
-use crate::session::AvcodecSdkService;
+use crate::session::{map_video_build_error, AvcodecSdkService};
 use crate::MediaFrame;
-use dg_media_avcodec::VideoSessionBuildReport;
 
 use tracing::warn;
 
 use dg_media_avcodec::{
     AvError, AvErrorContext, AvErrorKind, BitstreamFormat, BufferHandle, BufferSlice, CodecId,
-    CodecParameters, Decoder, DecoderConfig, Encoder, EncoderConfig, Image, ImageInfo, ImageOp,
-    ImageOpKind, ImageProcessRequest, ImageProcessor, ImageProcessorConfig, Packet, Poll, TimeBase,
+    CodecParameters, Image, ImageInfo, ImageOp, ImageProcessRequest, ImageProcessorRequest,
+    OwnedVideoBuildReport, Packet, Poll, TimeBase, VideoDecoderRequest, VideoDecoderSession,
+    VideoEncoderRequest, VideoEncoderSession, VideoImageProcessorSession, VideoRole,
+    VideoRuntimeError,
 };
 
 type AvResult<T> = core::result::Result<T, AvError>;
 
-pub(crate) fn default_sdk_service() -> AvcodecSdkService {
-    // Registry only holds `&'static` backend factories; building is cheap.
-    AvcodecSdkService::from_default_registry()
+pub(crate) fn default_sdk_service() -> Result<AvcodecSdkService> {
+    AvcodecSdkService::new()
 }
 
 pub fn codec_from_name(name: Option<&str>) -> Result<CodecId> {
@@ -128,6 +128,14 @@ fn append_av_error_context(
         ctx.pixel_format = Some(format!("{source_format:?}"));
     }
     media_error_with_context(ctx)
+}
+
+fn map_video_runtime_error(error: VideoRuntimeError) -> AvError {
+    error.source
+}
+
+fn map_av_error_to_av(error: Error) -> AvError {
+    AvError::BackendMessage(error.to_string())
 }
 
 fn submit_result<T: Clone>(value: T, result: AvResult<()>) -> SubmitResult<T> {
@@ -240,7 +248,7 @@ fn codec_requires_bitrate(codec: CodecId) -> bool {
 }
 
 /// Builds avcodec [`CodecParameters`] from matching `media_info.codec_configs` blobs.
-fn codec_parameters_from_frame(
+pub(crate) fn codec_parameters_from_frame(
     frame: &MediaFrame,
     codec: CodecId,
     bitstream: BitstreamFormat,
@@ -310,8 +318,8 @@ pub struct DecodeCoreConfig {
 
 struct DecoderBackend {
     profile: AvcodecProfile,
-    decoder: Option<Box<dyn Decoder>>,
-    csc: Option<Box<dyn ImageProcessor>>,
+    decoder: Option<VideoDecoderSession>,
+    csc: Option<VideoImageProcessorSession>,
     csc_pending: bool,
     codec: Option<CodecId>,
     bitstream_format: Option<BitstreamFormat>,
@@ -319,8 +327,9 @@ struct DecoderBackend {
     output_format: Option<ImageInfo>,
     config_codec: Option<CodecId>,
     config_bitstream: Option<BitstreamFormat>,
+    #[allow(dead_code)]
     memory_domain: Option<CoreMemoryDomain>,
-    build_report: Option<VideoSessionBuildReport>,
+    build_report: Option<OwnedVideoBuildReport>,
 }
 
 impl DecoderBackend {
@@ -366,17 +375,13 @@ impl DecoderBackend {
             }
         })?;
         let stream_index = stream_index_from_frame(frame);
-        crate::profile::reject_memory_domain_conflict(
-            self.profile,
-            "decoder image",
-            self.memory_domain,
-            crate::profile::profile_decoder_image_domain(self.profile),
-        )?;
-        let mut config = DecoderConfig::new(codec, time_base);
+
+        let mut request =
+            VideoDecoderRequest::new(codec, time_base).map_err(map_video_build_error)?;
         if let Some(parameters) = codec_parameters_from_frame(frame, codec, bitstream)? {
-            config = config.with_parameters(Some(parameters));
+            request = request.with_parameters(Some(parameters));
         }
-        let (decoder, report) = default_sdk_service().build_decoder(self.profile, config)?;
+        let (decoder, report) = default_sdk_service()?.create_decoder(self.profile, request)?;
         self.decoder = Some(decoder);
         self.codec = Some(codec);
         self.bitstream_format = Some(bitstream);
@@ -425,16 +430,17 @@ impl DecoderBackend {
         if self.csc.is_some() {
             return Ok(());
         }
-        if !self.profile.supports_image_processor() {
+        let sdk_profile = self.profile.to_sdk()?;
+        if !sdk_profile.supports(VideoRole::ImageProcessor) {
             return Err(Error::Media(format!(
                 "profile `{}` does not support image processor (CSC); configure a Host profile \
                  or use a separate resize element",
                 self.profile.name()
             )));
         }
-        let config = ImageProcessorConfig::new();
+        let request = ImageProcessorRequest::new(ImageOp::Csc { dst_format });
         let (processor, _report) =
-            default_sdk_service().build_image_processor(self.profile, config, ImageOpKind::Csc)?;
+            default_sdk_service()?.create_image_processor(self.profile, request)?;
         self.csc = Some(processor);
         let _ = dst_format;
         Ok(())
@@ -460,7 +466,10 @@ impl BackendOps for DecoderBackend {
         let Some(decoder) = self.decoder.as_mut() else {
             return SubmitResult::Error(AvError::NotInitialized);
         };
-        submit_result(value.clone(), decoder.submit_packet(value))
+        let result = decoder
+            .submit_packet(value.clone())
+            .map_err(map_video_runtime_error);
+        submit_result(value, result)
     }
 
     fn poll_output(&mut self) -> AvResult<Poll<MediaFrame>> {
@@ -471,61 +480,53 @@ impl BackendOps for DecoderBackend {
             let Some(processor) = self.csc.as_mut() else {
                 return Err(AvError::InvalidState);
             };
-            match processor.poll_image() {
-                Ok(Poll::Ready(image)) => {
+            match processor.poll_image().map_err(map_video_runtime_error)? {
+                Poll::Ready(image) => {
                     self.csc_pending = false;
-                    let frame = avcodec_image_to_media_frame_with_processor(&image, None)
-                        .map_err(map_av_error_to_av)?
-                        .frame;
+                    let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
                     return Ok(Poll::Ready(frame));
                 }
-                Ok(Poll::Pending) => return Ok(Poll::Pending),
-                Ok(Poll::EndOfStream) => {
+                Poll::Pending => return Ok(Poll::Pending),
+                Poll::EndOfStream => {
                     return Err(AvError::InvalidState);
                 }
-                Err(error) => return Err(error),
             }
         }
 
         let Some(decoder) = self.decoder.as_mut() else {
             return Ok(Poll::Pending);
         };
-        match decoder.poll_frame() {
-            Ok(Poll::Ready(image)) => {
+        match decoder.poll_image().map_err(map_video_runtime_error)? {
+            Poll::Ready(image) => {
                 if let Some(dst) = self.output_format {
                     if image.format != dst {
                         self.ensure_csc(dst).map_err(map_av_error_to_av)?;
                         let Some(processor) = self.csc.as_mut() else {
                             return Err(AvError::InvalidState);
                         };
-                        processor.submit(ImageProcessRequest {
-                            src: image,
-                            op: ImageOp::Csc { dst_format: dst },
-                            aux: None,
-                            target_domain: None,
-                        })?;
+                        processor
+                            .submit(ImageProcessRequest {
+                                src: image,
+                                op: ImageOp::Csc { dst_format: dst },
+                                aux: None,
+                                target_domain: None,
+                            })
+                            .map_err(map_video_runtime_error)?;
                         self.csc_pending = true;
                         return Ok(Poll::Pending);
                     }
                 }
-                let processor = self
-                    .csc
-                    .as_mut()
-                    .map(|p| p.as_mut() as &mut dyn ImageProcessor);
-                let frame = avcodec_image_to_media_frame_with_processor(&image, processor)
-                    .map_err(map_av_error_to_av)?
-                    .frame;
+                let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
                 Ok(Poll::Ready(frame))
             }
-            Ok(Poll::Pending) => Ok(Poll::Pending),
-            Ok(Poll::EndOfStream) => Ok(Poll::EndOfStream),
-            Err(error) => Err(error),
+            Poll::Pending => Ok(Poll::Pending),
+            Poll::EndOfStream => Ok(Poll::EndOfStream),
         }
     }
 
     fn flush_backend(&mut self) -> AvResult<()> {
         if let Some(decoder) = self.decoder.as_mut() {
-            decoder.flush()
+            decoder.flush().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -533,7 +534,7 @@ impl BackendOps for DecoderBackend {
 
     fn reset_backend(&mut self) -> AvResult<()> {
         if let Some(decoder) = self.decoder.as_mut() {
-            decoder.reset()
+            decoder.reset().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -542,10 +543,6 @@ impl BackendOps for DecoderBackend {
     fn flush_required(&self) -> bool {
         self.decoder.is_some()
     }
-}
-
-fn map_av_error_to_av(error: Error) -> AvError {
-    AvError::BackendMessage(error.to_string())
 }
 
 pub struct DecodeCore {
@@ -655,14 +652,15 @@ pub struct EncodeCoreConfig {
 
 struct EncoderBackend {
     profile: AvcodecProfile,
-    encoder: Option<Box<dyn Encoder>>,
+    encoder: Option<VideoEncoderSession>,
     codec: CodecId,
     bitstream_format: Option<BitstreamFormat>,
     bitrate: Option<u32>,
     time_base: Option<MediaTimeBase>,
+    #[allow(dead_code)]
     memory_domain: Option<CoreMemoryDomain>,
     stream_index: u32,
-    build_report: Option<VideoSessionBuildReport>,
+    build_report: Option<OwnedVideoBuildReport>,
 }
 
 impl EncoderBackend {
@@ -721,21 +719,16 @@ impl EncoderBackend {
                 self.codec
             )));
         }
-        crate::profile::reject_memory_domain_conflict(
-            self.profile,
-            "encoder image",
-            self.memory_domain,
-            crate::profile::profile_encoder_image_domain(self.profile),
-        )?;
-        let config = EncoderConfig::new(
+        let request = VideoEncoderRequest::new(
             self.codec,
             image.coded_width,
             image.coded_height,
             image.format,
             time_base,
             bitrate,
-        );
-        let (encoder, report) = default_sdk_service().build_encoder(self.profile, config)?;
+        )
+        .map_err(map_video_build_error)?;
+        let (encoder, report) = default_sdk_service()?.create_encoder(self.profile, request)?;
         self.encoder = Some(encoder);
         self.build_report = Some(report);
         if let Some(info) = frame.meta.media_info.as_ref() {
@@ -759,15 +752,18 @@ impl BackendOps for EncoderBackend {
         let Some(encoder) = self.encoder.as_mut() else {
             return SubmitResult::Error(AvError::NotInitialized);
         };
-        submit_result(value.clone(), encoder.submit_frame(value))
+        let result = encoder
+            .submit_image(value.clone())
+            .map_err(map_video_runtime_error);
+        submit_result(value, result)
     }
 
     fn poll_output(&mut self) -> AvResult<Poll<MediaFrame>> {
         let Some(encoder) = self.encoder.as_mut() else {
             return Ok(Poll::Pending);
         };
-        match encoder.poll_packet() {
-            Ok(Poll::Ready(packet)) => {
+        match encoder.poll_packet().map_err(map_video_runtime_error)? {
+            Poll::Ready(packet) => {
                 let mut frame =
                     avcodec_packet_to_media_frame(&packet).map_err(map_av_error_to_av)?;
                 if let Some(info) = frame.meta.media_info.as_mut() {
@@ -823,15 +819,14 @@ impl BackendOps for EncoderBackend {
                 crate::normalize_media_frame_meta(&mut frame.meta).map_err(map_av_error_to_av)?;
                 Ok(Poll::Ready(frame))
             }
-            Ok(Poll::Pending) => Ok(Poll::Pending),
-            Ok(Poll::EndOfStream) => Ok(Poll::EndOfStream),
-            Err(error) => Err(error),
+            Poll::Pending => Ok(Poll::Pending),
+            Poll::EndOfStream => Ok(Poll::EndOfStream),
         }
     }
 
     fn flush_backend(&mut self) -> AvResult<()> {
         if let Some(encoder) = self.encoder.as_mut() {
-            encoder.flush()
+            encoder.flush().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -839,7 +834,7 @@ impl BackendOps for EncoderBackend {
 
     fn reset_backend(&mut self) -> AvResult<()> {
         if let Some(encoder) = self.encoder.as_mut() {
-            encoder.reset()
+            encoder.reset().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -918,10 +913,10 @@ impl EncodeCore {
 }
 
 struct ResizeBackend {
-    processor: Option<Box<dyn ImageProcessor>>,
+    processor: Option<VideoImageProcessorSession>,
     width: u32,
     height: u32,
-    build_report: Option<VideoSessionBuildReport>,
+    build_report: Option<OwnedVideoBuildReport>,
 }
 
 impl BackendOps for ResizeBackend {
@@ -944,29 +939,29 @@ impl BackendOps for ResizeBackend {
         let Some(processor) = self.processor.as_mut() else {
             return SubmitResult::Error(AvError::NotInitialized);
         };
-        submit_result(value.clone(), processor.submit(value))
+        let result = processor
+            .submit(value.clone())
+            .map_err(map_video_runtime_error);
+        submit_result(value, result)
     }
 
     fn poll_output(&mut self) -> AvResult<Poll<MediaFrame>> {
         let Some(processor) = self.processor.as_mut() else {
             return Err(AvError::NotInitialized);
         };
-        match processor.poll_image() {
-            Ok(Poll::Ready(image)) => {
-                let frame = avcodec_image_to_media_frame_with_processor(&image, None)
-                    .map_err(map_av_error_to_av)?
-                    .frame;
+        match processor.poll_image().map_err(map_video_runtime_error)? {
+            Poll::Ready(image) => {
+                let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
                 Ok(Poll::Ready(frame))
             }
-            Ok(Poll::Pending) => Ok(Poll::Pending),
-            Ok(Poll::EndOfStream) => Ok(Poll::EndOfStream),
-            Err(error) => Err(error),
+            Poll::Pending => Ok(Poll::Pending),
+            Poll::EndOfStream => Ok(Poll::EndOfStream),
         }
     }
 
     fn flush_backend(&mut self) -> AvResult<()> {
         if let Some(processor) = self.processor.as_mut() {
-            processor.flush()
+            processor.flush().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -974,7 +969,7 @@ impl BackendOps for ResizeBackend {
 
     fn reset_backend(&mut self) -> AvResult<()> {
         if let Some(processor) = self.processor.as_mut() {
-            processor.reset()
+            processor.reset().map_err(map_video_runtime_error)
         } else {
             Ok(())
         }
@@ -992,7 +987,8 @@ pub struct ResizeCore {
 
 impl ResizeCore {
     pub fn new(profile: AvcodecProfile, width: usize, height: usize) -> Result<Self> {
-        if !profile.supports_image_processor() {
+        let sdk_profile = profile.to_sdk()?;
+        if !sdk_profile.supports(VideoRole::ImageProcessor) {
             return Err(Error::Media(format!(
                 "profile `{}` does not support image processor (resize)",
                 profile.name()
@@ -1007,10 +1003,9 @@ impl ResizeCore {
                 "media_resize: width and height must be non-zero".into(),
             ));
         }
-        let sdk = default_sdk_service();
-        let config = ImageProcessorConfig::new();
+        let request = ImageProcessorRequest::new(ImageOp::Resize { width, height });
         let (processor, report) =
-            sdk.build_image_processor(profile, config, ImageOpKind::Resize)?;
+            default_sdk_service()?.create_image_processor(profile, request)?;
         Ok(Self {
             pump: AsyncPump::new(),
             backend: ResizeBackend {

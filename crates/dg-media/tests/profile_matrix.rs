@@ -1,10 +1,7 @@
 //! Profile name and feature matrix tests (plan 13 §6, plan 14 §2).
 #![cfg(feature = "avcodec-sdk")]
 
-use dg_media::{
-    compiled_profiles, profile_to_sdk_descriptor, reject_profile_hw_conflict, resolve_profile,
-    AvcodecProfile,
-};
+use dg_media::{compiled_profiles, reject_profile_hw_conflict, resolve_profile, AvcodecProfile};
 
 #[test]
 fn stable_profile_names_match_cargo_features() {
@@ -35,9 +32,9 @@ fn profile_hw_conflict_is_rejected() {
 }
 
 #[test]
-fn compiled_profiles_are_valid_descriptors() {
+fn compiled_profiles_map_to_sdk_profiles() {
     for profile in compiled_profiles() {
-        profile_to_sdk_descriptor(profile).expect("descriptor");
+        profile.to_sdk().expect("sdk profile");
     }
 }
 
