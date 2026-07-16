@@ -198,7 +198,7 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 | Cargo feature | 支持级别 | 典型用途 |
 | --- | --- | --- |
 | `avcodec-profile-native-free` | production | 纯 Rust JPEG + rust-h264 Host（推荐本地验证） |
-| `avcodec-profile-software` | production | FFmpeg Host（需 **FFmpeg 8.x / libavcodec ≥ 62**） |
+| `avcodec-profile-software` | production | FFmpeg Host（libavcodec ≥ 58；H.264 需 libx264） |
 | `avcodec-profile-nvcodec-host` / `-fallback` | production | NV Host（真机；CI 仅 compile-only） |
 | `avcodec-profile-nvcodec-device-frame` | production | CudaDevice NV12 device-frame（非完整 CUDA 零拷贝） |
 | `avcodec-profile-rkmpp-host` / `-fallback` | **unverified** | Rockchip Host（fallback 才可回退软件） |

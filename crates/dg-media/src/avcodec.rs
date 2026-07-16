@@ -2049,5 +2049,171 @@ mod tests {
         );
         let allow_staging = report.io.as_ref().map(|io| io.allow_staging);
         assert_eq!(allow_staging, Some(false));
+        let io = report.io.as_ref().expect("device-frame io plan");
+        assert_eq!(
+            format!("{:?}", io.encoder_image_input).to_ascii_lowercase(),
+            "cudadevice"
+        );
+        assert_eq!(
+            format!("{:?}", io.decoder_image_output).to_ascii_lowercase(),
+            "cudadevice"
+        );
+    }
+
+    /// Host Image must not silently stage into device-frame encode (`allow_staging=false`).
+    #[cfg(all(
+        feature = "avcodec-profile-nvcodec-device-frame",
+        feature = "avcodec-profile-nvcodec-host"
+    ))]
+    #[test]
+    fn nvcodec_device_frame_rejects_host_nv12_encode() {
+        if !nv_hw_enabled() {
+            eprintln!("skip device-frame host-encode reject: set DYUN_NV_HW=1");
+            return;
+        }
+        use dg_core::MediaTimeBase;
+
+        use super::{EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        let frame = nv12_test_frame(256, 256);
+        let mut encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NvcodecDeviceFrame,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(2_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("encode core");
+        encoder.submit_image(frame).expect("queue host image");
+        encoder.submit_end_of_stream();
+        let mut saw_error = false;
+        for _ in 0..64 {
+            match encoder.poll() {
+                Ok(MediaPoll::Ready(_)) => panic!("device-frame must not encode Host NV12 silently"),
+                Ok(MediaPoll::Pending) => continue,
+                Ok(MediaPoll::EndOfStream) => break,
+                Err(err) => {
+                    let text = err.to_string();
+                    assert!(
+                        text.contains("staging")
+                            || text.contains("Unsupported")
+                            || text.contains("domain")
+                            || text.contains("CudaDevice")
+                            || text.contains("memory")
+                            || text.contains("device"),
+                        "unexpected error: {text}"
+                    );
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_error, "expected Host→device-frame encode to fail");
+    }
+
+    /// Host Packet → CudaDevice Image contract via device-frame decoder (bitstream from Host NV).
+    #[cfg(all(
+        feature = "avcodec-profile-nvcodec-device-frame",
+        feature = "avcodec-profile-nvcodec-host"
+    ))]
+    #[test]
+    fn nvcodec_device_frame_decode_host_packet_zero_staging() {
+        if !nv_hw_enabled() {
+            eprintln!("skip device-frame decode media: set DYUN_NV_HW=1");
+            return;
+        }
+        use dg_core::{MediaPayloadInfo, MediaTimeBase, MemoryDomain};
+
+        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        let width = 256u32;
+        let height = 256u32;
+        let frame = nv12_test_frame(width, height);
+        let mut host_encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NvcodecHost,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(2_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("host encode core");
+        host_encoder.submit_image(frame).expect("submit host image");
+        host_encoder.submit_end_of_stream();
+        let mut packet_frame = None;
+        for _ in 0..256 {
+            match host_encoder.poll().expect("host encode poll") {
+                MediaPoll::Ready(out) => {
+                    packet_frame = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let packet_frame = packet_frame.expect("host-encoded packet");
+
+        let mut decoder = DecodeCore::new(DecodeCoreConfig {
+            profile: AvcodecProfile::NvcodecDeviceFrame,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            output_format: None,
+            memory_domain: None,
+            width: None,
+            height: None,
+            channels: None,
+        })
+        .expect("device-frame decode core");
+        decoder
+            .submit_packet(packet_frame)
+            .expect("submit host packet");
+        decoder.submit_end_of_stream();
+
+        let mut decoded = None;
+        for _ in 0..256 {
+            match decoder.poll().expect("device-frame decode poll") {
+                MediaPoll::Ready(out) => {
+                    decoded = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let decoded = decoded.expect("device-frame decoded image");
+        assert_eq!(decoded.meta.pts, Some(42));
+        assert_eq!(decoded.domain, MemoryDomain::CudaDevice);
+        match decoded.meta.media_info.as_ref().map(|i| &i.payload) {
+            Some(MediaPayloadInfo::Image(info)) => {
+                assert_eq!(info.coded_width, width);
+                assert_eq!(info.coded_height, height);
+            }
+            other => panic!("expected image media_info, got {other:?}"),
+        }
+
+        let diag = decoder
+            .session_diagnostics()
+            .expect("device-frame decoder report");
+        assert_eq!(diag.profile_name, "nvcodec-device-frame");
+        assert_eq!(diag.allow_staging, Some(false));
+        assert!(
+            diag.decoder_image_output
+                .as_ref()
+                .is_some_and(|d| d.to_ascii_lowercase().contains("cudadevice")),
+            "decoder image output must be CudaDevice, got {:?}",
+            diag.decoder_image_output
+        );
+        assert!(
+            diag.decoder_backend
+                .as_ref()
+                .is_some_and(|b| b.contains("nvcodec") || b.contains("nvdec") || b.contains("nv")),
+            "got {:?}",
+            diag.decoder_backend
+        );
     }
 }

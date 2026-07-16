@@ -18,8 +18,8 @@
 | INT4-04 | Done | source/dependency guard |
 | INT4-05 | Done | native-free + software on `f3c1c04` |
 | INT4-06 | Done | multi-profile isolation |
-| INT4-07 | Done | `DYUN_NV_HW=1` Host + device-frame |
-| INT4-08 | Done | bridge + device-frame no-staging |
+| INT4-07 | Done | Host encode/decode；device-frame Host Packet→CudaDevice Image |
+| INT4-08 | Done | device-frame bridge zero-copy external；Host encode reject |
 | INT4-09 | Done | CI locked；docs；UP4-002 Verified |
 | INT4-10 | Partial | `ROLLBACK.md`；stable `0.2.0` tag 未发布 |
 

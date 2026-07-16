@@ -13,7 +13,7 @@ owned by the selected Profile—do not set low-level backend ids or rely on `mem
 | --- | --- | --- | --- | --- |
 | [`raw-adapter.yaml`](raw-adapter.yaml) | `media` (default) | n/a | n/a | No avcodec SDK; raw payload relabel only |
 | [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | production | Pure Rust JPEG encode/decode |
-| [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | Needs FFmpeg 8.x / libavcodec ≥ 62 |
+| [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | libavcodec ≥ 58 + libx264 for H.264 |
 | [`nvcodec-device-frame.yaml`](nvcodec-device-frame.yaml) | `media,avcodec-profile-nvcodec-device-frame` | `nvcodec-device-frame` | production* | CUDA runtime; no resize; `allow_staging=false` |
 | [`rkmpp-host-fallback.yaml`](rkmpp-host-fallback.yaml) | `media,avcodec-profile-rkmpp-host-fallback` | `rkmpp-host-fallback` | **unverified** | Compile/config only until signed |
 | [`rkmpp-zero-copy.yaml`](rkmpp-zero-copy.yaml) | `media,avcodec-profile-rkmpp-zero-copy` | `rkmpp-zero-copy` | **unverified** | Compile/config only until signed |

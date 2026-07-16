@@ -27,8 +27,8 @@ Host Image/Packet 必须为 Host domain；TransferReport 对必要 copy诚实。
 
 ## 6. 完成条件
 
-- [ ] dyun NV Host 真机通过。
-- [ ] dyun Device-frame 真零 staging。
-- [ ] bridge handle 释放正确。
-- [ ] artifact 绑定 RC2 和 dyun commit。
+- [x] dyun NV Host 真机通过（`nvcodec_host_h264_encode_decode_preserves_timing`）。
+- [x] dyun Device-frame 真零 staging（`nvcodec_device_frame_decode_host_packet_zero_staging` + Host encode reject）。
+- [x] bridge handle 共享 external 不静默 Host copy。
+- [x] artifact 绑定 pin `f3c1c04` 与 dyun commits。
 

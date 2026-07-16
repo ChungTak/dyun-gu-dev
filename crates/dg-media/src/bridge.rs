@@ -479,13 +479,13 @@ pub fn avcodec_image_to_media_frame(image: &dg_media_avcodec::Image) -> Result<M
 /// Converts an avcodec Image into a bridged media frame.
 ///
 /// Color conversion is performed by an explicit processor element / session, not by
-/// this bridge. The bridge only materializes host bytes when domain import requires it.
+/// this bridge. Host images materialize host bytes; device images (CudaDevice, etc.)
+/// keep an external-handle Buffer with `copy_count == 0` (no silent Host staging).
 #[cfg(feature = "avcodec-sdk")]
 pub(crate) fn avcodec_image_to_bridged_media_frame(
     image: &dg_media_avcodec::Image,
 ) -> Result<BridgedMediaFrame> {
-    let (host, path_kind, copy_count) = materialize_avcodec_image_host_bytes(image)?;
-    let host_len = host.len();
+    let source_domain = avcodec_memory_domain_to_core(image.memory.domain());
     let height = usize::try_from(image.coded_height)
         .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
     let width = usize::try_from(image.coded_width)
@@ -507,6 +507,48 @@ pub(crate) fn avcodec_image_to_bridged_media_frame(
         };
         (vec![height, width, channels], DataFormat::NHWC)
     };
+
+    // Device-frame path: share external handle in-domain (Host Packet→CudaDevice Image).
+    if source_domain != MemoryDomain::Host {
+        let device = match source_domain {
+            MemoryDomain::CudaDevice => DeviceKind::CudaGpu,
+            MemoryDomain::MppBuffer | MemoryDomain::DmaBuf | MemoryDomain::DrmPrime => {
+                DeviceKind::RknnNpu
+            }
+            other => {
+                return Err(dg_core::Error::Media(format!(
+                    "unsupported avcodec image device domain {other:?}"
+                )))
+            }
+        };
+        let imported = import_avcodec_handle(&image.memory, device, source_domain)?;
+        let payload_len = image.memory.size();
+        let mut frame = MediaFrame::new(
+            MediaFrameKind::Image,
+            DataType::U8,
+            data_format,
+            shape,
+            device,
+            source_domain,
+            imported.buffer,
+        );
+        frame.meta.media_info = Some(Box::new(format_map::image_to_media_info(
+            image,
+            payload_len,
+        )?));
+        normalize_media_frame_meta(&mut frame.meta)?;
+        let mut transfer = imported.transfer;
+        transfer.path_kind = TransferPathKind::SharedExternal;
+        debug!(
+            domain = ?source_domain,
+            copy_count = transfer.copy_count,
+            "bridged avcodec device image without host staging"
+        );
+        return Ok(BridgedMediaFrame { frame, transfer });
+    }
+
+    let (host, path_kind, copy_count) = materialize_avcodec_image_host_bytes(image)?;
+    let host_len = host.len();
     let mut frame = MediaFrame::from_host_bytes(
         MediaFrameKind::Image,
         DataType::U8,
@@ -525,10 +567,7 @@ pub(crate) fn avcodec_image_to_bridged_media_frame(
         }
     }
     normalize_media_frame_meta(&mut frame.meta)?;
-    let mut transfer = staged_host_transfer_with_copies(
-        avcodec_memory_domain_to_core(image.memory.domain()),
-        copy_count,
-    );
+    let mut transfer = staged_host_transfer_with_copies(source_domain, copy_count);
     transfer.path_kind = path_kind;
     Ok(BridgedMediaFrame { frame, transfer })
 }

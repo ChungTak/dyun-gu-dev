@@ -66,8 +66,8 @@ jobs:
       - name: Install FFmpeg development packages
         if: matrix.install_ffmpeg
         run: |
-          # Software production sign-off requires FFmpeg 8.x / libavcodec 62+ (UP4-002).
-          # ubuntu-latest must provide that ABI; log version and fail early if below 62.
+          # Runtime floor is libavcodec major >= 58 (FFmpeg 4+; UP4-002 f3c1c04).
+          # Prefer FFmpeg 8 on runners when available; hard-fail only below 58.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
@@ -84,8 +84,8 @@ jobs:
           ver = subprocess.check_output(["pkg-config", "--modversion", "libavcodec"], text=True).strip()
           major = int(ver.split(".")[0])
           print(f"libavcodec major={major} full={ver}")
-          if major < 62:
-              print("::error::Software profile needs libavcodec >= 62 (FFmpeg 8.x); got " + ver)
+          if major < 58:
+              print("::error::Software profile needs libavcodec >= 58 (FFmpeg 4.x+); got " + ver)
               sys.exit(1)
           PY
       - name: Prepare bindgen environment for software profiles
