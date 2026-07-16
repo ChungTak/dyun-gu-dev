@@ -7,6 +7,7 @@
 | 字段 | 值 |
 |---|---|
 | RC2 tag / dereferenced commit | `0.2.0-rc.2` / `2068432426793c94cd5d415b56a4b2e9a3c1ee73` |
+| post-RC2 production pin | `f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f`（UP4-002；crate version 仍 `0.2.0-rc.2`） |
 | tag object | `06ac7302f83a94fe40cb321c01bbc3cb794d9e64` |
 | crate version | `0.2.0-rc.2` |
 | clean proof | cargo fetch/lock 一致；`cargo tree` 所有 avcodec workspace git packages 解析到同一 commit |
@@ -19,7 +20,7 @@
 | 字段 | 值 |
 |---|---|
 | dyun base commit | `14e2b6e`（pin RC2）+ worktree NV gated tests |
-| manifest/lock SDK commit | `2068432426793c94cd5d415b56a4b2e9a3c1ee73` |
+| manifest/lock SDK commit | `f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f` |
 | toolchain/target | `rustc 1.94.1` / `x86_64-unknown-linux-gnu` |
 | source/dependency guard | 通过；`dependency_contract` 预期 SHA `20684324` |
 | NativeFree | 通过：`cargo test -p dg-media --locked --features avcodec-profile-native-free` 84 passed |
@@ -28,7 +29,7 @@
 | NV Host/device-frame | 真机通过：`DYUN_NV_HW=1` Host H.264 256x256 Nv12 encode/decode；device-frame create + `allow_staging=false` |
 | external/zero-copy | NativeFree bridge；device-frame no-staging 契约通过 |
 | artifact/checksum | pin 与 lock 指向 `20684324` |
-| upstream issues | UP4-001 Closed；UP4-002 Closed（环境：FFmpeg 8+） |
+| upstream issues | UP4-001 Closed；UP4-002 **Verified**（`f3c1c04`） |
 
 签字条件：tag、pin、lock同 commit；生产路径只有高层 SDK；软件和 NV真实媒体通过；结果回填上游 Plan 6。
 

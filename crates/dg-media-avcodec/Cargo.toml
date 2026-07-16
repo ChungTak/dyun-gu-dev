@@ -30,4 +30,4 @@ avcodec-profile-rkmpp-zero-copy = ["avcodec-sdk", "avcodec/profile-rkmpp-zero-co
 avcodec-profile-nvcodec-device-frame = ["avcodec-sdk", "avcodec/profile-nvcodec-device-frame"]
 
 [dependencies]
-avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "2068432426793c94cd5d415b56a4b2e9a3c1ee73", package = "avcodec", default-features = false, optional = true }
+avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f", package = "avcodec", default-features = false, optional = true }

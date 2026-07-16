@@ -64,10 +64,10 @@ fn dg_media_avcodec_is_only_direct_codec_dependency() {
         "dg-media must treat dg-media-avcodec as optional"
     );
     let avcodec_manifest = include_str!("../../dg-media-avcodec/Cargo.toml");
-    // Plan 4 RC2 candidate (0.2.0-rc.2): dereferenced tag commit.
+    // Plan 4 post-RC2 fix (UP4-002): Software FFmpeg 4/5 + jpeg allow-list.
     assert!(
-        avcodec_manifest.contains("rev = \"2068432426793c94cd5d415b56a4b2e9a3c1ee73\""),
-        "dg-media-avcodec must pin 20684324 Plan4 RC2 revision"
+        avcodec_manifest.contains("rev = \"f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f\""),
+        "dg-media-avcodec must pin f3c1c04 UP4-002 fix revision"
     );
     assert!(
         avcodec_manifest.contains("profile-native-free"),

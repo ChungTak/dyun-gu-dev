@@ -7,10 +7,10 @@
 
 | 项 | 值 |
 |---|---|
-| SDK tag | `0.2.0-rc.2` |
-| SDK commit | `2068432426793c94cd5d415b56a4b2e9a3c1ee73` |
-| dyun pin 提交（基线） | `4b7a0e4` / merge `14e2b6e` |
-| 前一 pin（RC1 时代 main） | 见 git history：`7faba6fe…`（Plan 3） |
+| SDK pin（当前） | `f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f` |
+| SDK RC2 tag | `0.2.0-rc.2` / `20684324…` |
+| 前一生产 pin | `20684324…`（RC2 原 pin） |
+| dyun pin 基线 | `4b7a0e4` / `14e2b6e` + plan4 commits |
 
 ## 回滚到 pin 前状态
 
@@ -22,12 +22,11 @@
 4. 相关示例 / capability 文档（若 pin 期间改过）
 
 ```bash
-# 示例：回退到 RC2 pin 合并前
-git checkout 137b7b80896395cf8164e8c2172a345d9bc857fd -- \
-  crates/dg-media-avcodec/Cargo.toml \
-  Cargo.lock \
-  crates/dg-media/tests/dependency_contract.rs
-
+# 回退到 RC2 原 pin（无 UP4-002 修复）
+# 将 crates/dg-media-avcodec/Cargo.toml rev 与 dependency_contract 改回
+#   2068432426793c94cd5d415b56a4b2e9a3c1ee73
+# 然后：
+cargo update -p avcodec
 cargo fetch --locked
 cargo test -p dg-media --locked --features avcodec-profile-native-free
 ```
