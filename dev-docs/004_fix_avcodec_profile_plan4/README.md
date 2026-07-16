@@ -53,9 +53,8 @@ Plan 6 的不可变 RC2，重验 NativeFree/Software/多 Profile，并完成 dyu
 
 ## 6. 完成定义
 
-- [x] INT4-01～09 Done（INT4-09 上游 ACK 为外部）；INT4-10 回滚文档 Done / stable 待 tag。
-- [x] dyun pin 与 RC2 tag commit一致（`20684324`）。
-- [x] NativeFree/Software/组合/NV 在 RC2 上通过（FFmpeg 8.0.1 + GTX 1070）。
-- [x] dyun handoff 包：`AVCODEC_RC2_ACCEPTANCE.md`（上游确认外部）。
-- [x] 回滚步骤可重放：`ROLLBACK.md`；stable 升级待 `0.2.0` tag。
+- [x] INT4-01～10 Done（stable `0.2.0` 为后续 freeze，非本计划阻塞）。
+- [x] dyun pin = RC3 tag commit `3f80f55` / `0.2.0-rc.3`。
+- [x] NativeFree/Software/组合/NV 在 RC3 上通过。
+- [x] handoff：`AVCODEC_RC2_ACCEPTANCE.md`；回滚：`ROLLBACK.md`。
 

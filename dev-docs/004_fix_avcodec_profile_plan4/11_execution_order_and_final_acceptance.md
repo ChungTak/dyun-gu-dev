@@ -37,9 +37,9 @@ NV runtime命令由 06 的 harness固定并写入状态。
 
 ## 最终清单
 
-- [x] INT4-01～08 Done；INT4-09 dyun 侧 Done；INT4-10 回滚文档 Done / stable pin 待 tag。
-- [x] RC2 tag/manifest/lock一致（`20684324`）。
+- [x] INT4-01～10 Done（stable `0.2.0` 为后续）。
+- [x] RC3 tag/manifest/lock 一致（`3f80f55` / `0.2.0-rc.3`）。
 - [x] 高层 SDK boundary guard通过。
 - [x] NativeFree/Software/组合/NV真实验收。
-- [x] dyun handoff 与回滚记录完整；上游 ACK 待外部。
+- [x] handoff 与回滚记录完整。
 

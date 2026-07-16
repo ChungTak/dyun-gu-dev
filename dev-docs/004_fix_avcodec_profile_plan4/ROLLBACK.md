@@ -7,10 +7,9 @@
 
 | 项 | 值 |
 |---|---|
-| SDK pin（当前） | `f3c1c04b87edd7b61e45feaf5adb3797bfa9ea5f` |
-| SDK RC2 tag | `0.2.0-rc.2` / `20684324…` |
-| 前一生产 pin | `20684324…`（RC2 原 pin） |
-| dyun pin 基线 | `4b7a0e4` / `14e2b6e` + plan4 commits |
+| SDK pin（当前） | `3f80f558e48ced6d3dc2c1e067307bfd12bec89d` / tag `0.2.0-rc.3` |
+| 前一 pin | `f3c1c04…`（UP4-002 无 version bump）或 `20684324…`（RC2） |
+| SDK RC2 tag | `0.2.0-rc.2` / `20684324…`（不可变） |
 
 ## 回滚到 pin 前状态
 
