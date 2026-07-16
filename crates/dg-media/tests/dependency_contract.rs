@@ -64,11 +64,10 @@ fn dg_media_avcodec_is_only_direct_codec_dependency() {
         "dg-media must treat dg-media-avcodec as optional"
     );
     let avcodec_manifest = include_str!("../../dg-media-avcodec/Cargo.toml");
-    // Plan 5 RC1 candidate (0.2.0-rc.1): diagnostics contract, ProfileMeta single-source,
-    // image-processor role report retention, and packaging prerequisites.
+    // Plan 4 RC2 candidate (0.2.0-rc.2): dereferenced tag commit.
     assert!(
-        avcodec_manifest.contains("rev = \"7faba6fe264aa5ae5bd2f1666084f4bc52aa7d0f\""),
-        "dg-media-avcodec must pin 7faba6fe V3 SDK Plan5 RC1 revision"
+        avcodec_manifest.contains("rev = \"2068432426793c94cd5d415b56a4b2e9a3c1ee73\""),
+        "dg-media-avcodec must pin 20684324 Plan4 RC2 revision"
     );
     assert!(
         avcodec_manifest.contains("profile-native-free"),

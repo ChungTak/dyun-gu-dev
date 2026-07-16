@@ -25,32 +25,33 @@
 ---
 
 ### UP4-001 — `0.2.0-rc.2` annotated tag 未发布
-- 状态：Open
-- SDK tag/commit：期望 `0.2.0-rc.2`；实际 `refs/tags` 仅 `0.2.0-rc.0` / `0.2.0-rc.1`
+- 状态：Closed
+- SDK tag/commit：`0.2.0-rc.2` tag object `06ac7302f83a94fe40cb321c01bbc3cb794d9e64`；dereferenced commit `2068432426793c94cd5d415b56a4b2e9a3c1ee73`
 - dyun commit：`137b7b80896395cf8164e8c2172a345d9bc857fd`
 - Profile/role：全部（pin 迁移前置条件）
 - 期望行为：远端存在不可变 `0.2.0-rc.2` tag 及解引用 SHA；dyun 可原子更新 manifest/lock/contract。
-- 实际行为：`git ls-remote --tags https://github.com/TimothyWalker6922/avcodec-rs-develop.git` 无 `0.2.0-rc.2`；当前 HEAD 为 `b0f98dfafb95134a41307f3e5706e5d2518f0207`。
+- 实际行为：tag 已发布；dyun 已更新 pin 并验证 `cargo fetch --locked` 与 `dependency_contract`。
 - 最小复现命令：
   ```bash
   git ls-remote --tags https://github.com/TimothyWalker6922/avcodec-rs-develop.git | grep '0.2.0-rc.2'
   ```
-- structured error/report/diagnostics：Plan 4 RC2 admission 被阻塞；INT4-01/02/10 无法进入 Done。
+- structured error/report/diagnostics：N/A
 - toolchain/environment/device：N/A
 - 上游 fixture/test：N/A
-- 修复 commit/新候选：发布 annotated `0.2.0-rc.2` 并提供 tag object + dereferenced commit。
-- dyun 重验 artifact：更新 `crates/dg-media-avcodec/Cargo.toml` 与 `Cargo.lock` 中 avcodec `rev` 为新 SHA，执行 Phase 1～4 全矩阵。
-- 临时处置：保持当前 post-RC1 main pin `7faba6f`；不改 pin 直至 RC2 tag 可用。
+- 修复 commit/新候选：`0.2.0-rc.2`
+- dyun 重验 artifact：PR 中 `crates/dg-media-avcodec/Cargo.toml`、`Cargo.lock`、`crates/dg-media/tests/dependency_contract.rs` 均指向 `20684324`。
+- 临时处置：无。
 
-### UP4-002 — Software profile H.264 encoder `CreateEncoder` 在 FFmpeg 4.4.2 上报 `BackendHintCapabilityMismatch`
+### UP4-002 — Software profile H.264 encoder `CreateEncoder` 返回 `BackendHintCapabilityMismatch`
 - 状态：Open
-- SDK tag/commit：`7faba6fe264aa5ae5bd2f1666084f4bc52aa7d0f`（post-RC1 main，crate version `0.2.0-rc.1`）
-- dyun commit：`137b7b80896395cf8164e8c2172a345d9bc857fd`
+- SDK tag/commit：`0.2.0-rc.2` / `2068432426793c94cd5d415b56a4b2e9a3c1ee73`
+- dyun commit：`137b7b80896395cf8164e8c2172a345d9bc857fd` + pin update
 - Profile/role：`avcodec-profile-software` / encoder
 - 期望行为：在同一 build 同时启用 `avcodec-profile-native-free` 与 `avcodec-profile-software` 时，Software profile 的 `CreateEncoder(H264, 32x32, Yuv420p, 1/30, 1_000_000)` 成功。
-- 实际行为：encoder create 返回 `Classified { kind: SelectionFailed, detail: BackendHintCapabilityMismatch }`。
+- 实际行为：encoder create 返回 `Classified { kind: SelectionFailed, detail: BackendHintCapabilityMismatch }`；将 FFmpeg 从 4.4.2 升级至 6.1 后仍然复现，排除 FFmpeg 版本因素。
 - 最小复现命令：
   ```bash
+  # 1.94.1 toolchain, FFmpeg 6.1 (libavcodec 60.31.102)
   source scripts/env-software-avcodec.sh
   cargo test -p dg-media --locked \
     --features avcodec-profile-native-free,avcodec-profile-software \
@@ -69,12 +70,16 @@
     }
   }
   ```
+  上游 `VideoProfile::Software` 的 `ProfileMeta` 中 `encoder: &["ffmpeg"]`、`allow_staging: true`；`VideoProfileDescriptor::to_encoder_config` 按 `self.io.allow_staging` 注入 `EncoderConfig`，因此请求携带 `allow_staging=true` + `memory_domain=Host`。`avcodec-codec-ffmpeg` encoder 在后端选择阶段被 `BackendSelectionPolicy::Required("ffmpeg")` 命中，但 `supports(backend)` 能力模型拒绝，产生 `BackendHintCapabilityMismatch`。
 - toolchain/environment/device：
   - `rustc 1.94.1` / `x86_64-unknown-linux-gnu`
-  - `ffmpeg 4.4.2` / `libavcodec 58.134.100`
-  - `libavformat-dev`, `libavcodec-dev`, `libavutil-dev` 均来自 Ubuntu 22.04 4.4.2 包
-  - 计划要求 canonical Software 验证 FFmpeg 6/7/8
-- 上游 fixture/test：N/A
-- 修复 commit/新候选：待确定；需要上游在 RC2 声明 FFmpeg 4.4.2 是否在支持矩阵内，或在 FFmpeg 6/7/8 上提供 clean evidence。
-- dyun 重验 artifact：在 FFmpeg 6/7/8 clean runner 上重跑 `cargo test -p dg-media --locked --features avcodec-profile-native-free,avcodec-profile-software`。
-- 临时处置：Software profile 在当前 FFmpeg 4.4.2 环境下不能标记为 production；不修改 dyun backend 绕过。
+  - 已验证 FFmpeg 4.4.2 (`libavcodec 58.134.100`) 与 FFmpeg 6.1 (`libavcodec 60.31.102`) 行为一致
+  - `ffmpeg` / `libavcodec-dev` / `libavformat-dev` / `libavutil-dev` / `libswscale-dev` 6.1
+- 上游 fixture/test：上游 `crates/sdk/avcodec/src/video_sdk.rs` 等功能测试使用 `VideoProfile::NativeFree` 测试真实 encoder；未发现对 `VideoProfile::Software` encoder create 的真实媒体测试。
+- 修复 commit/新候选：待上游确认是 `VideoProfile::Software` 描述符问题（`allow_staging` / memory domain 与 `avcodec-codec-ffmpeg` encoder 能力不匹配）还是 `avcodec-codec-ffmpeg` encoder capability 声明过窄。
+- dyun 重验 artifact：
+  ```bash
+  cargo test -p dg-media --locked --features avcodec-profile-native-free,avcodec-profile-software
+  cargo test -p dg-media --locked --features avcodec-profile-software
+  ```
+- 临时处置：Software profile 不能标记为 production；不修改 dyun backend 绕过。NativeFree 路径保持生产可用。
