@@ -7,13 +7,15 @@
 #   source scripts/env-software-avcodec.sh
 #   cargo test -p dg-media --features avcodec-profile-software
 #
-# Note: FFmpeg 8.x currently hits UP2-FFMPEG-01 in upstream avcodec-codec-ffmpeg
-# (*const vs *mut AVCodec). See dev-docs/002_fix_avcodec_profile_plan2/UP2-FFMPEG-01.md
+# Diagnostic output is printed so CI/runner logs can record the actual
+# libclang, libyuv and FFmpeg environment. This script does not modify files
+# in the repository; it only sets environment variables for the current shell.
 
 set -euo pipefail
 
 export LIBYUV_TARGET="${LIBYUV_TARGET:-ubuntu-24.04_x86_64}"
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
+# rust-toolchain.toml pins 1.94.1; do not override it with stable here.
+# User can still set RUSTUP_TOOLCHAIN before sourcing if needed.
 
 # Prefer llvm-21 layout used by Ubuntu 25.x packages.
 _LLVM_LIB=""
@@ -56,8 +58,20 @@ fi
 echo "LIBYUV_TARGET=${LIBYUV_TARGET}"
 echo "LIBCLANG_PATH=${LIBCLANG_PATH:-<unset>}"
 echo "BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-<unset>}"
-if pkg-config --exists libavcodec 2>/dev/null; then
-  echo "libavcodec=$(pkg-config --modversion libavcodec)"
+if command -v rustc >/dev/null 2>&1; then
+  echo "rustc=$(rustc --version)"
 else
-  echo "libavcodec=<not found via pkg-config>"
+  echo "rustc=<not found>"
 fi
+if command -v ffmpeg >/dev/null 2>&1; then
+  echo "ffmpeg=$(ffmpeg -version 2>/dev/null | head -n 1)"
+else
+  echo "ffmpeg=<not found>"
+fi
+for _lib in libavcodec libavformat libavutil libswscale; do
+  if pkg-config --exists "${_lib}" 2>/dev/null; then
+    echo "${_lib}=$(pkg-config --modversion "${_lib}")"
+  else
+    echo "${_lib}=<not found via pkg-config>"
+  fi
+done
