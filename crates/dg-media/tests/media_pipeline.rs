@@ -129,6 +129,11 @@ fn media_elements_are_registered() {
             "element {kind} must be registered"
         );
     }
+    #[cfg(feature = "avcodec-sdk")]
+    assert!(
+        dg_graph::find_element("media_transcode").is_some(),
+        "media_transcode must be registered when avcodec-sdk is enabled"
+    );
 }
 
 #[allow(unused_mut)]
@@ -321,6 +326,15 @@ fn example_native_free_jpeg_yaml_loads() {
     let spec = dg_graph::GraphSpec::from_str_with_format(yaml, dg_graph::GraphFormat::Yaml)
         .expect("native-free-jpeg example must parse and validate");
     Graph::new(spec).expect("native-free-jpeg example must build");
+}
+
+#[cfg(feature = "avcodec-profile-software")]
+#[test]
+fn example_software_host_yaml_loads() {
+    let yaml = include_str!("../../../examples/media/software-host.yaml");
+    let spec = dg_graph::GraphSpec::from_str_with_format(yaml, dg_graph::GraphFormat::Yaml)
+        .expect("software-host example must parse and validate");
+    Graph::new(spec).expect("software-host example must build");
 }
 
 #[cfg(feature = "avcodec-profile-rkmpp-zero-copy")]

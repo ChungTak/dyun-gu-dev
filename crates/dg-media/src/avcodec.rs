@@ -8,7 +8,7 @@ use crate::bridge::{
     avcodec_image_to_media_frame, avcodec_packet_to_media_frame, media_frame_to_avcodec_image,
     media_frame_to_avcodec_packet,
 };
-use crate::diagnostics::MediaSessionDiagnostics;
+use crate::diagnostics::{MediaRuntimeDiagnostics, MediaSessionDiagnostics};
 use crate::media_frame_timing;
 use crate::profile::AvcodecProfile;
 use crate::session::{map_video_build_error, AvcodecSdkService};
@@ -118,6 +118,9 @@ fn append_av_error_context(
         other => other.to_string(),
     };
     let mut ctx = MediaErrorContext::new("Backend", operation, base_detail);
+    if let Some(profile) = context.profile_name.as_ref() {
+        ctx = ctx.with_profile(profile.clone());
+    }
     if let Some(backend_id) = context.backend_id {
         ctx = ctx.with_backend(backend_id);
     }
@@ -127,11 +130,45 @@ fn append_av_error_context(
     if let Some(source_format) = context.source_format {
         ctx.pixel_format = Some(format!("{source_format:?}"));
     }
+    let source = context
+        .source_domain
+        .map(crate::bridge::avcodec_memory_domain_to_core);
+    let target = context
+        .target_domain
+        .map(crate::bridge::avcodec_memory_domain_to_core);
+    if source.is_some() || target.is_some() || context.allow_staging.is_some() {
+        ctx = ctx.with_domains(source, target, context.allow_staging);
+    }
     media_error_with_context(ctx)
 }
 
-fn map_video_runtime_error(error: VideoRuntimeError) -> AvError {
-    error.source
+/// Maps a high-level session runtime error into `AvError` while retaining structured context.
+///
+/// Plan 11: Runtime mapping must keep profile, role, backend, domains, and operation — not only
+/// the bare source `AvError`. Shared by decode/encode/resize and the fusion transcoder.
+pub(crate) fn map_video_runtime_error(error: VideoRuntimeError) -> AvError {
+    let source = error.source;
+    // Prefer existing nested context; otherwise attach session-level fields.
+    if source.context().is_some() {
+        return source;
+    }
+    let ctx = AvErrorContext {
+        backend_id: error.backend,
+        codec: None,
+        operation: Some(error.operation),
+        frame_index: None,
+        packet_index: None,
+        source_format: None,
+        destination_format: None,
+        width: None,
+        height: None,
+        memory_domain: error.source_domain.or(error.target_domain),
+        source_domain: error.source_domain,
+        target_domain: error.target_domain,
+        allow_staging: None,
+        profile_name: Some(error.profile.to_string()),
+    };
+    source.with_context(ctx)
 }
 
 fn map_av_error_to_av(error: Error) -> AvError {
@@ -147,41 +184,18 @@ fn submit_result<T: Clone>(value: T, result: AvResult<()>) -> SubmitResult<T> {
 }
 
 fn media_codec_to_codec_id(codec: MediaCodec) -> Result<CodecId> {
-    match codec {
-        MediaCodec::H264 => Ok(CodecId::H264),
-        MediaCodec::H265 | MediaCodec::H266 => Ok(CodecId::H265),
-        MediaCodec::AV1 => Ok(CodecId::Av1),
-        MediaCodec::VP8 => Ok(CodecId::Vp8),
-        MediaCodec::VP9 => Ok(CodecId::Vp9),
-        MediaCodec::MJPEG => Ok(CodecId::Mjpeg),
-        MediaCodec::Jpeg => Ok(CodecId::Jpeg),
-        MediaCodec::Unknown => Err(Error::Media(
-            "packet metadata codec is Unknown; specify `codec` element parameter".into(),
-        )),
-        other => Err(Error::Media(format!(
-            "unsupported encoded codec {:?} for avcodec decode",
-            other
-        ))),
-    }
+    // Single source of truth: format_map (rejects H266; no silent H265 downgrade).
+    crate::format_map::core_codec_to_avcodec(codec).map_err(|err| match err {
+        Error::Unsupported(message) => Error::Media(message),
+        other => other,
+    })
 }
 
 fn core_bitstream_to_avcodec(format: CoreBitstreamFormat) -> Result<BitstreamFormat> {
-    match format {
-        CoreBitstreamFormat::H264AnnexB => Ok(BitstreamFormat::H264AnnexB),
-        CoreBitstreamFormat::H264Avcc => Ok(BitstreamFormat::H264Avcc),
-        CoreBitstreamFormat::H265AnnexB => Ok(BitstreamFormat::H265AnnexB),
-        CoreBitstreamFormat::H265Hvcc => Ok(BitstreamFormat::H265Hvcc),
-        CoreBitstreamFormat::Vp8Frame => Ok(BitstreamFormat::Vp8Frame),
-        CoreBitstreamFormat::Vp9Frame => Ok(BitstreamFormat::Vp9Frame),
-        CoreBitstreamFormat::Av1Obu => Ok(BitstreamFormat::Av1Obu),
-        CoreBitstreamFormat::JpegInterchange => Ok(BitstreamFormat::JpegInterchange),
-        CoreBitstreamFormat::Unknown => Err(Error::Media(
-            "packet bitstream format is Unknown; specify `bitstream_format`".into(),
-        )),
-        other => Err(Error::Media(format!(
-            "unsupported bitstream format {other:?} for avcodec bridge"
-        ))),
-    }
+    crate::format_map::core_bitstream_to_avcodec(format).map_err(|err| match err {
+        Error::Unsupported(message) => Error::Media(message),
+        other => other,
+    })
 }
 
 pub(crate) fn stream_index_from_frame(frame: &MediaFrame) -> u32 {
@@ -320,9 +334,14 @@ struct DecoderBackend {
     profile: AvcodecProfile,
     decoder: Option<VideoDecoderSession>,
     csc: Option<VideoImageProcessorSession>,
+    /// True while a CSC submit has been accepted and we are waiting for `poll_image`.
     csc_pending: bool,
+    /// Decoded image waiting for CSC accept (`Again` must not drop the frame).
+    csc_input: Option<Image>,
     codec: Option<CodecId>,
     bitstream_format: Option<BitstreamFormat>,
+    /// Fixed at session open; subsequent packets must match (encode-aligned policy).
+    time_base: Option<TimeBase>,
     stream_index: u32,
     output_format: Option<ImageInfo>,
     config_codec: Option<CodecId>,
@@ -339,8 +358,10 @@ impl DecoderBackend {
             decoder: None,
             csc: None,
             csc_pending: false,
+            csc_input: None,
             codec: None,
             bitstream_format: None,
+            time_base: None,
             stream_index: 0,
             output_format: config.output_format,
             config_codec: config.codec,
@@ -385,6 +406,7 @@ impl DecoderBackend {
         self.decoder = Some(decoder);
         self.codec = Some(codec);
         self.bitstream_format = Some(bitstream);
+        self.time_base = Some(time_base);
         self.stream_index = stream_index;
         self.build_report = Some(report);
         Ok(())
@@ -418,10 +440,16 @@ impl DecoderBackend {
                 self.stream_index
             )));
         }
-        if let Ok(time_base) = time_base_from_frame(frame) {
-            // Session time base is fixed at open; mismatched timestamps are still accepted but
-            // time_base identity must not drift for the same stream.
-            let _ = time_base;
+        // Session time base is fixed at open (same policy as the encoder path).
+        if let Some(session_tb) = self.time_base {
+            if let Ok(packet_tb) = time_base_from_frame(frame) {
+                if packet_tb.num != session_tb.num || packet_tb.den != session_tb.den {
+                    return Err(Error::Media(format!(
+                        "decode packet time_base {}/{} does not match session time_base {}/{}",
+                        packet_tb.num, packet_tb.den, session_tb.num, session_tb.den
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -444,6 +472,60 @@ impl DecoderBackend {
         self.csc = Some(processor);
         let _ = dst_format;
         Ok(())
+    }
+
+    /// Submits / polls the optional decode-side CSC stage without dropping frames on Again.
+    fn poll_csc(&mut self) -> AvResult<Poll<MediaFrame>> {
+        let dst = self.output_format.ok_or(AvError::InvalidState)?;
+        if let Some(image) = self.csc_input.take() {
+            let Some(processor) = self.csc.as_mut() else {
+                return Err(AvError::InvalidState);
+            };
+            // Clone so Again can retry; Image is Clone and shares BufferHandle.
+            let result = processor
+                .submit(ImageProcessRequest {
+                    src: image.clone(),
+                    op: ImageOp::Csc { dst_format: dst },
+                    aux: None,
+                    target_domain: None,
+                })
+                .map_err(map_video_runtime_error);
+            match result {
+                Ok(()) => {
+                    self.csc_pending = true;
+                }
+                Err(error) if error.kind() == AvErrorKind::Again => {
+                    self.csc_input = Some(image);
+                    return Ok(Poll::Pending);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if !self.csc_pending {
+            return Ok(Poll::Pending);
+        }
+        let Some(processor) = self.csc.as_mut() else {
+            return Err(AvError::InvalidState);
+        };
+        match processor.poll_image().map_err(map_video_runtime_error)? {
+            Poll::Ready(image) => {
+                self.csc_pending = false;
+                let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
+                Ok(Poll::Ready(frame))
+            }
+            Poll::Pending => Ok(Poll::Pending),
+            Poll::EndOfStream => {
+                // After decoder flush the CSC stage may report EOS once drained.
+                // Do not fail the whole decode session; clear pending so the pump can
+                // continue polling the decoder / finish flush.
+                self.csc_pending = false;
+                if self.csc_input.is_some() {
+                    return Err(AvError::InvalidState);
+                }
+                Ok(Poll::Pending)
+            }
+        }
     }
 }
 
@@ -476,21 +558,10 @@ impl BackendOps for DecoderBackend {
         if self.decoder.is_none() {
             return Ok(Poll::Pending);
         }
-        if self.csc_pending {
-            let Some(processor) = self.csc.as_mut() else {
-                return Err(AvError::InvalidState);
-            };
-            match processor.poll_image().map_err(map_video_runtime_error)? {
-                Poll::Ready(image) => {
-                    self.csc_pending = false;
-                    let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
-                    return Ok(Poll::Ready(frame));
-                }
-                Poll::Pending => return Ok(Poll::Pending),
-                Poll::EndOfStream => {
-                    return Err(AvError::InvalidState);
-                }
-            }
+
+        // Drain any CSC work already in flight or waiting for accept.
+        if self.csc_pending || self.csc_input.is_some() {
+            return self.poll_csc();
         }
 
         let Some(decoder) = self.decoder.as_mut() else {
@@ -501,19 +572,8 @@ impl BackendOps for DecoderBackend {
                 if let Some(dst) = self.output_format {
                     if image.format != dst {
                         self.ensure_csc(dst).map_err(map_av_error_to_av)?;
-                        let Some(processor) = self.csc.as_mut() else {
-                            return Err(AvError::InvalidState);
-                        };
-                        processor
-                            .submit(ImageProcessRequest {
-                                src: image,
-                                op: ImageOp::Csc { dst_format: dst },
-                                aux: None,
-                                target_domain: None,
-                            })
-                            .map_err(map_video_runtime_error)?;
-                        self.csc_pending = true;
-                        return Ok(Poll::Pending);
+                        self.csc_input = Some(image);
+                        return self.poll_csc();
                     }
                 }
                 let frame = avcodec_image_to_media_frame(&image).map_err(map_av_error_to_av)?;
@@ -525,23 +585,31 @@ impl BackendOps for DecoderBackend {
     }
 
     fn flush_backend(&mut self) -> AvResult<()> {
+        // Flush decoder first so any remaining images can feed the optional CSC stage.
         if let Some(decoder) = self.decoder.as_mut() {
-            decoder.flush().map_err(map_video_runtime_error)
-        } else {
-            Ok(())
+            decoder.flush().map_err(map_video_runtime_error)?;
         }
+        if let Some(csc) = self.csc.as_mut() {
+            csc.flush().map_err(map_video_runtime_error)?;
+        }
+        Ok(())
     }
 
     fn reset_backend(&mut self) -> AvResult<()> {
-        if let Some(decoder) = self.decoder.as_mut() {
-            decoder.reset().map_err(map_video_runtime_error)
-        } else {
-            Ok(())
+        if let Some(csc) = self.csc.as_mut() {
+            csc.reset().map_err(map_video_runtime_error)?;
         }
+        self.csc_pending = false;
+        self.csc_input = None;
+        self.csc = None;
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.reset().map_err(map_video_runtime_error)?;
+        }
+        Ok(())
     }
 
     fn flush_required(&self) -> bool {
-        self.decoder.is_some()
+        self.decoder.is_some() || self.csc.is_some()
     }
 }
 
@@ -589,12 +657,37 @@ impl DecodeCore {
             .map(MediaSessionDiagnostics::from)
     }
 
+    /// Upstream SDK runtime counters for the active decoder session (plan 11).
+    ///
+    /// CSC-stage counters are separate; see [`Self::csc_runtime_diagnostics`].
+    #[must_use]
+    pub fn runtime_diagnostics(&self) -> Option<MediaRuntimeDiagnostics> {
+        self.backend
+            .decoder
+            .as_ref()
+            .map(|session| MediaRuntimeDiagnostics::from(session.diagnostics()))
+    }
+
+    /// Runtime counters for the optional decode-side CSC image-processor session.
+    #[must_use]
+    pub fn csc_runtime_diagnostics(&self) -> Option<MediaRuntimeDiagnostics> {
+        self.backend
+            .csc
+            .as_ref()
+            .map(|session| MediaRuntimeDiagnostics::from(session.diagnostics()))
+    }
+
     pub fn submit_packet(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
 
     pub fn submit_end_of_stream(&mut self) {
         self.pump.begin_flush();
+    }
+
+    /// Resets pump + decoder/CSC sessions for a new generation (plan 08/14).
+    pub fn reset(&mut self) -> Result<()> {
+        self.pump.reset(&mut self.backend)
     }
 
     pub fn pump_step(&mut self) -> Result<PumpStep> {
@@ -657,6 +750,11 @@ struct EncoderBackend {
     bitstream_format: Option<BitstreamFormat>,
     bitrate: Option<u32>,
     time_base: Option<MediaTimeBase>,
+    /// Fixed geometry/format from the first frame that opened the session.
+    session_width: Option<u32>,
+    session_height: Option<u32>,
+    session_format: Option<ImageInfo>,
+    /// Config-only; Profile owns I/O domain (plan 04). Kept for load-time warn path.
     #[allow(dead_code)]
     memory_domain: Option<CoreMemoryDomain>,
     stream_index: u32,
@@ -673,6 +771,9 @@ impl EncoderBackend {
             bitstream_format: config.bitstream_format,
             bitrate: config.bitrate,
             time_base: config.time_base,
+            session_width: None,
+            session_height: None,
+            session_format: None,
             memory_domain: config.memory_domain,
             stream_index: 0,
             build_report: None,
@@ -681,9 +782,11 @@ impl EncoderBackend {
 
     fn ensure_encoder(&mut self, frame: &MediaFrame) -> Result<()> {
         if self.encoder.is_some() {
+            self.check_session_invariants(frame)?;
             return Ok(());
         }
-        let image = media_frame_to_avcodec_image(frame.clone(), 1)?;
+        // Resolve geometry without a full payload clone (opens session once).
+        let (coded_width, coded_height, image_format) = image_geometry_from_frame(frame)?;
         let timing = media_frame_timing(&frame.meta);
         let resolved_tb = timing.time_base.or(self.time_base);
         let time_base = if let Some(tb) = resolved_tb {
@@ -721,9 +824,9 @@ impl EncoderBackend {
         }
         let request = VideoEncoderRequest::new(
             self.codec,
-            image.coded_width,
-            image.coded_height,
-            image.format,
+            coded_width,
+            coded_height,
+            image_format,
             time_base,
             bitrate,
         )
@@ -731,12 +834,95 @@ impl EncoderBackend {
         let (encoder, report) = default_sdk_service()?.create_encoder(self.profile, request)?;
         self.encoder = Some(encoder);
         self.build_report = Some(report);
+        self.session_width = Some(coded_width);
+        self.session_height = Some(coded_height);
+        self.session_format = Some(image_format);
         if let Some(info) = frame.meta.media_info.as_ref() {
             if let MediaPayloadInfo::Encoded(encoded) = &info.payload {
                 self.stream_index = encoded.stream_index;
             }
         }
         Ok(())
+    }
+
+    fn check_session_invariants(&self, frame: &MediaFrame) -> Result<()> {
+        let timing = media_frame_timing(&frame.meta);
+        if let (Some(session_tb), Some(frame_tb)) = (self.time_base, timing.time_base) {
+            if session_tb != frame_tb {
+                return Err(Error::Media(format!(
+                    "encode frame time_base {}/{} does not match session time_base {}/{}",
+                    frame_tb.num, frame_tb.den, session_tb.num, session_tb.den
+                )));
+            }
+        }
+        let (width, height, format) = image_geometry_from_frame(frame)?;
+        if let (Some(sw), Some(sh), Some(sf)) =
+            (self.session_width, self.session_height, self.session_format)
+        {
+            if width != sw || height != sh || format != sf {
+                return Err(Error::Media(format!(
+                    "encode frame geometry {width}x{height} {format:?} does not match session \
+                     {sw}x{sh} {sf:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads coded geometry / pixel format from media_info or dense shape (no payload copy).
+fn image_geometry_from_frame(frame: &MediaFrame) -> Result<(u32, u32, ImageInfo)> {
+    if let Some(info) = frame.meta.media_info.as_ref() {
+        if let MediaPayloadInfo::Image(image) = &info.payload {
+            let format = crate::format_map::core_pixel_to_avcodec(image.pixel_format)?;
+            if image.coded_width == 0 || image.coded_height == 0 {
+                return Err(Error::Media(
+                    "encode image media_info coded_width/height must be non-zero".into(),
+                ));
+            }
+            return Ok((image.coded_width, image.coded_height, format));
+        }
+    }
+    // Dense HxW[xC] host frames without media_info: infer packed format from channel dim.
+    match frame.shape.as_slice() {
+        [h, w] => {
+            let height = u32::try_from(*h)
+                .map_err(|_| Error::Media("encode frame height exceeds u32".into()))?;
+            let width = u32::try_from(*w)
+                .map_err(|_| Error::Media("encode frame width exceeds u32".into()))?;
+            if width == 0 || height == 0 {
+                return Err(Error::Media(
+                    "encode frame width and height must be non-zero".into(),
+                ));
+            }
+            Ok((width, height, ImageInfo::Gray8))
+        }
+        [h, w, c] => {
+            let height = u32::try_from(*h)
+                .map_err(|_| Error::Media("encode frame height exceeds u32".into()))?;
+            let width = u32::try_from(*w)
+                .map_err(|_| Error::Media("encode frame width exceeds u32".into()))?;
+            if width == 0 || height == 0 {
+                return Err(Error::Media(
+                    "encode frame width and height must be non-zero".into(),
+                ));
+            }
+            let format = match *c {
+                1 => ImageInfo::Gray8,
+                3 => ImageInfo::Rgb24,
+                4 => ImageInfo::Rgba,
+                other => {
+                    return Err(Error::Media(format!(
+                        "encode frame channel count {other} is not a known packed format \
+                         (use Image media_info for planar formats such as Yuv420p)"
+                    )));
+                }
+            };
+            Ok((width, height, format))
+        }
+        other => Err(Error::Media(format!(
+            "encode frame shape {other:?} is not a 2D image (need [H,W] or [H,W,C] or Image media_info)"
+        ))),
     }
 }
 
@@ -883,12 +1069,26 @@ impl EncodeCore {
             .map(MediaSessionDiagnostics::from)
     }
 
+    /// Upstream SDK runtime counters for the active encoder session (plan 11).
+    #[must_use]
+    pub fn runtime_diagnostics(&self) -> Option<MediaRuntimeDiagnostics> {
+        self.backend
+            .encoder
+            .as_ref()
+            .map(|session| MediaRuntimeDiagnostics::from(session.diagnostics()))
+    }
+
     pub fn submit_image(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
 
     pub fn submit_end_of_stream(&mut self) {
         self.pump.begin_flush();
+    }
+
+    /// Resets pump + encoder session for a new generation (plan 08/14).
+    pub fn reset(&mut self) -> Result<()> {
+        self.pump.reset(&mut self.backend)
     }
 
     pub fn pump_step(&mut self) -> Result<PumpStep> {
@@ -1042,12 +1242,26 @@ impl ResizeCore {
             .map(MediaSessionDiagnostics::from)
     }
 
+    /// Upstream SDK runtime counters for the active processor session (plan 11).
+    #[must_use]
+    pub fn runtime_diagnostics(&self) -> Option<MediaRuntimeDiagnostics> {
+        self.backend
+            .processor
+            .as_ref()
+            .map(|session| MediaRuntimeDiagnostics::from(session.diagnostics()))
+    }
+
     pub fn submit_image(&mut self, frame: MediaFrame) -> Result<()> {
         self.pump.submit_input(frame)
     }
 
     pub fn submit_end_of_stream(&mut self) {
         self.pump.begin_flush();
+    }
+
+    /// Resets pump + processor session for a new generation (plan 08/14).
+    pub fn reset(&mut self) -> Result<()> {
+        self.pump.reset(&mut self.backend)
     }
 
     pub fn pump_step(&mut self) -> Result<PumpStep> {
@@ -1104,16 +1318,12 @@ mod tests {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn native_free_h264_encode_decode_preserves_timing_and_stream_index() {
+    fn yuv420p_test_frame() -> crate::MediaFrame {
         use dg_core::{
-            ImageMediaInfo, MediaInfo, MediaPayloadInfo, MediaPlaneLayout, MediaRect,
-            MediaTimeBase, MediaTiming, PixelFormat, SampleLayout, SampleType,
+            ImageMediaInfo, MediaInfo, MediaPlaneLayout, MediaRect, MediaTimeBase, MediaTiming,
+            PixelFormat, SampleLayout, SampleType,
         };
 
-        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
-        use crate::ops::MediaPoll;
-        use crate::profile::AvcodecProfile;
         use crate::{MediaFrame, MediaFrameKind};
 
         let width = 32usize;
@@ -1180,9 +1390,19 @@ mod tests {
         frame.meta.media_info = Some(Box::new(media_info));
         frame.meta.pts = Some(42);
         frame.meta.dts = Some(42);
+        frame
+    }
 
+    #[cfg(target_arch = "x86_64")]
+    fn h264_encode_decode_roundtrip(profile: crate::profile::AvcodecProfile) {
+        use dg_core::{MediaPayloadInfo, MediaTimeBase};
+
+        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+
+        let frame = yuv420p_test_frame();
         let mut encoder = EncodeCore::new(EncodeCoreConfig {
-            profile: AvcodecProfile::NativeFree,
+            profile,
             codec: Some(CodecId::H264),
             bitstream_format: Some(BitstreamFormat::H264AnnexB),
             bitrate: Some(1_000_000),
@@ -1216,7 +1436,7 @@ mod tests {
         ));
 
         let mut decoder = DecodeCore::new(DecodeCoreConfig {
-            profile: AvcodecProfile::NativeFree,
+            profile,
             codec: Some(CodecId::H264),
             bitstream_format: Some(BitstreamFormat::H264AnnexB),
             output_format: None,
@@ -1246,9 +1466,343 @@ mod tests {
             Some(MediaPayloadInfo::Image(info)) => {
                 assert_eq!(info.coded_width, 32);
                 assert_eq!(info.coded_height, 32);
-                assert_eq!(info.pixel_format, PixelFormat::Yuv420P);
+                assert_eq!(info.pixel_format, dg_core::PixelFormat::Yuv420P);
             }
             other => panic!("expected image media_info, got {other:?}"),
         }
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
+    #[test]
+    fn native_free_h264_encode_decode_preserves_timing_and_stream_index() {
+        h264_encode_decode_roundtrip(crate::profile::AvcodecProfile::NativeFree);
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-software"))]
+    #[test]
+    fn software_h264_encode_decode_preserves_timing_and_stream_index() {
+        h264_encode_decode_roundtrip(crate::profile::AvcodecProfile::Software);
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
+    #[test]
+    fn native_free_resize_reports_libyuv_and_scales_frame() {
+        use dg_core::MediaPayloadInfo;
+
+        use super::ResizeCore;
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        let frame = yuv420p_test_frame();
+        let mut resize = ResizeCore::new(AvcodecProfile::NativeFree, 64, 64).expect("resize");
+        let diag = resize
+            .session_diagnostics()
+            .expect("processor report at create");
+        assert_eq!(diag.profile_name, "native-free");
+        assert_eq!(diag.image_processor_backend.as_deref(), Some("libyuv"));
+
+        resize.submit_image(frame).expect("submit");
+        resize.submit_end_of_stream();
+        let mut out = None;
+        for _ in 0..64 {
+            match resize.poll().expect("poll") {
+                MediaPoll::Ready(frame) => {
+                    out = Some(frame);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let out = out.expect("resized frame");
+        match out.meta.media_info.as_ref().map(|i| &i.payload) {
+            Some(MediaPayloadInfo::Image(info)) => {
+                assert_eq!(info.coded_width, 64);
+                assert_eq!(info.coded_height, 64);
+            }
+            other => panic!("expected image media_info, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
+    #[test]
+    fn nvcodec_device_frame_rejects_resize_at_create() {
+        use super::ResizeCore;
+        use crate::profile::AvcodecProfile;
+
+        let err = ResizeCore::new(AvcodecProfile::NvcodecDeviceFrame, 64, 64)
+            .expect_err("device-frame must reject processor");
+        let text = err.to_string();
+        assert!(
+            text.contains("nvcodec-device-frame")
+                || text.contains("image processor")
+                || text.contains("resize"),
+            "{text}"
+        );
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
+    #[test]
+    fn encode_rejects_geometry_drift_after_session_open() {
+        use dg_core::{MediaPayloadInfo, MediaTimeBase};
+
+        use super::{EncodeCore, EncodeCoreConfig};
+        use crate::profile::AvcodecProfile;
+
+        let frame = yuv420p_test_frame();
+        let mut encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NativeFree,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(1_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("encode core");
+        encoder.submit_image(frame).expect("open with 32x32");
+        for _ in 0..8 {
+            let _ = encoder.poll();
+        }
+        // Build a second frame with different coded size via media_info.
+        let mut drifted = yuv420p_test_frame();
+        if let Some(info) = drifted.meta.media_info.as_mut() {
+            if let MediaPayloadInfo::Image(image) = &mut info.payload {
+                image.coded_width = 64;
+                image.coded_height = 64;
+            }
+        }
+        encoder.submit_image(drifted).expect("queue second frame");
+        let err = encoder
+            .poll()
+            .expect_err("geometry drift must fail on convert");
+        let text = err.to_string();
+        assert!(
+            text.contains("geometry") || text.contains("64") || text.contains("32"),
+            "{text}"
+        );
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
+    #[test]
+    fn decode_rejects_time_base_drift_after_session_open() {
+        use dg_core::{MediaPayloadInfo, MediaTimeBase};
+
+        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        let frame = yuv420p_test_frame();
+        let mut encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NativeFree,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(1_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("encode core");
+        encoder.submit_image(frame).expect("submit image");
+        encoder.submit_end_of_stream();
+        let mut packet = None;
+        for _ in 0..64 {
+            match encoder.poll().expect("poll") {
+                MediaPoll::Ready(out) => {
+                    packet = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let mut packet = packet.expect("encoded packet");
+        // Second packet with same payload but drifted time_base must fail after open.
+        let mut packet2 = packet.clone();
+        if let Some(info) = packet2.meta.media_info.as_mut() {
+            info.timing.time_base = Some(MediaTimeBase::new(1, 25));
+            if let MediaPayloadInfo::Encoded(encoded) = &mut info.payload {
+                let _ = encoded;
+            }
+        }
+        packet2.meta.pts = Some(1);
+        // Keep first packet's media_info time_base at 1/30 via normalize path.
+        if let Some(info) = packet.meta.media_info.as_mut() {
+            info.timing.time_base = Some(MediaTimeBase::new(1, 30));
+        }
+
+        let mut decoder = DecodeCore::new(DecodeCoreConfig {
+            profile: AvcodecProfile::NativeFree,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            output_format: None,
+            memory_domain: None,
+            width: None,
+            height: None,
+            channels: None,
+        })
+        .expect("decode core");
+        decoder
+            .submit_packet(packet)
+            .expect("first packet opens session");
+        // Drain first accept so the second submit can enter convert_input.
+        for _ in 0..8 {
+            let _ = decoder.poll();
+        }
+        // Queueing always succeeds; invariants run on convert/submit inside the pump.
+        decoder
+            .submit_packet(packet2)
+            .expect("second packet is queued");
+        let err = decoder
+            .poll()
+            .expect_err("time_base drift must fail on convert");
+        let text = err.to_string();
+        assert!(
+            text.contains("time_base") || text.contains("1/25") || text.contains("1/30"),
+            "{text}"
+        );
+    }
+
+    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
+    #[test]
+    fn native_free_decode_csc_to_rgb24_and_reset_allows_second_generation() {
+        use dg_core::{MediaPayloadInfo, MediaTimeBase};
+        use dg_media_avcodec::ImageInfo;
+
+        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        // Encode one frame → decode with CSC → assert RGB24 → reset → second generation.
+        let mut encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NativeFree,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(1_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("encode");
+        encoder
+            .submit_image(yuv420p_test_frame())
+            .expect("submit image");
+        encoder.submit_end_of_stream();
+        let mut packet = None;
+        for _ in 0..64 {
+            match encoder.poll().expect("encode poll") {
+                MediaPoll::Ready(out) => {
+                    packet = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let packet = packet.expect("packet");
+
+        let mut decoder = DecodeCore::new(DecodeCoreConfig {
+            profile: AvcodecProfile::NativeFree,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            output_format: Some(ImageInfo::Rgb24),
+            memory_domain: None,
+            width: None,
+            height: None,
+            channels: None,
+        })
+        .expect("decode");
+        decoder.submit_packet(packet.clone()).expect("submit");
+        decoder.submit_end_of_stream();
+        let mut decoded = None;
+        for _ in 0..128 {
+            match decoder.poll().expect("decode poll") {
+                MediaPoll::Ready(out) => {
+                    decoded = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let decoded = decoded.expect("decoded rgb");
+        match decoded.meta.media_info.as_ref().map(|i| &i.payload) {
+            Some(MediaPayloadInfo::Image(info)) => {
+                assert_eq!(info.pixel_format, dg_core::PixelFormat::Rgb24);
+                assert_eq!(info.coded_width, 32);
+                assert_eq!(info.coded_height, 32);
+            }
+            other => panic!("expected RGB image, got {other:?}"),
+        }
+
+        decoder.reset().expect("reset after drain");
+        decoder.submit_packet(packet).expect("second generation");
+        decoder.submit_end_of_stream();
+        let mut second = None;
+        for _ in 0..128 {
+            match decoder.poll().expect("decode poll 2") {
+                MediaPoll::Ready(out) => {
+                    second = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        assert!(
+            second.is_some(),
+            "reset must allow a second decode generation"
+        );
+    }
+
+    #[test]
+    fn h266_is_not_silently_mapped_to_h265() {
+        use dg_core::MediaCodec;
+        let err = super::media_codec_to_codec_id(MediaCodec::H266).expect_err("H266 unsupported");
+        let text = err.to_string();
+        assert!(
+            text.contains("H266") || text.to_ascii_lowercase().contains("not supported"),
+            "{text}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "avcodec-profile-native-free",
+        feature = "avcodec-profile-software"
+    ))]
+    #[test]
+    fn multi_profile_encoder_backends_do_not_cross_stack() {
+        use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+
+        use crate::profile::AvcodecProfile;
+        use crate::session::AvcodecSdkService;
+
+        let service = AvcodecSdkService::new().expect("sdk");
+        let request = || {
+            VideoEncoderRequest::new(
+                CodecId::H264,
+                32,
+                32,
+                ImageInfo::Yuv420p,
+                TimeBase::new(1, 30),
+                1_000_000,
+            )
+            .expect("request")
+        };
+
+        let (_session, native_report) = service
+            .create_encoder(AvcodecProfile::NativeFree, request())
+            .expect("native-free encoder");
+        assert_eq!(native_report.profile, "native-free");
+        assert_eq!(native_report.encoder_backend, Some("rust-h264"));
+
+        let (_session, software_report) = service
+            .create_encoder(AvcodecProfile::Software, request())
+            .expect("software encoder");
+        assert_eq!(software_report.profile, "software");
+        assert_eq!(software_report.encoder_backend, Some("ffmpeg"));
+
+        // Isolation: selecting one profile must not pick the other stack's backend id.
+        assert_ne!(
+            native_report.encoder_backend, software_report.encoder_backend,
+            "profiles must not share selected encoder backends"
+        );
     }
 }

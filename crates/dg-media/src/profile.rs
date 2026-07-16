@@ -2,6 +2,28 @@
 
 use dg_core::{Error, Result};
 
+/// Production support level advertised by dyun for a compiled profile.
+///
+/// Unverified hardware profiles may still compile and run for development, but must not be
+/// advertised as production-supported until upstream signs them off on real hardware.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProfileSupportLevel {
+    /// First-party production matrix (NativeFree, Software, NV Host / Device-frame).
+    Production,
+    /// Compiled for contract/CI only; no production SLA (RKMPP, OneVPL, AMF).
+    Unverified,
+}
+
+impl ProfileSupportLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
 /// Stable runtime profile name matching `avcodec-profile-*` Cargo feature suffixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AvcodecProfile {
@@ -102,6 +124,35 @@ impl AvcodecProfile {
     #[must_use]
     pub const fn supports_amf_decode(self) -> bool {
         matches!(self, Self::AmfHostFallback)
+    }
+
+    /// Production support status for capability/CLI/docs (INT3-14).
+    ///
+    /// RKMPP / OneVPL / AMF remain `Unverified` until upstream provides real-device sign-off.
+    /// NV Host / Device-frame are marked production in the plan matrix; runtime hardware
+    /// verification is still environment-dependent.
+    #[must_use]
+    pub const fn support_level(self) -> ProfileSupportLevel {
+        match self {
+            Self::NativeFree
+            | Self::Software
+            | Self::NvcodecHost
+            | Self::NvcodecHostFallback
+            | Self::NvcodecDeviceFrame => ProfileSupportLevel::Production,
+            Self::RkmppHost
+            | Self::RkmppHostFallback
+            | Self::RkmppZeroCopy
+            | Self::OnevplHost
+            | Self::OnevplHostFallback
+            | Self::AmfHost
+            | Self::AmfHostFallback => ProfileSupportLevel::Unverified,
+        }
+    }
+
+    /// Convenience: `true` only for profiles on the first-party production matrix.
+    #[must_use]
+    pub const fn is_production_supported(self) -> bool {
+        matches!(self.support_level(), ProfileSupportLevel::Production)
     }
 
     pub fn ensure_compiled(self) -> Result<()> {
@@ -235,6 +286,41 @@ mod tests {
     fn amf_host_does_not_guarantee_decode() {
         assert!(!AvcodecProfile::AmfHost.supports_amf_decode());
         assert!(AvcodecProfile::AmfHostFallback.supports_amf_decode());
+    }
+
+    #[test]
+    fn production_matrix_and_unverified_hardware() {
+        use super::ProfileSupportLevel;
+        assert_eq!(
+            AvcodecProfile::NativeFree.support_level(),
+            ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::Software.support_level(),
+            ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::NvcodecHost.support_level(),
+            ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::NvcodecDeviceFrame.support_level(),
+            ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::RkmppHost.support_level(),
+            ProfileSupportLevel::Unverified
+        );
+        assert_eq!(
+            AvcodecProfile::OnevplHost.support_level(),
+            ProfileSupportLevel::Unverified
+        );
+        assert_eq!(
+            AvcodecProfile::AmfHost.support_level(),
+            ProfileSupportLevel::Unverified
+        );
+        assert!(!AvcodecProfile::AmfHost.is_production_supported());
+        assert!(AvcodecProfile::NativeFree.is_production_supported());
     }
 
     #[test]

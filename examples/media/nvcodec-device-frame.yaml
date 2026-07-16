@@ -24,7 +24,6 @@ nodes:
       profile: nvcodec-device-frame
       codec: h264
       bitstream_format: h264_annexb
-      memory_domain: cuda_device
   - name: encode
     kind: media_encode
     params:
@@ -33,7 +32,6 @@ nodes:
       bitrate: 4000000
       time_base_num: 1
       time_base_den: 30
-      memory_domain: cuda_device
   - name: sink
     kind: sink
     params: {}

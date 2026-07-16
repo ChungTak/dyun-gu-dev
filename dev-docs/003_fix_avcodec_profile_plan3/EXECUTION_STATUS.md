@@ -1,89 +1,96 @@
 # 003 执行状态记录
 
-> 初始状态：未执行。允许 `Not started`、`In progress`、`Blocked`、`Done`。Done 必须绑定 commit、命令和
-> artifact；Plan 2 的结果不能自动继承。
+> Done 必须绑定证据；Plan 2 结果不自动继承。NV 真机与 RC2 签字仍阻塞全局完成。
 
 ## Baseline
 
 | Field | Value |
 |---|---|
-| dyun start commit | `75c8bf06fbc6cd3f4094d2599f66a04d68c7fe13` |
-| old SDK revision | `fc728aa9ea3e0a85401d2cd4de1b762ffcf92a51` |
-| accepted SDK RC/commit | `84a2832796717f46a1009ee064c914b0ad66ac19` |
-| toolchain/target | rustc 1.94.1 / x86_64-unknown-linux-gnu |
-| FFmpeg runners | Ubuntu 22.04 `libavutil-dev`, `libavcodec-dev`, `libavformat-dev`, `libswscale-dev`, `libx264-dev`, `libx265-dev`, `libopenh264-dev` |
-| NV runner | compile-only on host (no NVIDIA GPU); `shiguredo_nvcodec` pinned to `2026.1.0` |
-| dirty worktree | 无（已提交后更新） |
+| accepted SDK RC | `7faba6fe264aa5ae5bd2f1666084f4bc52aa7d0f` (`0.2.0-rc.1` Plan5 RC1) |
+| previous pin | `84a2832796717f46a1009ee064c914b0ad66ac19` (`0.2.0-rc.0`) |
+| toolchain | rustc stable / x86_64-unknown-linux-gnu |
+| Software env | `scripts/env-software-avcodec.sh` (+ local FFmpeg `PKG_CONFIG_PATH` when needed) |
+| NV | compile-only（`shiguredo_nvcodec` lock `2026.1.0`）；无 GPU 真机 |
 
 ## Requirement Status
 
-| ID | Requirement | Status | Commit | Command/Artifact |
-|---|---|---|---|---|
-| INT3-01 | Immutable SDK RC | Done | `84a2832796717f46a1009ee064c914b0ad66ac19` | `cargo tree -p avcodec` 指向固定 rev |
-| INT3-02 | Single direct SDK dependency | Done | `crates/dg-media-avcodec/Cargo.toml` | 仅 `avcodec` 一个 direct dep，`default-features=false` |
-| INT3-03 | Profile-only features | Done | `crates/dg-media-avcodec/Cargo.toml`, `crates/dg-media/Cargo.toml` | 删除 `codec-*` alias |
-| INT3-04 | Thin profile mapping | Done | `crates/dg-media/src/profile.rs` | `to_sdk()` 一对一，不返回 policy/descriptor/I/O plan |
-| INT3-05 | VideoSdk service | Done | `crates/dg-media/src/session.rs` | `AvcodecSdkService` 包装 `VideoSdk`，转发高层请求 |
-| INT3-06 | Decode/Encode sessions | Done | `crates/dg-media/src/avcodec.rs` | 使用 `VideoDecoderSession`/`VideoEncoderSession` |
-| INT3-07 | Image processing | Done | `crates/dg-media/src/avcodec.rs` | `VideoImageProcessorSession` + `ImageProcessorRequest` |
-| INT3-08 | Transcoder/Graph | Done | `crates/dg-media/src/transcoder.rs` | `VideoSdk::create_transcoder` + `VideoTranscoderSession` |
-| INT3-09 | Bridge/zero-copy | Done | `crates/dg-media/src/bridge.rs` | 移除 `register_stage_to_host_hook` 旧测试；保留 domain/copy 证据 |
-| INT3-10 | Multi Profile isolation | Done | `crates/dg-media/src/profile.rs`, `crates/dg-media/tests/profile_matrix.rs` | 多 profile 必须显式指定；单 profile 默认 |
-| INT3-11 | Errors/reports/diagnostics | Done | `crates/dg-media/src/diagnostics.rs`, `crates/dg-media/src/session.rs` | 从 `OwnedVideoBuildReport` 派生 diagnostics |
-| INT3-12 | Legacy migration | Done | `crates/dg-media/src/legacy.rs` | `hw` 映射到 profile 并输出 deprecation warning |
-| INT3-13 | Software/NV production | Partial | `cargo check -p dg-media --features avcodec-profile-software` / `avcodec-profile-nvcodec-host` | Software 真实媒体单元通过；NV 仅 compile-only |
-| INT3-14 | Unverified HW gating | Done | `crates/dg-media/src/profile.rs` | RK/OneVPL/AMF 配置识别但不保证 decode |
-| INT3-15 | CI/release/rollback | Done | `Cargo.lock`, 本文件 | 固定 SDK rev；记录上游 issue |
+| ID | Status | Evidence |
+|---|---|---|
+| INT3-01～05 | Done | pin rev、单 facade dep、profile feature、`to_sdk`、`VideoSdk` service |
+| INT3-06 | Done | H.264 encode/decode；CSC flush/reset；`Core::reset`；CSC→RGB24 二代测试 |
+| INT3-07 | Done | resize + libyuv report；decode-side CSC；device-frame 拒 resize |
+| INT3-08 | Done | 融合 TranscodeCore + **`media_transcode` graph element**；H.264→H.265 / software re-encode |
+| INT3-09 | Done | bridge domain/copy；无隐式 CSC 旁路 |
+| INT3-10 | Done | 多 profile 显式选择；rust-h264 vs ffmpeg 不串栈 |
+| INT3-11 | Done | build error 上下文；session diagnostics |
+| INT3-12 | Done | `hw` 映射 + warning；**移除目标 0.2.0** |
+| INT3-13 | **Partial** | Software 真实媒体 Done；NV 真机缺失（compile-only hard-fail CI） |
+| INT3-14 | Done | `support_level`；unverified 创建时 warn；示例标注 |
+| INT3-15 | Done | CI matrix（native-free / software / combo / NV compile hard-fail） |
 
-## Phase Log
+## Phase 7 — Audit fixes (this pass)
 
-### Phase 0 — Upstream admission and failing guards
-- Status: Done
-- Commits/commands/results:
-  - 固定 avcodec rev `84a2832796717f46a1009ee064c914b0ad66ac19`
-  - `cargo clippy -p dg-media --features avcodec-profile-native-free --all-targets -- -D warnings` 通过
-  - `cargo test -p dg-media --features avcodec-profile-native-free` 通过
-- Blockers: `shiguredo_nvcodec 2026.2.0` / `shiguredo_amf 2026.3.0` 与上游 backend 不兼容，已 lock 到 `2026.1.0`（见 UPSTREAM_ISSUES.md）
+Bugs fixed:
+1. Decode CSC `flush`/`reset` 未处理 CSC session / `csc_pending` → 已 flush CSC 并在 reset 时 drop
+2. H266 静默降级为 H265 → 统一走 `format_map` 拒绝
+3. Transcoder bitstream 映射缺 Avcc/Hvcc → 用 `format_map`
+4. `Core::reset` 未暴露 → Decode/Encode/Resize/Transcode 均暴露
+5. NV CI soft-fail → `cargo check` hard-fail
+6. `memory_domain` 静默无效 → 配置时 warn（Profile 拥有 domain）
+7. 示例仍写 Factory V2 / 违规 domain → 清理
 
-### Phase 1 — Dependency/Profile/Service
-- Status: Done
-- Commits/commands/results:
-  - 重写 `crates/dg-media/src/profile.rs`：删除 policy/descriptor/I/O，添加 `to_sdk()`
-  - 重写 `crates/dg-media/src/session.rs`：`AvcodecSdkService` 包装 `VideoSdk`
-  - 更新 `crates/dg-media-avcodec/src/lib.rs`：只 re-export V3 facade
-  - 更新 `crates/dg-media-avcodec/Cargo.toml`、`crates/dg-media/Cargo.toml`、`crates/dg-cli/Cargo.toml`、`crates/dg-capi/Cargo.toml` 删除 `codec-*` alias
-- Blockers: 无
+Incomplete filled:
+- 注册 `media_transcode` 图元素
+- unverified profile 广告 warn
+- CSC 真实像素 + reset 二代测试
+- legacy 移除版本冻结为 0.2.0
 
-### Phase 2 — Elements and bridge
-- Status: Done
-- Commits/commands/results:
-  - 重写 `crates/dg-media/src/avcodec.rs`：使用 `VideoDecoderSession`/`VideoEncoderSession`/`VideoImageProcessorSession`
-  - 重写 `crates/dg-media/src/bridge.rs`：移除 V2 staging hook 测试
-  - 更新 `crates/dg-media/tests/source_scan.rs`、`crates/dg-media/tests/dependency_contract.rs`
-- Blockers: 无
+## Phase 8 — Upstream Plan5 RC1 bump (`7faba6fe`)
 
-### Phase 3 — Transcoder, diagnostics and entrypoints
-- Status: Done
-- Commits/commands/results:
-  - 重写 `crates/dg-media/src/transcoder.rs`：使用 `VideoSdk::create_transcoder`
-  - 重写 `crates/dg-media/src/diagnostics.rs`：从 `OwnedVideoBuildReport` 派生
-  - 更新 `crates/dg-media/tests/profile_matrix.rs`、`crates/dg-media/tests/media_pipeline.rs` 适配显式 profile
-- Blockers: 无
+Bugs / gaps fixed:
+1. `avcodec` pin 从 `84a28327` (`0.2.0-rc.0`) 升至 `7faba6fe` (`0.2.0-rc.1`)
+2. `map_video_runtime_error` 丢弃 `VideoRuntimeError` 的 profile/role/backend/domains → 通过 `AvError::with_context` 保留
+3. `append_av_error_context` 未导出 profile / domain / allow_staging → 补全
+4. Plan 11 runtime diagnostics 未对上 SDK5-01 四会话契约 → 增加 `MediaRuntimeDiagnostics` 与 Decode/Encode/Resize/Transcode 的 `runtime_diagnostics()`
+5. `dependency_contract` 仍锁定旧 rev → 同步新 pin
 
-### Phase 4 — Real media, hardware and release
-- Status: Partial
-- SDK/dyun revisions: avcodec `84a28327`, dyun `75c8bf06` → current PR
-- Commands/artifacts:
-  - `cargo test -p dg-media --features avcodec-profile-native-free,avcodec-profile-software --lib` 通过
-  - `cargo test -p dg-media --features avcodec-profile-native-free,avcodec-profile-software` 通过
-  - `cargo test --workspace --locked` 通过
-  - `cargo check -p dg-media --features avcodec-profile-nvcodec-host` / `avcodec-profile-nvcodec-device-frame` compile-only 通过
-- Blockers: 无 NVIDIA/Intel/AMD 真机，NV/OneVPL/AMF 仅 compile-only；RKMPP 无真机签字
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test -p dg-media --features avcodec-profile-native-free
+RUSTUP_TOOLCHAIN=stable cargo check -p dg-media --features avcodec-profile-nvcodec-host
+RUSTUP_TOOLCHAIN=stable cargo check -p dg-media --features avcodec-profile-amf-host
+# Software (needs FFmpeg + libclang):
+# source scripts/env-software-avcodec.sh
+# export PKG_CONFIG_PATH=/path/to/ffmpeg/lib/pkgconfig:$PKG_CONFIG_PATH
+# cargo test -p dg-media --features avcodec-profile-native-free,avcodec-profile-software
+```
 
-## Final Blockers
+## Phase 9 — External import + transcoder context fix
 
-- [x] SDK RC 已接纳（rev `84a28327`）。
-- [x] 旧 Factory/Registry/descriptor 路径已删除。
-- [x] NativeFree/Software 真实媒体通过（单/组合 feature 单元测试与 pipeline 测试）。
-- [x] 多 Profile 无隐式选择；测试已显式指定 profile。
-- [x] 上游 handoff 已回填并固定 RC；`Cargo.lock` 包含不可变 rev。
+Bugs / gaps fixed:
+1. `transcoder.rs` 本地 `map_video_runtime_error` 仍只返回 `error.source` → 改为共用 `avcodec::map_video_runtime_error`
+2. `try_import_external_image` stub → 实现 Host 安全导入 + `import_external_image/packet`（unsafe 仅在 facade）
+3. re-export `External*Descriptor` / `ExternalDropGuard`；drop-guard 单测 + Host image/packet roundtrip
+
+## Phase 10 — Review pass
+
+Bugs / gaps fixed:
+1. Decode-side CSC：`submit` 遇 `Again` 时原 Image 被 move 丢弃 → `csc_input` 缓存 + clone 重试
+2. 暴露 `csc_runtime_diagnostics()`（decoder 与 CSC 计数分离）
+3. decode `time_base` 会话不变量强制校验 + 单测
+4. `buffer_into_avcodec_handle`：独占 Host 零拷贝 move；共享则 clone
+5. pump/SDK counters 文档与 summary 命名分离（`input_queued` / `backend_accepted` / `sdk_submitted`）
+6. CI toolchain 与 `rust-toolchain.toml` 对齐为 `1.94.1`
+7. CSC `EndOfStream` 在 flush 后不再直接 `InvalidState`（清空 pending 后继续 drain）
+8. Encoder 会话固定 geometry/format/time_base；打开会话不再全帧 clone
+9. Transcoder 会话不变量（codec/bitstream/stream_index/time_base）与 reset 清空
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test -p dg-media --features avcodec-profile-native-free
+RUSTUP_TOOLCHAIN=stable cargo clippy -p dg-media -p dg-media-avcodec \
+  --features avcodec-profile-native-free --all-targets -- -D warnings
+```
+
+## Final blockers (global Done)
+
+- [ ] NV Host/device-frame **真机**媒体证据
+- [ ] 上游 RC2 重验与正式发布签字（文档 15）

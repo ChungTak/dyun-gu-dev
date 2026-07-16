@@ -5,8 +5,6 @@
 //! not assemble low-level SDK requests, and does not perform backend policy or memory-domain
 //! stamping.
 
-use std::sync::Arc;
-
 use dg_core::{Error, Result};
 
 use crate::profile::AvcodecProfile;
@@ -50,19 +48,10 @@ impl AvcodecSdkService {
     }
 
     #[cfg(feature = "avcodec-sdk")]
-    #[allow(dead_code)] // used by integration tests
+    #[allow(dead_code)] // used by unit tests
     /// Creates a service wrapping a pre-constructed `VideoSdk` (used by tests).
     pub fn with_sdk(sdk: VideoSdk) -> Self {
         Self { sdk }
-    }
-
-    #[cfg(feature = "avcodec-sdk")]
-    #[allow(dead_code)] // used by integration tests
-    /// Creates a service wrapping a pre-constructed `VideoSdk` built from a shared `Registry`.
-    pub fn with_registry(registry: Arc<dg_media_avcodec::Registry>) -> Self {
-        Self {
-            sdk: VideoSdk::with_registry(registry),
-        }
     }
 
     /// Creates a decoder session from the selected profile and upstream request.
@@ -188,34 +177,101 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(all(
+        feature = "avcodec-sdk",
+        feature = "avcodec-profile-nvcodec-device-frame"
+    ))]
     fn video_build_error_contains_profile_context() {
-        // `VideoBuildError` is only available inside the SDK; exercise `map_video_build_error`
-        // through a real build path that fails because the `software` profile is not compiled.
-        #[cfg(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free"))]
-        {
-            use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
-            let service = AvcodecSdkService::new().expect("sdk");
-            let request = VideoEncoderRequest::new(
-                CodecId::H264,
-                32,
-                32,
-                ImageInfo::Yuv420p,
-                TimeBase::new(1, 30),
-                1_000_000,
-            )
-            .expect("valid request");
-            let err = match service.create_encoder(AvcodecProfile::Software, request) {
-                Err(err) => err,
-                Ok(_) => panic!("software not compiled"),
-            };
-            let text = err.to_string();
-            assert!(text.contains("software"), "{text}");
-        }
+        use dg_media_avcodec::{ImageInfo, ImageOp, ImageProcessorRequest};
 
-        // Keep the test body non-empty when the SDK is disabled.
-        #[cfg(not(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free")))]
+        let service = AvcodecSdkService::new().expect("sdk");
+        let request = ImageProcessorRequest::new(ImageOp::Csc {
+            dst_format: ImageInfo::Rgb24,
+        });
+        let err = match service.create_image_processor(AvcodecProfile::NvcodecDeviceFrame, request)
         {
-            let _ = AvcodecProfile::NativeFree;
-        }
+            Err(err) => err,
+            Ok(_) => panic!("device-frame profile must reject image processor"),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("nvcodec-device-frame")
+                || text.contains("device-frame")
+                || text.contains("image-processor")
+                || text.contains("video build failed"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(
+        feature = "avcodec-sdk",
+        not(feature = "avcodec-profile-nvcodec-device-frame")
+    ))]
+    fn video_build_error_contains_profile_context() {
+        use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+
+        let service = AvcodecSdkService::new().expect("sdk");
+        // Uncompiled profile fails at `to_sdk` with a feature hint (Config path).
+        let candidate = [
+            AvcodecProfile::OnevplHost,
+            AvcodecProfile::AmfHost,
+            AvcodecProfile::NvcodecHost,
+            AvcodecProfile::Software,
+            AvcodecProfile::RkmppHost,
+        ]
+        .into_iter()
+        .find(|profile| !profile.is_compiled())
+        .expect("need an uncompiled profile to exercise error context");
+
+        let request = VideoEncoderRequest::new(
+            CodecId::H264,
+            32,
+            32,
+            ImageInfo::Yuv420p,
+            TimeBase::new(1, 30),
+            1_000_000,
+        )
+        .expect("valid request");
+        let err = match service.create_encoder(candidate, request) {
+            Err(err) => err,
+            Ok(_) => panic!("uncompiled profile `{}` must fail", candidate.name()),
+        };
+        let text = err.to_string();
+        assert!(text.contains(candidate.name()), "{text}");
+        assert!(
+            text.contains("not compiled") || text.contains("feature"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free"))]
+    fn service_drop_leaves_created_encoder_session_usable() {
+        use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+
+        let service = AvcodecSdkService::new().expect("sdk");
+        let request = VideoEncoderRequest::new(
+            CodecId::H264,
+            32,
+            32,
+            ImageInfo::Yuv420p,
+            TimeBase::new(1, 30),
+            1_000_000,
+        )
+        .expect("valid request");
+        let (session, report) = service
+            .create_encoder(AvcodecProfile::NativeFree, request)
+            .expect("create encoder");
+        drop(service);
+        assert_eq!(report.profile, "native-free");
+        // Session remains owned and droppable after the service is gone.
+        drop(session);
+    }
+
+    #[test]
+    #[cfg(not(feature = "avcodec-sdk"))]
+    fn video_build_error_contains_profile_context() {
+        let _ = AvcodecProfile::NativeFree;
     }
 }

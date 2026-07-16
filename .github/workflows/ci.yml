@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
           components: clippy
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
       - run: cargo test --workspace
 
   avcodec-profile-matrix:
@@ -50,13 +50,19 @@ jobs:
         include:
           - profile: avcodec-profile-native-free
             install_ffmpeg: false
+            run_tests: true
           - profile: avcodec-profile-software
             install_ffmpeg: true
+            run_tests: true
+          # Multi-profile isolation (explicit profile required; backend no cross-stack).
+          - profile: avcodec-profile-native-free,avcodec-profile-software
+            install_ffmpeg: true
+            run_tests: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
       - name: Install FFmpeg development packages
         if: matrix.install_ffmpeg
         run: |
@@ -71,16 +77,43 @@ jobs:
             libswscale-dev \
             libswresample-dev
           echo "libavcodec=$(pkg-config --modversion libavcodec)"
+      - name: Prepare bindgen environment for software profiles
+        if: matrix.install_ffmpeg
+        run: |
+          # shellcheck source=/dev/null
+          source scripts/env-software-avcodec.sh
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH:-}" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-}" >> "$GITHUB_ENV"
+          echo "LIBYUV_TARGET=${LIBYUV_TARGET:-ubuntu-24.04_x86_64}" >> "$GITHUB_ENV"
       - name: Check dg-media profile
         env:
           LIBYUV_TARGET: ubuntu-24.04_x86_64
         run: cargo check -p dg-media --features ${{ matrix.profile }}
       - name: Test dg-media profile
+        if: matrix.run_tests
         env:
           LIBYUV_TARGET: ubuntu-24.04_x86_64
         run: cargo test -p dg-media --features ${{ matrix.profile }}
-      # FFmpeg 8 + avcodec-rs fc728aa hits UP2-FFMPEG-01 (*const AVCodec).
-      # Job failure is intentional until upstream rev is bumped past the fix.
+
+  # NV Host/device-frame: compile-only contract (no GPU runner; lock pins shiguredo_nvcodec).
+  # Real media sign-off remains Partial until a hardware runner is available.
+  avcodec-nvcodec-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - avcodec-profile-nvcodec-host
+          - avcodec-profile-nvcodec-device-frame
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - name: Compile-only check
+        env:
+          LIBYUV_TARGET: ubuntu-24.04_x86_64
+        run: cargo check -p dg-media --features ${{ matrix.profile }}
 
   openvino:
     runs-on: ubuntu-latest
@@ -97,7 +130,7 @@ jobs:
         run: python -m pip install --upgrade "openvino==2026.2.1"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
           components: clippy
       - run: cargo clippy -p dg-openvino --features backend --all-targets -- -D warnings
       - run: cargo test -p dg-openvino --features backend
@@ -127,6 +160,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.1
+          toolchain: 1.94.1
           targets: ${{ matrix.target }}
       - run: cargo check --workspace --target ${{ matrix.target }}

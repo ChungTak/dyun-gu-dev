@@ -9,13 +9,13 @@ Transcoder 的重复组装，只保留业务配置、媒体 bridge、pump、Elem
 首批生产 Profile 为 NativeFree、Software、NVCodec Host、NVCodec Device-frame。RKMPP、OneVPL、AMF
 在上游无真机签字前只保留配置识别和编译契约，不作为 dyun 生产支持能力。
 
-## 2. 已确认问题
+## 2. 历史问题（Plan 3 启动时；现已修复，见 EXECUTION_STATUS）
 
-- 当前依赖固定旧 commit `fc728aa9ea3e0a85401d2cd4de1b762ffcf92a51`。
-- `profile.rs` 自行实现 backend policy 和 I/O plan，且 NativeFree 错误映射为 Software policy。
-- `session.rs` 仍使用 `default_registry_builder`、`VideoSessionFactoryV2` 和低层 config stamp。
-- `transcoder.rs` 仍构造低层 `VideoTranscoderRequest` 并通过 `Box::leak` 延长 Registry 生命周期。
-- `dg-media-avcodec` 仍暴露 `codec-*` 底层 feature alias 和低层 Factory 类型。
+- 曾固定旧 commit `fc728aa9…` / 后 `84a28327`；**当前 pin：`7faba6fe`（0.2.0-rc.1）**。
+- `profile.rs` 曾自行实现 backend policy 和 I/O plan → 现仅 `to_sdk()` 映射 `VideoProfile`。
+- `session.rs` 曾使用 `VideoSessionFactoryV2` → 现仅持有 `VideoSdk`。
+- `transcoder.rs` 曾 `Box::leak` Registry → 现 `VideoTranscoderSession` 拥有生命周期。
+- `dg-media-avcodec` 曾暴露底层 feature/Factory → 现仅 facade + Profile feature 转发。
 
 ## 3. 需求编号
 
@@ -57,9 +57,12 @@ Transcoder 的重复组装，只保留业务配置、媒体 bridge、pump、Elem
 
 ## 6. 全局完成定义
 
-- [ ] INT3-01～15 全部完成。
-- [ ] 生产源码不存在低层 SDK 组装符号。
-- [ ] NativeFree、Software、NV 首发矩阵通过。
-- [ ] 多 Profile 必须显式选择且 backend 不串栈。
+- [x] INT3-01～12、14～15 完成（代码/合同/CI，含 `media_transcode`、CSC flush/reset、unverified warn）。
+- [ ] INT3-13：NV 真机 Host/device-frame 媒体证据（当前仅 compile-only hard-fail CI）。
+- [x] 生产源码不存在低层 SDK 组装符号（source_scan 守卫）。
+- [x] NativeFree、Software 首发矩阵通过；NV 待硬件 runner。
+- [x] 多 Profile 必须显式选择且 backend 不串栈。
 - [ ] 真实 dyun 结果回传上游 handoff，形成 RC2 输入。
+
+详见 [EXECUTION_STATUS.md](EXECUTION_STATUS.md)。
 

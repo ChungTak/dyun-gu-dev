@@ -1,7 +1,10 @@
 //! Deprecated hardware preference parsing for one release cycle of `hw` compatibility.
 //!
-//! Production session creation always goes through [`crate::session::AvcodecSdkService`] /
-//! Factory V2. This module only maps legacy `hw=` strings to modern Profile names.
+//! Production session creation always goes through [`crate::session::AvcodecSdkService`]
+//! (V3 `VideoSdk`). This module only maps legacy `hw=` strings to modern Profile names.
+//!
+//! **Removal schedule (plan 13):** `hw` is deprecated since `0.1.0` and will be removed in
+//! `0.2.0`. Migrate configs to explicit `profile=` before that release.
 
 #![allow(deprecated)]
 
@@ -10,9 +13,11 @@ use dg_core::{Error, Result};
 use crate::profile::AvcodecProfile;
 
 /// Deprecated hardware preference used by legacy `hw` element parameters.
+///
+/// Scheduled for removal in **0.2.0** (deprecated since 0.1.0).
 #[deprecated(
     since = "0.1.0",
-    note = "use `profile` with `avcodec-profile-*` features instead of `hw`"
+    note = "use `profile` with `avcodec-profile-*` features instead of `hw`; removed in 0.2.0"
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HwPreference {

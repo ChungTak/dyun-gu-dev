@@ -23,7 +23,11 @@ use crate::avcodec::{
 use crate::bridge::{graph_packet_to_media_frame, media_frame_to_graph_packet};
 use crate::ops::{DecodeCore, EncodeCore, MediaPoll, OsdBox, OsdCore, ResizeCore};
 #[cfg(feature = "avcodec-sdk")]
-use crate::profile::{reject_profile_hw_conflict, resolve_profile};
+use crate::profile::{
+    reject_profile_hw_conflict, resolve_profile, AvcodecProfile, ProfileSupportLevel,
+};
+#[cfg(feature = "avcodec-sdk")]
+use crate::transcoder::{TranscodeCore as AvcodecTranscodeCore, TranscodeCoreConfig};
 use crate::MediaFrame;
 
 const MEDIA_INPUT: [PortSchema; 1] = [PortSchema {
@@ -307,6 +311,96 @@ inventory::submit! {
         create: create_osd,
     }
 }
+#[cfg(feature = "avcodec-sdk")]
+inventory::submit! {
+    dg_graph::ElementDescriptor {
+        kind: "media_transcode",
+        input_ports: &MEDIA_INPUT,
+        output_ports: &MEDIA_OUTPUT,
+        params: TRANSCODE_PARAMS,
+        validate: Some(validate_transcode),
+        create: create_transcode,
+    }
+}
+
+#[cfg(feature = "avcodec-sdk")]
+const TRANSCODE_PARAM_FIELDS: &[&str] = &[
+    "profile",
+    "hw",
+    "input_codec",
+    "output_codec",
+    "codec",
+    "input_bitstream_format",
+    "output_bitstream_format",
+    "bitstream_format",
+    "width",
+    "height",
+    "bitrate",
+    "time_base_num",
+    "time_base_den",
+    "allow_linked",
+    "drain_timeout_ms",
+];
+
+#[cfg(feature = "avcodec-sdk")]
+const TRANSCODE_PARAMS: &[ParamField] = &[
+    ParamField {
+        name: "profile",
+        ty: ParamType::Str,
+        required: false,
+    },
+    ParamField {
+        name: "input_codec",
+        ty: ParamType::Enum(&["jpeg", "mjpeg", "h264", "h265", "hevc", "vp8", "vp9", "av1"]),
+        required: false,
+    },
+    ParamField {
+        name: "output_codec",
+        ty: ParamType::Enum(&["jpeg", "mjpeg", "h264", "h265", "hevc", "vp8", "vp9", "av1"]),
+        required: false,
+    },
+    ParamField {
+        name: "codec",
+        ty: ParamType::Enum(&["jpeg", "mjpeg", "h264", "h265", "hevc", "vp8", "vp9", "av1"]),
+        required: false,
+    },
+    ParamField {
+        name: "width",
+        ty: ParamType::Uint,
+        required: true,
+    },
+    ParamField {
+        name: "height",
+        ty: ParamType::Uint,
+        required: true,
+    },
+    ParamField {
+        name: "bitrate",
+        ty: ParamType::Uint,
+        required: false,
+    },
+    ParamField {
+        name: "time_base_num",
+        ty: ParamType::Uint,
+        required: false,
+    },
+    ParamField {
+        name: "time_base_den",
+        ty: ParamType::Uint,
+        required: false,
+    },
+    ParamField {
+        name: "allow_linked",
+        ty: ParamType::Bool,
+        required: false,
+    },
+    ParamField {
+        name: "drain_timeout_ms",
+        ty: ParamType::Uint,
+        required: false,
+    },
+];
+
 trait MediaCore: Send {
     fn can_accept_input(&self) -> bool {
         true
@@ -440,6 +534,33 @@ impl MediaCore for AvcodecResizeCore {
 
     fn submit(&mut self, frame: MediaFrame) -> dg_core::Result<()> {
         self.submit_image(frame)
+    }
+
+    fn submit_end_of_stream(&mut self) {
+        Self::submit_end_of_stream(self);
+    }
+
+    fn poll(&mut self) -> core::result::Result<MediaPoll, dg_core::Error> {
+        Self::poll(self)
+    }
+}
+
+#[cfg(feature = "avcodec-sdk")]
+impl MediaCore for AvcodecTranscodeCore {
+    fn can_accept_input(&self) -> bool {
+        self.can_accept_input()
+    }
+
+    fn has_in_flight(&self) -> bool {
+        self.has_in_flight()
+    }
+
+    fn is_flushing(&self) -> bool {
+        self.is_flushing()
+    }
+
+    fn submit(&mut self, frame: MediaFrame) -> dg_core::Result<()> {
+        self.submit_packet(frame)
     }
 
     fn submit_end_of_stream(&mut self) {
@@ -618,6 +739,114 @@ fn create_osd(node: &NodeSpec) -> Result<CreatedElement> {
     })
 }
 
+#[cfg(feature = "avcodec-sdk")]
+fn validate_transcode(node: &NodeSpec) -> Result<()> {
+    parse_transcode_config(node)?;
+    parse_drain_timeout(node)?;
+    Ok(())
+}
+
+#[cfg(feature = "avcodec-sdk")]
+fn create_transcode(node: &NodeSpec) -> Result<CreatedElement> {
+    let drain_timeout = parse_drain_timeout(node)?;
+    let core = AvcodecTranscodeCore::new(parse_transcode_config(node)?)?;
+    Ok(CreatedElement {
+        element: Box::new(MediaElement {
+            core,
+            drain_timeout,
+            sequence: 0,
+        }),
+        handle: ElementHandle::None,
+    })
+}
+
+#[cfg(feature = "avcodec-sdk")]
+fn parse_transcode_config(node: &NodeSpec) -> Result<TranscodeCoreConfig> {
+    let params = if node.params.is_null() {
+        &Map::new()
+    } else {
+        params_object(node)?
+    };
+    reject_unknown_fields(params, TRANSCODE_PARAM_FIELDS)?;
+    let profile = resolve_avcodec_profile(params, cfg!(feature = "avcodec"))?;
+    let output_codec_name = params
+        .get("output_codec")
+        .or_else(|| params.get("codec"))
+        .and_then(Value::as_str);
+    let output_codec = match output_codec_name {
+        Some(name) => Some(
+            crate::avcodec::codec_from_name(Some(name))
+                .map_err(|err| Error::Config(err.to_string()))?,
+        ),
+        None => Some(dg_media_avcodec::CodecId::H264),
+    };
+    let input_codec = match params.get("input_codec").and_then(Value::as_str) {
+        Some(name) => Some(
+            crate::avcodec::codec_from_name(Some(name))
+                .map_err(|err| Error::Config(err.to_string()))?,
+        ),
+        None => None,
+    };
+    let width = required_nonzero_u32(params, "width")?;
+    let height = required_nonzero_u32(params, "height")?;
+    let bitrate = read_u32(params, "bitrate")?;
+    if let Some(codec) = output_codec {
+        let needs_bitrate = matches!(
+            codec,
+            dg_media_avcodec::CodecId::H264
+                | dg_media_avcodec::CodecId::H265
+                | dg_media_avcodec::CodecId::Vp8
+                | dg_media_avcodec::CodecId::Vp9
+                | dg_media_avcodec::CodecId::Av1
+        );
+        if needs_bitrate {
+            match bitrate {
+                None => {
+                    return Err(Error::Config(format!(
+                        "transcode encoder bitrate is required for codec {codec:?}"
+                    )));
+                }
+                Some(0) => {
+                    return Err(Error::Config(format!(
+                        "transcode encoder bitrate must be non-zero for codec {codec:?}"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let allow_linked = params
+        .get("allow_linked")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Ok(TranscodeCoreConfig {
+        profile,
+        input_codec,
+        output_codec,
+        input_bitstream: parse_bitstream_format(params.get("input_bitstream_format"))?,
+        output_bitstream: parse_bitstream_format(
+            params
+                .get("output_bitstream_format")
+                .or_else(|| params.get("bitstream_format")),
+        )?,
+        width: Some(width),
+        height: Some(height),
+        bitrate,
+        time_base: read_time_base(params)?,
+        allow_linked,
+    })
+}
+
+#[cfg(feature = "avcodec-sdk")]
+fn required_nonzero_u32(params: &Map<String, Value>, field: &str) -> Result<u32> {
+    let value = read_u32(params, field)?
+        .ok_or_else(|| Error::Config(format!("field {field} is required")))?;
+    if value == 0 {
+        return Err(Error::Config(format!("field {field} must be non-zero")));
+    }
+    Ok(value)
+}
+
 fn validate_decode(node: &NodeSpec) -> Result<()> {
     #[cfg(feature = "avcodec-sdk")]
     {
@@ -764,6 +993,12 @@ fn resolve_avcodec_profile(
     params: &Map<String, Value>,
     legacy_avcodec_only: bool,
 ) -> Result<crate::profile::AvcodecProfile> {
+    if params.get("memory_domain").is_some() {
+        warn!(
+            "element param `memory_domain` is ignored under avcodec V3; I/O domains are owned by \
+             the selected profile (set profile=..., not memory_domain)"
+        );
+    }
     let profile_name = params.get("profile").and_then(Value::as_str);
     let hw_name = params.get("hw").and_then(Value::as_str);
     reject_profile_hw_conflict(profile_name, hw_name)
@@ -776,6 +1011,7 @@ fn resolve_avcodec_profile(
         if let Some(profile) = mapped {
             warn!(profile = %profile.name(), "{warning}");
             if profile.is_compiled() {
+                advertise_profile_support(profile);
                 return Ok(profile);
             }
             // Compatibility: when only native-free is built, `hw=auto` → software would
@@ -792,6 +1028,7 @@ fn resolve_avcodec_profile(
                         fallback = %compiled[0].name(),
                         "legacy hw mapped profile is not compiled; using sole compiled profile"
                     );
+                    advertise_profile_support(compiled[0]);
                     return Ok(compiled[0]);
                 }
             }
@@ -802,7 +1039,22 @@ fn resolve_avcodec_profile(
             )));
         }
     }
-    resolve_profile(profile_name, legacy_avcodec_only).map_err(|err| Error::Config(err.to_string()))
+    let profile = resolve_profile(profile_name, legacy_avcodec_only)
+        .map_err(|err| Error::Config(err.to_string()))?;
+    advertise_profile_support(profile);
+    Ok(profile)
+}
+
+#[cfg(feature = "avcodec-sdk")]
+fn advertise_profile_support(profile: AvcodecProfile) {
+    if matches!(profile.support_level(), ProfileSupportLevel::Unverified) {
+        warn!(
+            profile = %profile.name(),
+            support = profile.support_level().as_str(),
+            "avcodec profile is unverified on this dyun release (no production SLA); enable only for \
+             development / compile contract"
+        );
+    }
 }
 
 #[cfg(feature = "avcodec-sdk")]

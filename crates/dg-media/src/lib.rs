@@ -40,7 +40,9 @@ pub use avcodec::{
     ResizeCore as AvcodecResizeCore,
 };
 #[cfg(feature = "avcodec-sdk")]
-pub use diagnostics::{MediaSessionDiagnostics, MediaTranscoderDiagnostics};
+pub use diagnostics::{
+    MediaRuntimeDiagnostics, MediaSessionDiagnostics, MediaTranscoderDiagnostics,
+};
 #[cfg(feature = "avcodec-sdk")]
 pub use error_ctx::{media_error_with_context, MediaErrorContext, MediaOperation};
 pub use frame::{MediaFrame, MediaFrameKind, MediaFrameMeta};
@@ -56,7 +58,10 @@ pub use planner::{
     ZeroCopyPlanner, ZeroCopyRequest,
 };
 #[cfg(feature = "avcodec-sdk")]
-pub use profile::{compiled_profiles, reject_profile_hw_conflict, resolve_profile, AvcodecProfile};
+pub use profile::{
+    compiled_profiles, reject_profile_hw_conflict, resolve_profile, AvcodecProfile,
+    ProfileSupportLevel,
+};
 pub use stats::MediaSessionStats;
 pub use stream_metadata::{
     MediaStreamCodec, MediaStreamFormat, MediaStreamKind, MediaStreamMetadata, MediaStreamTimebase,
@@ -78,8 +83,9 @@ pub use bridge::{
 pub use bridge::{
     avcodec_external_handle_to_core, avcodec_handle_to_buffer, avcodec_image_to_media_frame,
     avcodec_memory_domain_to_core, avcodec_packet_to_media_frame,
-    avcodec_packet_to_media_frame_with_transfer, buffer_to_avcodec_handle,
-    core_external_handle_to_avcodec, core_memory_domain_to_avcodec, import_avcodec_handle,
-    media_frame_to_avcodec_image, media_frame_to_avcodec_image_with_transfer,
-    media_frame_to_avcodec_packet, media_frame_to_avcodec_packet_with_transfer, ImportedBuffer,
+    avcodec_packet_to_media_frame_with_transfer, buffer_into_avcodec_handle,
+    buffer_to_avcodec_handle, core_external_handle_to_avcodec, core_memory_domain_to_avcodec,
+    import_avcodec_handle, media_frame_to_avcodec_image,
+    media_frame_to_avcodec_image_with_transfer, media_frame_to_avcodec_packet,
+    media_frame_to_avcodec_packet_with_transfer, ImportedBuffer,
 };

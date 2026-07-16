@@ -27,9 +27,9 @@
 
 ### UP3-01 — `shiguredo_nvcodec 2026.2.0` 破坏 `avcodec-backend-nvcodec` 编译
 
-- 状态：Open / Worked-around in dyun
-- avcodec commit：`84a2832796717f46a1009ee064c914b0ad66ac19`
-- dyun commit：当前 PR（`Cargo.lock` 锁定 `shiguredo_nvcodec = 2026.1.0`）
+- 状态：Open / Worked-around in dyun（RC1 `7faba6fe` 仍 pin `shiguredo_nvcodec 2026.1.0`；上游 backend 仍调用 `query_caps`）
+- avcodec commit：`7faba6fe264aa5ae5bd2f1666084f4bc52aa7d0f`（此前 `84a28327`）
+- dyun commit：当前工作树（`Cargo.lock` 锁定 `shiguredo_nvcodec = 2026.1.0`）
 - 影响 Profile/role：`avcodec-profile-nvcodec-host`、`avcodec-profile-nvcodec-host-fallback`、`avcodec-profile-nvcodec-device-frame`
 - 期望行为：`cargo check -p dg-media --features avcodec-profile-nvcodec-host` 应通过
 - 实际行为：
@@ -59,9 +59,9 @@
 
 ### UP3-02 — `shiguredo_amf 2026.3.0` 破坏 `avcodec-codec-amf` 在 Linux 编译
 
-- 状态：Open / Worked-around in dyun
-- avcodec commit：`84a2832796717f46a1009ee064c914b0ad66ac19`
-- dyun commit：当前 PR（`Cargo.lock` 锁定 `shiguredo_amf = 2026.1.0`）
+- 状态：Open / Worked-around in dyun（RC1 `7faba6fe` 仍 pin `shiguredo_amf 2026.1.0`；`linux.rs` 常量类型未适配）
+- avcodec commit：`7faba6fe264aa5ae5bd2f1666084f4bc52aa7d0f`（此前 `84a28327`）
+- dyun commit：当前工作树（`Cargo.lock` 锁定 `shiguredo_amf = 2026.1.0`）
 - 影响 Profile/role：`avcodec-profile-amf-host`、`avcodec-profile-amf-host-fallback`
 - 期望行为：`cargo check -p dg-media --features avcodec-profile-amf-host` 应通过
 - 实际行为：

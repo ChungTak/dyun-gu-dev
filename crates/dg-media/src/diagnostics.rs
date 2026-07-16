@@ -2,7 +2,8 @@
 
 #[cfg(feature = "avcodec-sdk")]
 use dg_media_avcodec::{
-    OwnedVideoBuildReport, VideoTranscodeModeReport, VideoTranscoderBuildReport,
+    OwnedVideoBuildReport, VideoRuntimeDiagnostics, VideoTranscodeModeReport,
+    VideoTranscoderBuildReport,
 };
 
 /// Owned snapshot of a session build report for logging and CLI export.
@@ -83,6 +84,69 @@ impl From<&OwnedVideoBuildReport> for MediaSessionDiagnostics {
     }
 }
 
+/// Owned snapshot of SDK session runtime counters (plan 11 / SDK5-01).
+///
+/// Field semantics match upstream [`VideoRuntimeDiagnostics`]:
+/// - `submitted` — **successful** SDK submits only (not pump queue depth)
+/// - `again` / `pending` — non-terminal backpressure
+/// - `generation` — increments on successful `reset`
+///
+/// For pump-level queue vs backend-accept counts use [`crate::MediaSessionStats`]
+/// (`input_queued` / `backend_accepted` in [`MediaSessionStats::summary`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MediaRuntimeDiagnostics {
+    /// Successful SDK-level submits (not [`crate::MediaSessionStats::submitted`]).
+    pub submitted: u64,
+    pub output: u64,
+    pub again: u64,
+    pub pending: u64,
+    pub errors: u64,
+    pub flush_attempts: u64,
+    pub flush_successes: u64,
+    pub reset_attempts: u64,
+    pub reset_successes: u64,
+    pub generation: u64,
+}
+
+#[cfg(feature = "avcodec-sdk")]
+impl From<&VideoRuntimeDiagnostics> for MediaRuntimeDiagnostics {
+    fn from(d: &VideoRuntimeDiagnostics) -> Self {
+        Self {
+            submitted: d.submitted,
+            output: d.output,
+            again: d.again,
+            pending: d.pending,
+            errors: d.errors,
+            flush_attempts: d.flush_attempts,
+            flush_successes: d.flush_successes,
+            reset_attempts: d.reset_attempts,
+            reset_successes: d.reset_successes,
+            generation: d.generation,
+        }
+    }
+}
+
+impl MediaRuntimeDiagnostics {
+    /// Compact, field-stable string for logs (no handles / payload).
+    pub fn summary(&self) -> String {
+        format!(
+            "sdk_submitted={} output={} again={} pending={} errors={} \
+             flush_attempts={} flush_successes={} reset_attempts={} reset_successes={} \
+             generation={}",
+            self.submitted,
+            self.output,
+            self.again,
+            self.pending,
+            self.errors,
+            self.flush_attempts,
+            self.flush_successes,
+            self.reset_attempts,
+            self.reset_successes,
+            self.generation
+        )
+    }
+}
+
 /// Owned snapshot of a fusion transcoder build report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaTranscoderDiagnostics {
@@ -129,5 +193,27 @@ mod session_diagnostics_tests {
         assert_eq!(diag.decoder_backend.as_deref(), Some("jpeg"));
         assert_eq!(diag.image_processor_backend.as_deref(), Some("libyuv"));
         assert_eq!(diag.allow_staging, None);
+    }
+
+    #[test]
+    fn runtime_diagnostics_map_from_sdk_counters() {
+        use super::MediaRuntimeDiagnostics;
+        let sdk = dg_media_avcodec::VideoRuntimeDiagnostics {
+            submitted: 3,
+            output: 2,
+            again: 1,
+            pending: 4,
+            errors: 0,
+            flush_attempts: 1,
+            flush_successes: 1,
+            reset_attempts: 1,
+            reset_successes: 1,
+            generation: 1,
+        };
+        let diag = MediaRuntimeDiagnostics::from(&sdk);
+        assert_eq!(diag.submitted, 3);
+        assert_eq!(diag.generation, 1);
+        assert!(diag.summary().contains("sdk_submitted=3"));
+        assert!(diag.summary().contains("generation=1"));
     }
 }

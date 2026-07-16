@@ -276,7 +276,6 @@ impl<V> AsyncPump<V> {
         }
     }
 
-    #[allow(dead_code)] // contract for element hot-reset; covered by unit tests
     pub fn reset<B: BackendOps<BackendValue = V>>(&mut self, backend: &mut B) -> CoreResult<()> {
         self.pending_media_input = None;
         self.pending_backend_value = None;

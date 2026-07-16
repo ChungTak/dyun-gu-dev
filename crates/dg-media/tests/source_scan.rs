@@ -10,6 +10,7 @@ const FORBIDDEN: &[&str] = &[
     "create_encoder_with_trace",
     "BackendSelectionPolicy::Required",
     "BackendSelectionPolicy::Ordered",
+    "BackendSelectionPolicy",
     "AvcodecSessionBuilder",
     // Plan 03 source guard: no V2 assembly or legacy registry leaking allowed.
     "default_registry_builder",
@@ -20,6 +21,13 @@ const FORBIDDEN: &[&str] = &[
     "VideoIoMemoryPlan",
     "VideoTranscoderRequest",
     "leak_registry",
+    "with_registry",
+    "DecoderConfig",
+    "EncoderConfig",
+    "ImageProcessorConfig",
+    "dyn ImageProcessor",
+    "dyn Decoder",
+    "dyn Encoder",
 ];
 
 fn read_sources() -> String {
