@@ -3,9 +3,15 @@
 # when libclang is installed without a full clang package (bindgen needs
 # both libclang.so and C builtin headers).
 #
+# Software production sign-off (Plan 4 / UP4-002):
+# - RC2 (`20684324`) only accepted libavcodec major 60–62; major 58 failed capability.
+# - Local avcodec-rs fix (Unreleased) accepts major 58–62+; still needs runtime libx264
+#   for H.264 encode. Use workspace [patch] to ../avcodec-rs while validating.
+# Do not fall back to native-free or patch backends inside dyun.
+#
 # Usage:
 #   source scripts/env-software-avcodec.sh
-#   cargo test -p dg-media --features avcodec-profile-software
+#   cargo test -p dg-media --locked --features avcodec-profile-software
 #
 # Diagnostic output is printed so CI/runner logs can record the actual
 # libclang, libyuv and FFmpeg environment. This script does not modify files

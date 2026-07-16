@@ -136,11 +136,27 @@ fn media_elements_are_registered() {
     );
 }
 
+/// Prefer native-free when compiled; otherwise any single production profile under test.
+#[cfg(feature = "avcodec-sdk")]
+fn default_test_profile() -> &'static str {
+    if cfg!(feature = "avcodec-profile-native-free") {
+        "native-free"
+    } else if cfg!(feature = "avcodec-profile-software") {
+        "software"
+    } else if cfg!(feature = "avcodec-profile-nvcodec-host") {
+        "nvcodec-host"
+    } else if cfg!(feature = "avcodec-profile-nvcodec-device-frame") {
+        "nvcodec-device-frame"
+    } else {
+        "native-free"
+    }
+}
+
 #[allow(unused_mut)]
 fn with_profile(mut params: serde_json::Value) -> serde_json::Value {
     #[cfg(feature = "avcodec-sdk")]
     if let Some(map) = params.as_object_mut() {
-        map.insert("profile".to_string(), json!("native-free"));
+        map.insert("profile".to_string(), json!(default_test_profile()));
     }
     params
 }
@@ -241,7 +257,7 @@ fn avcodec_media_encode_creates_with_omitted_parameters() {
     let encode = node(
         "encode",
         "media_encode",
-        json!({ "profile": "native-free" }),
+        json!({ "profile": default_test_profile() }),
     );
     let spec = GraphSpecBuilder::new()
         .add_node(input)
@@ -271,7 +287,7 @@ fn profile_and_legacy_hw_conflict_is_rejected_at_load() {
             "decode",
             "media_decode",
             json!({
-                "profile": "native-free",
+                "profile": default_test_profile(),
                 "hw": "auto",
                 "codec": "jpeg"
             }),
@@ -293,7 +309,7 @@ fn encode_h264_requires_nonzero_bitrate_at_load() {
             "encode",
             "media_encode",
             json!({
-                "profile": "native-free",
+                "profile": default_test_profile(),
                 "codec": "h264"
             }),
         ))
@@ -308,7 +324,7 @@ fn encode_h264_requires_nonzero_bitrate_at_load() {
             "encode",
             "media_encode",
             json!({
-                "profile": "native-free",
+                "profile": default_test_profile(),
                 "codec": "h264",
                 "bitrate": 0
             }),
@@ -348,21 +364,30 @@ fn example_rkmpp_zero_copy_yaml_validates_but_session_is_gated() {
     let _ = Graph::new(spec);
 }
 
-#[cfg(all(feature = "avcodec-sdk", target_arch = "x86_64"))]
+#[cfg(all(
+    any(
+        feature = "avcodec-profile-native-free",
+        feature = "avcodec-profile-software"
+    ),
+    target_arch = "x86_64"
+))]
 #[test]
 fn avcodec_jpeg_round_trip_through_media_elements() {
+    // native-free: pure-Rust jpeg backend. software: profile allow-list includes
+    // jpeg after avcodec-rs Software multi-codec fix (ffmpeg still video-only).
+    let profile = default_test_profile();
     let spec = GraphSpecBuilder::new()
         .add_node(node("input", "input", json!({})))
         .add_node(node(
             "encode",
             "media_encode",
-            json!({ "profile": "native-free", "codec": "jpeg" }),
+            json!({ "profile": profile, "codec": "jpeg" }),
         ))
         .add_node(node(
             "decode",
             "media_decode",
             json!({
-                "profile": "native-free",
+                "profile": profile,
                 "width": 2,
                 "height": 2,
                 "channels": 3,

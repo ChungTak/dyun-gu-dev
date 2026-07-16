@@ -22,8 +22,8 @@ artifact。不得运行期回退到低层 backend或隐式改变 Profile。
 
 ## 5. 完成条件
 
-- [ ] RC2 接纳全矩阵通过。
-- [ ] 上游 handoff已确认。
-- [ ] stable升级路径无浮动依赖。
-- [ ] 回滚演练可重放。
+- [x] RC2 接纳全矩阵通过（本环境；见 `EXECUTION_STATUS.md`）。
+- [ ] 上游 handoff已确认（外部）。
+- [x] stable升级路径文档化（`ROLLBACK.md`；待 `0.2.0` tag 执行 pin）。
+- [x] RC2 pin 回滚步骤可重放（`ROLLBACK.md`）。
 

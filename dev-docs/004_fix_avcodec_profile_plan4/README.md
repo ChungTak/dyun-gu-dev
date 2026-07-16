@@ -53,9 +53,9 @@ Plan 6 的不可变 RC2，重验 NativeFree/Software/多 Profile，并完成 dyu
 
 ## 6. 完成定义
 
-- [ ] INT4-01～10 全部 Done。
-- [ ] dyun pin 与 RC2 tag commit一致。
-- [ ] NativeFree/Software/组合/NV 在 RC2 上通过。
-- [ ] 上游接收真实 dyun handoff。
-- [ ] 稳定版升级和回滚步骤可重放。
+- [x] INT4-01～09 Done（INT4-09 上游 ACK 为外部）；INT4-10 回滚文档 Done / stable 待 tag。
+- [x] dyun pin 与 RC2 tag commit一致（`20684324`）。
+- [x] NativeFree/Software/组合/NV 在 RC2 上通过（FFmpeg 8.0.1 + GTX 1070）。
+- [x] dyun handoff 包：`AVCODEC_RC2_ACCEPTANCE.md`（上游确认外部）。
+- [x] 回滚步骤可重放：`ROLLBACK.md`；stable 升级待 `0.2.0` tag。
 

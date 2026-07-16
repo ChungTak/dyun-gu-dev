@@ -13,12 +13,13 @@ owned by the selected Profile—do not set low-level backend ids or rely on `mem
 | --- | --- | --- | --- | --- |
 | [`raw-adapter.yaml`](raw-adapter.yaml) | `media` (default) | n/a | n/a | No avcodec SDK; raw payload relabel only |
 | [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | production | Pure Rust JPEG encode/decode |
-| [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | FFmpeg path when linked |
-| [`nvcodec-device-frame.yaml`](nvcodec-device-frame.yaml) | `media,avcodec-profile-nvcodec-device-frame` | `nvcodec-device-frame` | production* | *runtime needs CUDA; no resize |
+| [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | Needs FFmpeg 8.x / libavcodec ≥ 62 |
+| [`nvcodec-device-frame.yaml`](nvcodec-device-frame.yaml) | `media,avcodec-profile-nvcodec-device-frame` | `nvcodec-device-frame` | production* | CUDA runtime; no resize; `allow_staging=false` |
 | [`rkmpp-host-fallback.yaml`](rkmpp-host-fallback.yaml) | `media,avcodec-profile-rkmpp-host-fallback` | `rkmpp-host-fallback` | **unverified** | Compile/config only until signed |
 | [`rkmpp-zero-copy.yaml`](rkmpp-zero-copy.yaml) | `media,avcodec-profile-rkmpp-zero-copy` | `rkmpp-zero-copy` | **unverified** | Compile/config only until signed |
 
-\* NV Host/device-frame are on the production matrix but dyun CI only enforces compile-only without a GPU runner.
+\* NV Host/device-frame are production after RC2 hardware sign-off (`DYUN_NV_HW=1`). CPU CI only
+enforces compile-only; do not treat `avcodec-nvcodec-compile` as media passed.
 
 Legacy `avcodec` feature maps to the native-free compatibility profile. Prefer an
 explicit `avcodec-profile-*` feature and matching `profile` field. Do not set both

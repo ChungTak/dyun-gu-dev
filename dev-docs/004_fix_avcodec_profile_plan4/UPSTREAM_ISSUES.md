@@ -43,43 +43,27 @@
 - 临时处置：无。
 
 ### UP4-002 — Software profile H.264 encoder `CreateEncoder` 返回 `BackendHintCapabilityMismatch`
-- 状态：Open
-- SDK tag/commit：`0.2.0-rc.2` / `2068432426793c94cd5d415b56a4b2e9a3c1ee73`
-- dyun commit：`137b7b80896395cf8164e8c2172a345d9bc857fd` + pin update
+- 状态：Fixed candidate（本地 avcodec-rs 已提交，待 tag/dyun pin）
+- SDK tag/commit：基线 `0.2.0-rc.2` / `20684324`；修复 commit `f3c1c04`（local avcodec-rs main）
+- dyun：path pin `../../../avcodec-rs/crates/sdk/avcodec`（调试用）
 - Profile/role：`avcodec-profile-software` / encoder
-- 期望行为：在同一 build 同时启用 `avcodec-profile-native-free` 与 `avcodec-profile-software` 时，Software profile 的 `CreateEncoder(H264, 32x32, Yuv420p, 1/30, 1_000_000)` 成功。
-- 实际行为：encoder create 返回 `Classified { kind: SelectionFailed, detail: BackendHintCapabilityMismatch }`；将 FFmpeg 从 4.4.2 升级至 6.1 后仍然复现，排除 FFmpeg 版本因素。
-- 最小复现命令：
+- 期望行为：Software H.264 encoder create 成功；JPEG 亦可走 Software profile。
+- 根因：
+  1. `avcodec-codec-ffmpeg` 将 libavcodec major **仅 60–62** 标为支持；**58（FFmpeg 4.x）** 被标 `Unsupported`，`enc_h264=false` → capability 拒绝 → `BackendHintCapabilityMismatch`。
+  2. Software profile 编码器 allow-list **仅 `ffmpeg`**，而 ffmpeg backend **不实现 JPEG** create_*，Software JPEG 永远失败。
+- 上游修复（本地）：
+  1. `version_series_for_major`：支持 58/59（V4/V5），≥63 前向兼容 V8 策略。
+  2. `VideoProfile::Software`：`decoder/encoder = ["ffmpeg","jpeg"]`（Ordered）；`profile-software` feature 加入 `jpeg`。
+- 最小复现 / 重验：
   ```bash
-  # 1.94.1 toolchain, FFmpeg 6.1 (libavcodec 60.31.102)
-  source scripts/env-software-avcodec.sh
-  cargo test -p dg-media --locked \
-    --features avcodec-profile-native-free,avcodec-profile-software \
-    software_h264_encode_decode_preserves_timing_and_stream_index \
-    multi_profile_encoder_backends_do_not_cross_stack \
-    software_h264_transcode_stays_on_ffmpeg_stack
+  # avcodec-rs
+  source ../dyun-gu-dev/scripts/env-software-avcodec.sh
+  cargo test -p avcodec-codec-ffmpeg --lib version_series
+  cargo test -p avcodec --features profile-software --test v3_facade_contract
+
+  # dyun（path pin）
+  cargo test -p dg-media --features avcodec-profile-software --test media_pipeline
+  cargo test -p dg-media --features avcodec-profile-native-free,avcodec-profile-software software_h264
   ```
-- structured error/report/diagnostics：
-  ```
-  kind=video build failed profile=software role=encoder operation=CreateEncoder backend=ffmpeg
-  detail=video session build failed for role Encoder: WithContext {
-    error: Classified { kind: SelectionFailed, detail: BackendHintCapabilityMismatch },
-    context: AvErrorContext {
-      codec: Some(H264), source_format: Some(Yuv420p),
-      memory_domain: Some(Host), allow_staging: Some(true), profile_name: Some("software")
-    }
-  }
-  ```
-  上游 `VideoProfile::Software` 的 `ProfileMeta` 中 `encoder: &["ffmpeg"]`、`allow_staging: true`；`VideoProfileDescriptor::to_encoder_config` 按 `self.io.allow_staging` 注入 `EncoderConfig`，因此请求携带 `allow_staging=true` + `memory_domain=Host`。`avcodec-codec-ffmpeg` encoder 在后端选择阶段被 `BackendSelectionPolicy::Required("ffmpeg")` 命中，但 `supports(backend)` 能力模型拒绝，产生 `BackendHintCapabilityMismatch`。
-- toolchain/environment/device：
-  - `rustc 1.94.1` / `x86_64-unknown-linux-gnu`
-  - 已验证 FFmpeg 4.4.2 (`libavcodec 58.134.100`) 与 FFmpeg 6.1 (`libavcodec 60.31.102`) 行为一致
-  - `ffmpeg` / `libavcodec-dev` / `libavformat-dev` / `libavutil-dev` / `libswscale-dev` 6.1
-- 上游 fixture/test：上游 `crates/sdk/avcodec/src/video_sdk.rs` 等功能测试使用 `VideoProfile::NativeFree` 测试真实 encoder；未发现对 `VideoProfile::Software` encoder create 的真实媒体测试。
-- 修复 commit/新候选：待上游确认是 `VideoProfile::Software` 描述符问题（`allow_staging` / memory domain 与 `avcodec-codec-ffmpeg` encoder 能力不匹配）还是 `avcodec-codec-ffmpeg` encoder capability 声明过窄。
-- dyun 重验 artifact：
-  ```bash
-  cargo test -p dg-media --locked --features avcodec-profile-native-free,avcodec-profile-software
-  cargo test -p dg-media --locked --features avcodec-profile-software
-  ```
-- 临时处置：Software profile 不能标记为 production；不修改 dyun backend 绕过。NativeFree 路径保持生产可用。
+- 仍需：`libx264` 在运行时可用；否则 `enc_h264` 仍为 false（能力诚实失败，非版本门禁）。
+- 临时处置：修复进 avcodec-rs 后打 RC3/补丁 tag；dyun 再原子改 pin。

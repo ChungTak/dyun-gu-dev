@@ -1530,8 +1530,10 @@ mod tests {
         use super::ResizeCore;
         use crate::profile::AvcodecProfile;
 
-        let err = ResizeCore::new(AvcodecProfile::NvcodecDeviceFrame, 64, 64)
-            .expect_err("device-frame must reject processor");
+        let err = match ResizeCore::new(AvcodecProfile::NvcodecDeviceFrame, 64, 64) {
+            Ok(_) => panic!("device-frame must reject processor"),
+            Err(e) => e,
+        };
         let text = err.to_string();
         assert!(
             text.contains("nvcodec-device-frame")
@@ -1804,5 +1806,248 @@ mod tests {
             native_report.encoder_backend, software_report.encoder_backend,
             "profiles must not share selected encoder backends"
         );
+    }
+
+    /// Gated NV hardware matrix. Set `DYUN_NV_HW=1` on a GPU runner.
+    #[cfg(any(
+        feature = "avcodec-profile-nvcodec-host",
+        feature = "avcodec-profile-nvcodec-device-frame"
+    ))]
+    fn nv_hw_enabled() -> bool {
+        matches!(
+            std::env::var("DYUN_NV_HW").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
+    }
+
+    #[cfg(feature = "avcodec-profile-nvcodec-host")]
+    fn nv12_test_frame(width: u32, height: u32) -> crate::MediaFrame {
+        use dg_core::{
+            ImageMediaInfo, MediaInfo, MediaPlaneLayout, MediaRect, MediaTimeBase, MediaTiming,
+            PixelFormat, SampleLayout, SampleType,
+        };
+
+        use crate::{MediaFrame, MediaFrameKind};
+
+        let w = width as usize;
+        let h = height as usize;
+        let y_len = w * h;
+        let uv_len = w * (h / 2);
+        let mut bytes = vec![16u8; y_len];
+        bytes.extend(vec![128u8; uv_len]);
+        let planes = vec![
+            MediaPlaneLayout {
+                offset: 0,
+                stride: w,
+                len: y_len,
+            },
+            MediaPlaneLayout {
+                offset: y_len,
+                stride: w,
+                len: uv_len,
+            },
+        ];
+        let image_info = ImageMediaInfo {
+            pixel_format: PixelFormat::Nv12,
+            coded_width: width,
+            coded_height: height,
+            visible_rect: MediaRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            crop_rect: None,
+            color_primaries: dg_core::ColorPrimaries::Unknown,
+            color_transfer: dg_core::ColorTransfer::Unknown,
+            color_matrix: dg_core::ColorMatrix::Unknown,
+            color_range: dg_core::ColorRange::Unknown,
+            flags: dg_core::ImageFlags::default(),
+            sample_type: SampleType::Uint8,
+            sample_layout: SampleLayout::SemiPlanar,
+            planes,
+            fence_id: None,
+        };
+        let timing = MediaTiming {
+            pts: Some(42),
+            dts: Some(42),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+        };
+        let media_info = MediaInfo::image(image_info, timing, bytes.len()).expect("info");
+        let mut frame = MediaFrame::from_host_bytes(
+            MediaFrameKind::Image,
+            dg_core::DataType::U8,
+            dg_core::DataFormat::Auto,
+            vec![h, w],
+            dg_core::DeviceKind::Cpu,
+            bytes,
+        )
+        .expect("frame");
+        frame.meta.media_info = Some(Box::new(media_info));
+        frame.meta.pts = Some(42);
+        frame.meta.dts = Some(42);
+        frame
+    }
+
+    #[cfg(feature = "avcodec-profile-nvcodec-host")]
+    #[test]
+    fn nvcodec_host_h264_encode_decode_preserves_timing() {
+        if !nv_hw_enabled() {
+            eprintln!("skip nvcodec host media: set DYUN_NV_HW=1");
+            return;
+        }
+        use dg_core::{MediaPayloadInfo, MediaTimeBase};
+
+        use super::{DecodeCore, DecodeCoreConfig, EncodeCore, EncodeCoreConfig};
+        use crate::ops::MediaPoll;
+        use crate::profile::AvcodecProfile;
+
+        // NVENC property suite uses min 256 aligned dimensions.
+        let width = 256u32;
+        let height = 256u32;
+        let frame = nv12_test_frame(width, height);
+        let mut encoder = EncodeCore::new(EncodeCoreConfig {
+            profile: AvcodecProfile::NvcodecHost,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            bitrate: Some(2_000_000),
+            time_base: Some(MediaTimeBase::new(1, 30)),
+            memory_domain: None,
+        })
+        .expect("encode core");
+        encoder.submit_image(frame).expect("submit image");
+        encoder.submit_end_of_stream();
+
+        let mut packet_frame = None;
+        for _ in 0..256 {
+            match encoder.poll().expect("encode poll") {
+                MediaPoll::Ready(out) => {
+                    packet_frame = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let packet_frame = packet_frame.expect("encoded packet from nvcodec-host");
+
+        let diag = encoder
+            .session_diagnostics()
+            .expect("encoder report after open");
+        assert_eq!(diag.profile_name, "nvcodec-host");
+        assert!(
+            diag.encoder_backend
+                .as_ref()
+                .is_some_and(|b| b.contains("nvcodec") || b.contains("nvenc")),
+            "expected nvcodec encoder backend, got {:?}",
+            diag.encoder_backend
+        );
+
+        let mut decoder = DecodeCore::new(DecodeCoreConfig {
+            profile: AvcodecProfile::NvcodecHost,
+            codec: Some(CodecId::H264),
+            bitstream_format: Some(BitstreamFormat::H264AnnexB),
+            output_format: None,
+            memory_domain: None,
+            width: None,
+            height: None,
+            channels: None,
+        })
+        .expect("decode core");
+        decoder.submit_packet(packet_frame).expect("submit packet");
+        decoder.submit_end_of_stream();
+
+        let mut decoded = None;
+        for _ in 0..256 {
+            match decoder.poll().expect("decode poll") {
+                MediaPoll::Ready(out) => {
+                    decoded = Some(out);
+                    break;
+                }
+                MediaPoll::Pending => continue,
+                MediaPoll::EndOfStream => break,
+            }
+        }
+        let decoded = decoded.expect("decoded frame from nvcodec-host");
+        assert_eq!(decoded.meta.pts, Some(42));
+        match decoded.meta.media_info.as_ref().map(|i| &i.payload) {
+            Some(MediaPayloadInfo::Image(info)) => {
+                assert_eq!(info.coded_width, width);
+                assert_eq!(info.coded_height, height);
+            }
+            other => panic!("expected image media_info, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "avcodec-profile-nvcodec-host")]
+    #[test]
+    fn nvcodec_host_create_encoder_selects_nvcodec_backend() {
+        if !nv_hw_enabled() {
+            eprintln!("skip nvcodec host create: set DYUN_NV_HW=1");
+            return;
+        }
+        use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+
+        use crate::profile::AvcodecProfile;
+        use crate::session::AvcodecSdkService;
+
+        let service = AvcodecSdkService::new().expect("sdk");
+        let request = VideoEncoderRequest::new(
+            CodecId::H264,
+            256,
+            256,
+            ImageInfo::Nv12,
+            TimeBase::new(1, 30),
+            2_000_000,
+        )
+        .expect("request");
+        let (_session, report) = service
+            .create_encoder(AvcodecProfile::NvcodecHost, request)
+            .expect("nvcodec-host encoder");
+        assert_eq!(report.profile.to_string(), "nvcodec-host");
+        let backend = report.encoder_backend.map(str::to_string);
+        assert!(
+            backend
+                .as_ref()
+                .is_some_and(|b| b.contains("nvcodec") || b.contains("nvenc")),
+            "got {backend:?}"
+        );
+    }
+
+    #[cfg(feature = "avcodec-profile-nvcodec-device-frame")]
+    #[test]
+    fn nvcodec_device_frame_create_encoder_selects_nvcodec_backend() {
+        if !nv_hw_enabled() {
+            eprintln!("skip nvcodec device-frame create: set DYUN_NV_HW=1");
+            return;
+        }
+        use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
+
+        use crate::profile::AvcodecProfile;
+        use crate::session::AvcodecSdkService;
+
+        let service = AvcodecSdkService::new().expect("sdk");
+        let request = VideoEncoderRequest::new(
+            CodecId::H264,
+            256,
+            256,
+            ImageInfo::Nv12,
+            TimeBase::new(1, 30),
+            2_000_000,
+        )
+        .expect("request");
+        let (_session, report) = service
+            .create_encoder(AvcodecProfile::NvcodecDeviceFrame, request)
+            .expect("nvcodec-device-frame encoder");
+        assert_eq!(report.profile.to_string(), "nvcodec-device-frame");
+        let backend = report.encoder_backend.map(str::to_string);
+        assert!(
+            backend
+                .as_ref()
+                .is_some_and(|b| b.contains("nvcodec") || b.contains("nvenc")),
+            "got {backend:?}"
+        );
+        let allow_staging = report.io.as_ref().map(|io| io.allow_staging);
+        assert_eq!(allow_staging, Some(false));
     }
 }

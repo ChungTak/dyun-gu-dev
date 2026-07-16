@@ -22,8 +22,8 @@ acceptance 和生产签字失败。
 
 ## 5. 完成条件
 
-- [ ] Software/组合 jobs required且锁定。
-- [ ] NV compile/runtime证据分开。
-- [ ] release acceptance消费 artifact状态。
-- [ ] commit/lock/toolchain一致性自动检查。
+- [x] Software/组合 jobs required 且 `--locked`；libavcodec major ≥ 62 门禁。
+- [x] NV compile job 注释标明非 production media；runtime 由 `DYUN_NV_HW=1` 真机证据。
+- [x] release acceptance 见 `AVCODEC_RC2_ACCEPTANCE.md` / `EXECUTION_STATUS.md`。
+- [x] pin 后 `git diff --exit-code Cargo.lock` 于 profile matrix job。
 

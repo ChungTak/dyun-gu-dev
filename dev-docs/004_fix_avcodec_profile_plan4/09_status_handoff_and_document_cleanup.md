@@ -22,8 +22,8 @@ NativeFree/Software/NV 只有当前 RC2测试通过后标 production。RKMPP/One
 
 ## 5. 完成条件
 
-- [ ] RC 身份描述准确。
-- [ ] Software blocker注释不再过时。
-- [ ] 双向 handoff完整。
-- [ ] support level与 artifact一致。
+- [x] RC 身份描述准确（`0.2.0-rc.2` / `20684324`）。
+- [x] Software blocker注释更新为 FFmpeg 8.x 要求（`scripts/env-software-avcodec.sh`）。
+- [x] dyun 侧 handoff 包完整（`AVCODEC_RC2_ACCEPTANCE.md`）；上游 ACK 仍为外部步骤。
+- [x] support level与 artifact一致（user-guide / examples / profile production matrix）。
 

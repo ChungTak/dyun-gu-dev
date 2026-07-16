@@ -195,15 +195,15 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 真实 codec 需要选择一个 **`avcodec-profile-*` Cargo feature**，并在节点参数里写
 同名运行时 `profile`（例如 `native-free`、`software`、`rkmpp-host`）。
 
-| Cargo feature | 典型用途 |
-| --- | --- |
-| `avcodec-profile-native-free` | 纯 Rust JPEG + rust-h264 Host（推荐本地验证） |
-| `avcodec-profile-software` | FFmpeg/openh264 Host |
-| `avcodec-profile-rkmpp-host` / `-fallback` | Rockchip Host（fallback 才可回退软件） |
-| `avcodec-profile-rkmpp-zero-copy` | DrmPrime→RGA→DmaBuf 图像链（上游 Profile V2 门禁） |
-| `avcodec-profile-nvcodec-host` / `-fallback` | NV Host |
-| `avcodec-profile-nvcodec-device-frame` | CudaDevice NV12 device-frame（**不是**完整 CUDA 零拷贝） |
-| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | Intel/AMD Host |
+| Cargo feature | 支持级别 | 典型用途 |
+| --- | --- | --- |
+| `avcodec-profile-native-free` | production | 纯 Rust JPEG + rust-h264 Host（推荐本地验证） |
+| `avcodec-profile-software` | production | FFmpeg Host（需 **FFmpeg 8.x / libavcodec ≥ 62**） |
+| `avcodec-profile-nvcodec-host` / `-fallback` | production | NV Host（真机；CI 仅 compile-only） |
+| `avcodec-profile-nvcodec-device-frame` | production | CudaDevice NV12 device-frame（非完整 CUDA 零拷贝） |
+| `avcodec-profile-rkmpp-host` / `-fallback` | **unverified** | Rockchip Host（fallback 才可回退软件） |
+| `avcodec-profile-rkmpp-zero-copy` | **unverified** | DrmPrime→RGA→DmaBuf 图像链 |
+| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | **unverified** | Intel/AMD Host |
 
 规则摘要：
 

@@ -23,7 +23,7 @@ jobs:
         with:
           toolchain: 1.94.1
           components: clippy
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   deny:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
 
   avcodec-profile-matrix:
     runs-on: ubuntu-latest
@@ -66,6 +66,8 @@ jobs:
       - name: Install FFmpeg development packages
         if: matrix.install_ffmpeg
         run: |
+          # Software production sign-off requires FFmpeg 8.x / libavcodec 62+ (UP4-002).
+          # ubuntu-latest must provide that ABI; log version and fail early if below 62.
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
@@ -77,6 +79,15 @@ jobs:
             libswscale-dev \
             libswresample-dev
           echo "libavcodec=$(pkg-config --modversion libavcodec)"
+          python3 - <<'PY'
+          import subprocess, sys
+          ver = subprocess.check_output(["pkg-config", "--modversion", "libavcodec"], text=True).strip()
+          major = int(ver.split(".")[0])
+          print(f"libavcodec major={major} full={ver}")
+          if major < 62:
+              print("::error::Software profile needs libavcodec >= 62 (FFmpeg 8.x); got " + ver)
+              sys.exit(1)
+          PY
       - name: Prepare bindgen environment for software profiles
         if: matrix.install_ffmpeg
         run: |
@@ -88,15 +99,18 @@ jobs:
       - name: Check dg-media profile
         env:
           LIBYUV_TARGET: ubuntu-24.04_x86_64
-        run: cargo check -p dg-media --features ${{ matrix.profile }}
+        run: cargo check -p dg-media --locked --features ${{ matrix.profile }}
       - name: Test dg-media profile
         if: matrix.run_tests
         env:
           LIBYUV_TARGET: ubuntu-24.04_x86_64
-        run: cargo test -p dg-media --features ${{ matrix.profile }}
+        run: cargo test -p dg-media --locked --features ${{ matrix.profile }}
+      - name: Lockfile must not change
+        run: git diff --exit-code Cargo.lock
 
-  # NV Host/device-frame: compile-only contract (no GPU runner; lock pins shiguredo_nvcodec).
-  # Real media sign-off remains Partial until a hardware runner is available.
+  # NV Host/device-frame: CPU CI is compile-only only.
+  # Production media sign-off is local/GPU runner with DYUN_NV_HW=1 (see plan4 Phase 3).
+  # Do not treat this job as NV production passed.
   avcodec-nvcodec-compile:
     runs-on: ubuntu-latest
     strategy:
@@ -110,10 +124,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
-      - name: Compile-only check
+      - name: Compile-only check (not production media evidence)
         env:
           LIBYUV_TARGET: ubuntu-24.04_x86_64
-        run: cargo check -p dg-media --features ${{ matrix.profile }}
+        run: cargo check -p dg-media --locked --features ${{ matrix.profile }}
 
   openvino:
     runs-on: ubuntu-latest
