@@ -23,8 +23,8 @@ workspace `rust-version`、`rust-toolchain.toml`、CI 均冻结 1.94.1。clean r
 
 ## 5. 完成条件
 
-- [ ] 精确 1.94.1 clean runner通过。
-- [ ] Software 脚本无过时 blocker。
-- [ ] FFmpeg/NV 环境可重建。
-- [ ] 环境缺失与代码失败分类清楚。
+- [x] 精确 1.94.1 clean runner通过。
+- [x] Software 脚本无过时 blocker。
+- [x] FFmpeg/NV 环境可重建。
+- [x] 环境缺失与代码失败分类清楚。
 

@@ -32,8 +32,8 @@ cargo test -p dg-media --locked \
 
 ## 6. 完成条件
 
-- [ ] 软件真实媒体全部通过。
-- [ ] selected backend 与 Profile一致。
-- [ ] diagnostics/report/error 不丢上下文。
-- [ ] 状态机和 bridge 无回归。
+- [x] 软件真实媒体全部通过。
+- [x] selected backend 与 Profile一致。
+- [x] diagnostics/report/error 不丢上下文。
+- [x] 状态机和 bridge 无回归。
 

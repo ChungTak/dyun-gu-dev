@@ -23,8 +23,8 @@
 
 ## 5. 完成条件
 
-- [ ] source/dependency guard 在 RC2 上通过。
-- [ ] 没有旧新双路径。
-- [ ] API 变化仅来自上游 RC2 必要变更。
-- [ ] 普通业务代码不接触底层库。
+- [x] source/dependency guard 在 RC2 上通过。
+- [x] 没有旧新双路径。
+- [x] API 变化仅来自上游 RC2 必要变更。
+- [x] 普通业务代码不接触底层库。
 

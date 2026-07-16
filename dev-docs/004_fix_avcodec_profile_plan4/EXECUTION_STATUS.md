@@ -1,32 +1,26 @@
-# 004 执行状态记录
+# 004 执行状态 — **Plan 完成**
 
-## Baseline
+## 生产 pin
 
 | Field | Value |
 |---|---|
-| current SDK pin | `3f80f558e48ced6d3dc2c1e067307bfd12bec89d` |
-| SDK tag | `0.2.0-rc.3` (annotated; peels to pin SHA) |
-| prior RC2 | `0.2.0-rc.2` / `20684324…` |
-| toolchain | `rustc 1.94.1` / FFmpeg 8.0.1 / GTX 1070 |
+| SDK tag | **`0.2.0`** |
+| SDK commit | `dd3190008f2b544b51a74a9f4a225d52befc120a` |
+| crate version | `0.2.0` |
+| dyun pin commit | 见 git log `feat(plan4): pin avcodec to 0.2.0` |
+| toolchain | rustc 1.94.1 / FFmpeg 8 / GTX 1070 |
 
-## Requirement Status
+## INT4-01～10
 
-| ID | Status | Evidence |
-|---|---|---|
-| INT4-01 | Done | RC2 admitted; production pin RC3 |
-| INT4-02 | Done | manifest/lock/contract → `3f80f55` / `0.2.0-rc.3` |
-| INT4-03 | Done | 1.94.1；FFmpeg 8 |
-| INT4-04 | Done | source/dependency guard |
-| INT4-05 | Done | native-free + software on RC3 |
-| INT4-06 | Done | multi-profile isolation |
-| INT4-07 | Done | Host + device-frame media (`DYUN_NV_HW=1`) |
-| INT4-08 | Done | CudaDevice bridge zero-copy；Host encode reject |
-| INT4-09 | Done | CI locked；docs；UP4-002 Verified |
-| INT4-10 | Done | RC3 tag + pin + rollback docs；stable `0.2.0` 待 freeze |
+全部 **Done**（证据见 `AVCODEC_RC2_ACCEPTANCE.md`、本会话重验日志、CI）。
 
-## Final Blockers
+## 关键提交
 
-- [x] RC3 tag + dyun pin + matrix
-- [x] NV Host/device-frame 真机
-- [x] UP4-002 Verified
-- [ ] 上游 `0.2.0` stable（freeze 后；非 Plan4 阻塞）
+| 仓 | 关键 SHA / tag |
+|---|---|
+| avcodec-rs | tag `0.2.0` → `dd31900`；RC3 `3f80f55`；UP4-002 `f3c1c04` |
+| dyun-gu-dev | pin stable + device-frame bridge + NV gated tests |
+
+## 遗留（非阻塞）
+
+- RKMPP / OneVPL / AMF：`unverified`（首发范围外）

@@ -22,8 +22,8 @@ cross-domain reject/staging report、CudaDevice 无 Host dereference。
 
 ## 5. 完成条件
 
-- [ ] 所有权测试覆盖成功和错误路径。
-- [ ] unsafe 范围最小且有 invariant。
-- [ ] zero-copy 以 handle/domain/copy计数证明。
-- [ ] 业务层不接触 backend 私有 API。
+- [x] 所有权测试覆盖成功和错误路径。
+- [x] unsafe 范围最小且有 invariant。
+- [x] zero-copy 以 handle/domain/copy计数证明。
+- [x] 业务层不接触 backend 私有 API。
 
