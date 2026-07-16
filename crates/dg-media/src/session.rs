@@ -126,14 +126,6 @@ impl AvcodecSdkService {
     }
 }
 
-impl Default for AvcodecSdkService {
-    fn default() -> Self {
-        // Panic here mirrors the old factory default and is only used in contexts where the
-        // caller already assumes the SDK is present; normal construction should call `new()`.
-        Self::new().expect("AvcodecSdkService::new failed")
-    }
-}
-
 #[cfg(feature = "avcodec-sdk")]
 pub(crate) fn map_video_build_error(error: VideoBuildError) -> Error {
     use dg_media_avcodec::VideoRole;
