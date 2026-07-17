@@ -1,14 +1,17 @@
-use tracing::trace;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dg_core::{DataFormat, DataType, Shape, Tensor, TypeCode};
 use serde::Deserialize;
+use tracing::trace;
 
 use crate::{
     backend::{BackendDescriptor, BackendKind, InferBackend},
     capabilities::{supports_deployment, supports_device, supports_precision},
     error::{Error, Result},
+    metrics::BackendMetrics,
     option::{BackendConfig, BackendOptions, ModelSource, RuntimeOption},
-    RuntimeCapabilities, TensorInfo,
+    InferPoll, RuntimeCapabilities, RuntimeDeviceCapabilities, TensorInfo,
 };
 
 /// Mock backend options for CI and integration tests.
@@ -18,6 +21,9 @@ pub struct MockOptions {
     pub output_infos: Vec<TensorInfo>,
     pub echo_inputs: bool,
     pub fill_value: u8,
+    pub delay: Option<Duration>,
+    pub delays: Vec<Duration>,
+    pub max_in_flight: usize,
 }
 
 impl Default for MockOptions {
@@ -29,8 +35,18 @@ impl Default for MockOptions {
             output_infos: vec![info],
             echo_inputs: true,
             fill_value: 0,
+            delay: None,
+            delays: Vec::new(),
+            max_in_flight: 1,
         }
     }
+}
+
+/// One submitted inference that has not yet completed.
+struct DelayedInference {
+    sequence: u64,
+    finish: Instant,
+    inputs: Vec<Tensor>,
 }
 
 /// Pure Rust backend used in CI.
@@ -38,6 +54,8 @@ pub struct MockBackend {
     options: MockOptions,
     input_infos: Vec<TensorInfo>,
     output_infos: Vec<TensorInfo>,
+    pending: Vec<DelayedInference>,
+    metrics: Option<Arc<BackendMetrics>>,
 }
 
 impl MockBackend {
@@ -46,7 +64,37 @@ impl MockBackend {
             options: MockOptions::default(),
             input_infos: Vec::new(),
             output_infos: Vec::new(),
+            pending: Vec::new(),
+            metrics: None,
         }
+    }
+
+    fn produce_outputs(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>> {
+        if inputs.len() != self.input_infos.len() {
+            return Err(Error::InvalidOption(
+                "mock run input count must match configured inputs".to_string(),
+            ));
+        }
+
+        let device = dg_core::CpuDevice::new();
+        let mut outputs = Vec::with_capacity(self.output_infos.len());
+        for (index, output_info) in self.output_infos.iter().enumerate() {
+            let output = output_info.allocate(&device)?;
+            if self.options.echo_inputs && index < inputs.len() {
+                let bytes = inputs[index].buffer().read_bytes();
+                if bytes.len() != output.buffer().len() {
+                    return Err(Error::Backend(
+                        "mock backend echo output size mismatch".to_string(),
+                    ));
+                }
+                output.buffer().write_from_slice(&bytes)?;
+            } else {
+                let bytes = vec![self.options.fill_value; output.buffer().len()];
+                output.buffer().write_from_slice(&bytes)?;
+            }
+            outputs.push(output);
+        }
+        Ok(outputs)
     }
 }
 
@@ -131,31 +179,98 @@ impl InferBackend for MockBackend {
     }
 
     fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>> {
-        if inputs.len() != self.input_infos.len() {
-            return Err(Error::InvalidOption(
-                "mock run input count must match configured inputs".to_string(),
+        if self.is_async() {
+            self.submit(inputs, None, 0)?;
+            loop {
+                match self.poll()? {
+                    InferPoll::Ready { outputs, .. } => return Ok(outputs),
+                    InferPoll::Pending => {
+                        std::thread::sleep(self.options.delay.unwrap_or_default() / 10);
+                    }
+                    InferPoll::EndOfStream => {
+                        return Err(Error::Backend("unexpected end of stream".to_string()));
+                    }
+                }
+            }
+        } else {
+            self.produce_outputs(inputs)
+        }
+    }
+
+    fn is_async(&self) -> bool {
+        self.options.delay.is_some() || !self.options.delays.is_empty()
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.options.max_in_flight.clamp(1, 64)
+    }
+
+    fn in_flight(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn submit(
+        &mut self,
+        inputs: &[Tensor],
+        _stream: Option<&dyn dg_core::Stream>,
+        sequence: u64,
+    ) -> Result<()> {
+        if self.in_flight() >= self.max_in_flight() {
+            return Err(Error::Backend(
+                "mock backend in-flight limit reached".to_string(),
             ));
         }
+        let delay = if self.options.delays.is_empty() {
+            self.options.delay
+        } else {
+            Some(self.options.delays[self.pending.len() % self.options.delays.len()])
+        };
+        let Some(delay) = delay else {
+            return Err(Error::Backend(
+                "mock backend is not configured for async operation".to_string(),
+            ));
+        };
+        let finish = Instant::now() + delay;
+        self.pending.push(DelayedInference {
+            sequence,
+            finish,
+            inputs: inputs.to_vec(),
+        });
+        Ok(())
+    }
 
-        let device = dg_core::CpuDevice::new();
-        let mut outputs = Vec::with_capacity(self.output_infos.len());
-        for (index, output_info) in self.output_infos.iter().enumerate() {
-            let output = output_info.allocate(&device)?;
-            if self.options.echo_inputs && index < inputs.len() {
-                let bytes = inputs[index].buffer().read_bytes();
-                if bytes.len() != output.buffer().len() {
-                    return Err(Error::Backend(
-                        "mock backend echo output size mismatch".to_string(),
-                    ));
-                }
-                output.buffer().write_from_slice(&bytes)?;
-            } else {
-                let bytes = vec![self.options.fill_value; output.buffer().len()];
-                output.buffer().write_from_slice(&bytes)?;
+    fn poll(&mut self) -> Result<InferPoll> {
+        let now = Instant::now();
+        let mut ready: Option<(usize, Instant)> = None;
+        for (index, pending) in self.pending.iter().enumerate() {
+            if pending.finish <= now
+                && ready
+                    .as_ref()
+                    .is_none_or(|(_, finish)| pending.finish < *finish)
+            {
+                ready = Some((index, pending.finish));
             }
-            outputs.push(output);
         }
-        Ok(outputs)
+        if let Some((index, _)) = ready {
+            let pending = self.pending.remove(index);
+            let outputs = self.produce_outputs(&pending.inputs)?;
+            if let Some(metrics) = &self.metrics {
+                metrics.finish_in_flight();
+            }
+            return Ok(InferPoll::Ready {
+                outputs,
+                sequence: pending.sequence,
+            });
+        }
+        Ok(InferPoll::Pending)
+    }
+
+    fn cancel(&mut self) {
+        self.pending.clear();
+    }
+
+    fn attach_metrics(&mut self, metrics: Arc<BackendMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
@@ -165,6 +280,15 @@ impl InferBackend for MockBackend {
             device_count: 1,
             precisions: vec![DataType::F32],
             deploy_modes: vec![dg_core::DeployMode::Host],
+            device_records: vec![RuntimeDeviceCapabilities {
+                kind: dg_core::DeviceKind::Cpu,
+                logical_id: "mock-0".to_string(),
+                runtime_name: "mock".to_string(),
+                async_capable: self.is_async(),
+                external_memory: false,
+                remote_tensor: false,
+                verified_precisions: vec![DataType::F32],
+            }],
         })
     }
 }
@@ -183,6 +307,9 @@ struct MockConfig {
     layout: Option<String>,
     echo_inputs: Option<bool>,
     fill_value: Option<u8>,
+    delay_ms: Option<u64>,
+    delays_ms: Option<Vec<u64>>,
+    max_in_flight: Option<usize>,
 }
 
 fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
@@ -212,6 +339,14 @@ fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
         output_infos: vec![TensorInfo::new(output_shape, output_dtype).with_layout(layout)],
         echo_inputs: params.echo_inputs.unwrap_or(true),
         fill_value: params.fill_value.unwrap_or(0),
+        delay: params.delay_ms.map(Duration::from_millis),
+        delays: params
+            .delays_ms
+            .unwrap_or_default()
+            .into_iter()
+            .map(Duration::from_millis)
+            .collect(),
+        max_in_flight: params.max_in_flight.unwrap_or(1).clamp(1, 64),
     });
     Ok(config.into_runtime_option(BackendKind::Mock, ModelSource::Bytes(Vec::new()), options))
 }

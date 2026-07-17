@@ -1,12 +1,17 @@
+use std::sync::Arc;
+
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
-    Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
+    BackendMetrics, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 
 /// Result of polling a submitted inference.
 #[derive(Debug)]
 pub enum InferPoll {
-    Ready(Vec<dg_core::Tensor>),
+    Ready {
+        outputs: Vec<dg_core::Tensor>,
+        sequence: u64,
+    },
     Pending,
     EndOfStream,
 }
@@ -38,11 +43,12 @@ fn validate_probed_capabilities(
 ) -> Result<()> {
     let sdk_version = capabilities.sdk_version.as_deref().unwrap_or("unknown");
     let context = format!(
-        "backend={backend:?}, sdk_version={sdk_version}, device_count={}, available_devices={:?}, available_precisions={:?}, available_deploy_modes={:?}",
+        "backend={backend:?}, sdk_version={sdk_version}, device_count={}, available_devices={:?}, available_precisions={:?}, available_deploy_modes={:?}, device_records={:?}",
         capabilities.device_count,
         capabilities.devices,
         capabilities.precisions,
-        capabilities.deploy_modes
+        capabilities.deploy_modes,
+        capabilities.device_records
     );
     if let Some(precision) = option.precision {
         if !capabilities.supports_precision(precision) {
@@ -101,24 +107,36 @@ fn describe_precision(precision: dg_core::DataType) -> String {
 pub struct Runtime {
     backend: Box<dyn crate::InferBackend>,
     capabilities: RuntimeCapabilities,
-    in_flight: Option<Vec<dg_core::Tensor>>,
+    next_sequence: u64,
+    sync_result: Option<(u64, Vec<dg_core::Tensor>)>,
+    metrics: Arc<BackendMetrics>,
+    max_in_flight: usize,
 }
 
 impl Runtime {
     pub fn new(option: RuntimeOption) -> Result<Self> {
         validate_runtime_option(&option)?;
         let mut backend = create_backend(option.backend)?;
+        let metrics = Arc::new(BackendMetrics::default());
+        backend.attach_metrics(Arc::clone(&metrics));
         backend.init(&option)?;
         let capabilities = backend.probe_capabilities()?;
         validate_probed_capabilities(option.backend, &option, &capabilities)?;
+        let max_in_flight = backend.max_in_flight().max(1);
         Ok(Self {
             backend,
             capabilities,
-            in_flight: None,
+            next_sequence: 0,
+            sync_result: None,
+            metrics,
+            max_in_flight,
         })
     }
 
-    pub fn from_backend(backend: Box<dyn crate::InferBackend>) -> Self {
+    pub fn from_backend(mut backend: Box<dyn crate::InferBackend>) -> Self {
+        let metrics = Arc::new(BackendMetrics::default());
+        backend.attach_metrics(Arc::clone(&metrics));
+        let max_in_flight = backend.max_in_flight().max(1);
         Self {
             backend,
             capabilities: RuntimeCapabilities {
@@ -127,8 +145,12 @@ impl Runtime {
                 device_count: 0,
                 precisions: Vec::new(),
                 deploy_modes: Vec::new(),
+                device_records: Vec::new(),
             },
-            in_flight: None,
+            next_sequence: 0,
+            sync_result: None,
+            metrics,
+            max_in_flight,
         }
     }
 
@@ -165,29 +187,102 @@ impl Runtime {
         self.backend.run(inputs)
     }
 
-    /// Submit one inference and buffer its result for [`Runtime::poll`].
+    pub fn run_with_stream(
+        &mut self,
+        inputs: &[dg_core::Tensor],
+        stream: Option<&dyn dg_core::Stream>,
+    ) -> Result<Vec<dg_core::Tensor>> {
+        self.backend.run_with_stream(inputs, stream)
+    }
+
+    /// Returns the live metrics owned by this runtime (and usually shared with
+    /// the backend).
+    pub fn metrics(&self) -> &BackendMetrics {
+        &self.metrics
+    }
+
+    /// Returns the shared metrics handle so callers can attach it to graph
+    /// element metrics.
+    pub fn metrics_arc(&self) -> &Arc<BackendMetrics> {
+        &self.metrics
+    }
+
+    /// Current number of in-flight submissions.
+    pub fn in_flight(&self) -> usize {
+        self.metrics.in_flight() as usize
+    }
+
+    /// Maximum number of in-flight submissions this runtime allows.
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight
+    }
+
+    /// Returns true when the wrapped backend is truly asynchronous.
+    pub fn is_async(&self) -> bool {
+        self.backend.is_async()
+    }
+
+    /// Submit one inference without blocking for its result.
     ///
-    /// Only one submission may be in flight at a time. Call `poll` to consume
-    /// the buffered result before submitting another inference.
+    /// Returns a sequence number that will be echoed by [`Runtime::poll`] so
+    /// that out-of-order completion preserves per-submission metadata.
     pub fn submit(
         &mut self,
         inputs: &[dg_core::Tensor],
         stream: Option<&dyn dg_core::Stream>,
-    ) -> Result<()> {
-        if self.in_flight.is_some() {
+    ) -> Result<u64> {
+        if self.in_flight() >= self.max_in_flight() {
             return Err(Error::Backend(
-                "inference submission already in flight".to_string(),
+                "inference in-flight limit reached".to_string(),
             ));
         }
-        self.in_flight = Some(self.backend.run_with_stream(inputs, stream)?);
-        Ok(())
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        if self.backend.is_async() {
+            self.backend.submit(inputs, stream, sequence)?;
+        } else {
+            let outputs = self.backend.run_with_stream(inputs, stream)?;
+            self.sync_result = Some((sequence, outputs));
+        }
+        self.metrics.record_submission();
+        Ok(sequence)
     }
 
     pub fn poll(&mut self) -> Result<InferPoll> {
-        Ok(self
-            .in_flight
-            .take()
-            .map_or(InferPoll::Pending, InferPoll::Ready))
+        if self.backend.is_async() {
+            match self.backend.poll() {
+                Ok(InferPoll::Pending) => {
+                    self.metrics.record_poll_pending();
+                    Ok(InferPoll::Pending)
+                }
+                Ok(InferPoll::Ready { outputs, sequence }) => {
+                    self.metrics.finish_in_flight();
+                    Ok(InferPoll::Ready { outputs, sequence })
+                }
+                Ok(InferPoll::EndOfStream) => Ok(InferPoll::EndOfStream),
+                Err(err) => {
+                    self.metrics.finish_in_flight();
+                    self.metrics.record_backend_error();
+                    Err(err)
+                }
+            }
+        } else if let Some((sequence, outputs)) = self.sync_result.take() {
+            self.metrics.finish_in_flight();
+            Ok(InferPoll::Ready { outputs, sequence })
+        } else {
+            Ok(InferPoll::Pending)
+        }
+    }
+
+    pub fn cancel(&mut self) -> Result<()> {
+        if self.backend.is_async() {
+            let cleared = self.backend.in_flight();
+            self.backend.cancel();
+            for _ in 0..cleared {
+                self.metrics.finish_in_flight();
+            }
+        }
+        Ok(())
     }
 
     pub fn backend_mut(&mut self) -> &mut dyn crate::InferBackend {

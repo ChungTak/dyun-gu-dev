@@ -3,7 +3,7 @@
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
 use dg_runtime::{
@@ -219,6 +219,100 @@ fn run_openvino_regression_model(model_path: PathBuf) {
     assert!(report.minimum_cosine_similarity >= 0.999999);
 }
 
+fn run_openvino_cpu_async_inflight(model_path: &Path, max_in_flight: usize) {
+    let option = RuntimeOption::new(
+        BackendKind::OpenVINO,
+        ModelSource::File(model_path.to_path_buf()),
+        BackendOptions::OpenVINO(OpenVINOOptions {
+            device: "CPU".to_string(),
+            max_in_flight,
+        }),
+    )
+    .with_precision(DataType::F32)
+    .with_device(DeviceKind::Cpu);
+
+    let mut runtime = Runtime::new(option).unwrap_or_else(|err| {
+        panic!("construct OpenVINO runtime for in-flight {max_in_flight}: {err}")
+    });
+    assert!(runtime.is_async(), "OpenVINO backend should be async");
+
+    let device = dg_core::CpuDevice::new();
+    let input_values: Vec<[f32; 4]> = (0..8)
+        .map(|index| {
+            [
+                index as f32,
+                index as f32 + 0.25,
+                index as f32 + 0.5,
+                index as f32 + 0.75,
+            ]
+        })
+        .collect();
+
+    let start = Instant::now();
+    let mut sequences = Vec::new();
+    for value in &input_values {
+        let input_desc = TensorDesc::new(
+            Shape::new([1, 4]),
+            DataType::F32,
+            DataFormat::NC,
+            DeviceKind::Cpu,
+        )
+        .with_name("input");
+        let input = Tensor::allocate(&device, input_desc).expect("allocate input");
+        input
+            .buffer()
+            .write_from_slice(&f32_bytes(value))
+            .expect("seed input");
+        let sequence = runtime
+            .submit(std::slice::from_ref(&input), None)
+            .expect("submit should succeed");
+        sequences.push(sequence);
+        assert!(runtime.in_flight() <= max_in_flight);
+    }
+
+    let mut received = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while received < sequences.len() as u64 && Instant::now() < deadline {
+        if let dg_runtime::InferPoll::Ready { outputs, sequence } = runtime.poll().expect("poll") {
+            let index = sequences
+                .iter()
+                .position(|s| *s == sequence)
+                .expect("unknown sequence");
+            assert_eq!(
+                outputs[0].buffer().read_bytes(),
+                f32_bytes(&input_values[index])
+            );
+            received += 1;
+        }
+    }
+    assert_eq!(
+        received,
+        sequences.len() as u64,
+        "all submissions should complete"
+    );
+    let elapsed = start.elapsed();
+
+    let snapshot = runtime.metrics().snapshot();
+    assert_eq!(snapshot.submissions, 8);
+    assert_eq!(snapshot.in_flight, 0);
+    assert_eq!(snapshot.backend_errors, 0);
+    assert!(
+        snapshot.host_copy_bytes > 0,
+        "host tensor copies should be recorded"
+    );
+    assert_eq!(snapshot.infer_latencies.count, 8);
+
+    let throughput = 8.0 / elapsed.as_secs_f64();
+    println!(
+        "OpenVINO CPU max_in_flight={max_in_flight}: elapsed={elapsed:?}, throughput={throughput:.2} inf/s, \
+         host_copy_bytes={}, p50={}us, p95={}us, p99={}us",
+        snapshot.host_copy_bytes,
+        snapshot.infer_latencies.p50_ns / 1000,
+        snapshot.infer_latencies.p95_ns / 1000,
+        snapshot.infer_latencies.p99_ns / 1000,
+    );
+}
+
 #[test]
 #[ignore]
 fn openvino_identity_model_runs_end_to_end() {
@@ -338,5 +432,49 @@ fn openvino_cpu_regression_runs_through_test01_harness() {
     assert!(
         status.success(),
         "child OpenVINO regression test should succeed"
+    );
+}
+
+#[test]
+#[ignore]
+fn openvino_cpu_async_inflight_1_2_4_records_baseline_metrics() {
+    if std::env::var_os("DG_OPENVINO_E2E_CHILD").is_some() {
+        let model_path = std::env::var_os("DG_OPENVINO_E2E_MODEL_PATH")
+            .map(PathBuf::from)
+            .expect("model path should be provided");
+        for max_in_flight in [1usize, 2, 4] {
+            run_openvino_cpu_async_inflight(&model_path, max_in_flight);
+        }
+        return;
+    }
+
+    let temp_dir = unique_temp_dir();
+    std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+    let loader_dir = prepare_loader_dir(&temp_dir);
+    let lib_dir = openvino_lib_dir();
+    let model_path = create_identity_model(&temp_dir);
+
+    let current_exe = std::env::current_exe().expect("locate current test binary");
+    let current_ld_library_path = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let ld_library_path = format!(
+        "{}:{}:{}",
+        loader_dir.display(),
+        lib_dir.display(),
+        current_ld_library_path
+    );
+
+    let status = Command::new(current_exe)
+        .arg("--exact")
+        .arg("openvino_cpu_async_inflight_1_2_4_records_baseline_metrics")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("DG_OPENVINO_E2E_CHILD", "1")
+        .env("DG_OPENVINO_E2E_MODEL_PATH", &model_path)
+        .env("LD_LIBRARY_PATH", ld_library_path)
+        .status()
+        .expect("spawn OpenVINO child test process");
+    assert!(
+        status.success(),
+        "child OpenVINO in-flight baseline test should succeed"
     );
 }

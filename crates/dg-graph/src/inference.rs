@@ -1,21 +1,22 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::thread;
 
 use dg_core::{DataType, DeployMode, DeviceKind, Shape, TypeCode};
 use dg_runtime::{
-    configure_backend, validate_runtime_option, BackendConfig, CoreSelection, Runtime,
+    configure_backend, validate_runtime_option, BackendConfig, CoreSelection, InferPoll, Runtime,
     RuntimeOption,
 };
 use dg_scheduler::{
-    InstancePool, Lease, Placement, Request, Scheduler, SchedulingPolicy, Topology,
+    InstancePool, Lease, Placement, PooledLease, Request, Scheduler, SchedulingPolicy, Topology,
 };
 use serde::Deserialize;
-use serde_json::Value;
-use tracing::trace;
+use serde_json::{Map, Value};
+use tracing::{trace, warn};
 
 use crate::{
     CreatedElement, Element, ElementDescriptor, ElementHandle, ElementIo, Error, NodeSpec,
-    ParamField, ParamType, PortSchema, Result,
+    PacketMeta, ParamField, ParamType, PortSchema, Result,
 };
 
 const INPUT_PORT: PortSchema = PortSchema {
@@ -112,64 +113,198 @@ inventory::submit! {
 enum InferenceExecution {
     Single {
         runtime: Runtime,
-        _lease: Option<Lease>,
+        #[allow(dead_code)]
+        lease: Option<Lease>,
     },
     Pool {
         runtimes: Vec<Runtime>,
         pool: InstancePool,
         policy: SchedulingPolicy,
+        poll_cursor: usize,
     },
+}
+
+/// One inference that has been submitted but not yet emitted downstream.
+struct PendingInference {
+    runtime_index: usize,
+    sequence: u64,
+    meta: PacketMeta,
+    #[allow(dead_code)]
+    pool_lease: Option<PooledLease>,
 }
 
 struct InferenceElement {
     execution: InferenceExecution,
+    pending: Vec<PendingInference>,
+}
+
+impl InferenceExecution {
+    fn has_capacity(&self) -> bool {
+        match self {
+            InferenceExecution::Single { runtime, .. } => {
+                runtime.in_flight() < runtime.max_in_flight()
+            }
+            InferenceExecution::Pool { runtimes, .. } => {
+                runtimes.iter().any(|r| r.in_flight() < r.max_in_flight())
+            }
+        }
+    }
+
+    fn submit(
+        &mut self,
+        input: dg_core::Tensor,
+        stream_id: Option<&str>,
+    ) -> Result<(usize, u64, Option<PooledLease>)> {
+        match self {
+            InferenceExecution::Single { runtime, .. } => {
+                let sequence = runtime.submit(&[input], None)?;
+                Ok((0, sequence, None))
+            }
+            InferenceExecution::Pool {
+                runtimes,
+                pool,
+                policy,
+                ..
+            } => {
+                let checkout = pool.checkout(*policy, stream_id).map_err(|error| {
+                    Error::Runtime(format!("inference pool checkout failed: {error}"))
+                })?;
+                let runtime_index = checkout.instance_index();
+                let runtime = runtimes
+                    .get_mut(runtime_index)
+                    .ok_or_else(|| Error::Runtime("invalid pool instance index".to_string()))?;
+                let sequence = runtime.submit(&[input], None)?;
+                Ok((runtime_index, sequence, Some(checkout)))
+            }
+        }
+    }
+
+    fn poll_ready(&mut self) -> Result<Option<(usize, u64, Vec<dg_core::Tensor>)>> {
+        match self {
+            InferenceExecution::Single { runtime, .. } => match runtime.poll()? {
+                InferPoll::Ready { outputs, sequence } => Ok(Some((0, sequence, outputs))),
+                InferPoll::Pending | InferPoll::EndOfStream => Ok(None),
+            },
+            InferenceExecution::Pool {
+                runtimes,
+                poll_cursor,
+                ..
+            } => {
+                if runtimes.is_empty() {
+                    return Ok(None);
+                }
+                for _ in 0..runtimes.len() {
+                    let index = *poll_cursor % runtimes.len();
+                    *poll_cursor = (*poll_cursor + 1) % runtimes.len().max(1);
+                    match runtimes[index].poll()? {
+                        InferPoll::Ready { outputs, sequence } => {
+                            return Ok(Some((index, sequence, outputs)));
+                        }
+                        InferPoll::Pending | InferPoll::EndOfStream => continue,
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        match self {
+            InferenceExecution::Single { runtime, .. } => {
+                let _ = runtime.cancel();
+            }
+            InferenceExecution::Pool { runtimes, .. } => {
+                for runtime in runtimes {
+                    let _ = runtime.cancel();
+                }
+            }
+        }
+    }
 }
 
 impl Element for InferenceElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> Result<()> {
         trace!(node = %io.name, "running inference element");
-        loop {
-            let packet = match io.recv("in") {
-                Ok(Some(packet)) => packet,
-                Ok(None) => {
-                    if io.should_stop() {
-                        return Err(Error::NotRunning);
-                    }
-                    continue;
+
+        match &self.execution {
+            InferenceExecution::Single { runtime, .. } => {
+                io.metrics
+                    .attach_backend_metrics(Arc::clone(runtime.metrics_arc()));
+            }
+            InferenceExecution::Pool { runtimes, .. } => {
+                if let Some(runtime) = runtimes.first() {
+                    io.metrics
+                        .attach_backend_metrics(Arc::clone(runtime.metrics_arc()));
                 }
-                Err(err) => return Err(err),
-            };
-            if packet.is_eos() {
+            }
+        }
+
+        let mut eos = false;
+        loop {
+            // Drain completed outputs before accepting more input.
+            if let Some((runtime_index, sequence, outputs)) = self.execution.poll_ready()? {
+                let Some(index) = self.pending.iter().position(|pending| {
+                    pending.runtime_index == runtime_index && pending.sequence == sequence
+                }) else {
+                    return Err(Error::Runtime(format!(
+                        "inference returned unknown sequence {sequence} from runtime {runtime_index}"
+                    )));
+                };
+                let pending = self.pending.remove(index);
+                for output in outputs {
+                    let packet = crate::Packet::tensor(output).with_meta(pending.meta.clone());
+                    io.send("out", packet)?;
+                }
+                continue;
+            }
+
+            if eos && self.pending.is_empty() {
                 io.broadcast_eos()?;
                 return Ok(());
             }
 
-            let input = packet
-                .tensor_ref()
-                .ok_or_else(|| Error::Runtime("inference expects a tensor payload".to_string()))?
-                .clone();
-            let meta = packet.meta.clone();
-            let affinity_key = packet.meta.stream_id.as_deref();
-            let outputs = match &mut self.execution {
-                InferenceExecution::Single { runtime, .. } => runtime.run(&[input])?,
-                InferenceExecution::Pool {
-                    runtimes,
-                    pool,
-                    policy,
-                } => {
-                    let checkout = pool.checkout(*policy, affinity_key).map_err(|error| {
-                        Error::Runtime(format!(
-                            "inference pool checkout failed for node {}: {error}",
-                            io.name
-                        ))
-                    })?;
-                    runtimes[checkout.instance_index()].run(&[input])?
+            if eos || !self.execution.has_capacity() {
+                // Either done with input or the backend request pool is full.
+                // Keep polling without consuming more upstream data so bounded
+                // DataPipes exert backpressure.
+                thread::yield_now();
+                continue;
+            }
+
+            match io.recv("in")? {
+                Some(packet) if packet.is_eos() => {
+                    eos = true;
                 }
-            };
-            for output in outputs {
-                io.send("out", crate::Packet::tensor(output).with_meta(meta.clone()))?;
+                Some(packet) => {
+                    let input = packet
+                        .tensor_ref()
+                        .ok_or_else(|| {
+                            Error::Runtime("inference expects a tensor payload".to_string())
+                        })?
+                        .clone();
+                    let meta = packet.meta;
+                    let stream_id = meta.stream_id.as_deref();
+                    let (runtime_index, sequence, pool_lease) =
+                        self.execution.submit(input, stream_id)?;
+                    self.pending.push(PendingInference {
+                        runtime_index,
+                        sequence,
+                        meta,
+                        pool_lease,
+                    });
+                }
+                None => {
+                    // No input available yet; let other elements run.
+                    thread::yield_now();
+                }
             }
         }
+    }
+}
+
+impl Drop for InferenceElement {
+    fn drop(&mut self) {
+        self.execution.cancel();
     }
 }
 
@@ -194,16 +329,16 @@ fn create_inference_inner(value: Value) -> Result<CreatedElement> {
         if let Some(ref shape) = plan.reshape {
             runtime.reshape(std::slice::from_ref(shape))?;
         }
-        InferenceExecution::Single {
-            runtime,
-            _lease: lease,
-        }
+        InferenceExecution::Single { runtime, lease }
     } else {
         create_inference_pool(plan)?
     };
 
     Ok(CreatedElement {
-        element: Box::new(InferenceElement { execution }),
+        element: Box::new(InferenceElement {
+            execution,
+            pending: Vec::new(),
+        }),
         handle: ElementHandle::None,
     })
 }
@@ -248,6 +383,7 @@ fn create_inference_pool(plan: InferencePlan) -> Result<InferenceExecution> {
         runtimes,
         pool,
         policy: plan.policy,
+        poll_cursor: 0,
     })
 }
 
@@ -346,12 +482,49 @@ struct InferencePlan {
 fn prepare_inference(value: Value) -> Result<InferencePlan> {
     let params: InferenceParams = serde_json::from_value(value)
         .map_err(|err| Error::Config(format!("invalid parameters: {err}")))?;
-    let mut config = BackendConfig::new(params.model, params.options);
+
+    let mut options = if params.options.is_object() {
+        params.options.clone()
+    } else {
+        Value::Object(Map::new())
+    };
+
+    let top_level_device = params.device.as_deref().map(parse_device).transpose()?;
+    let options_device = options
+        .get("device")
+        .and_then(Value::as_str)
+        .map(parse_device)
+        .transpose()?;
+
+    let device = match (top_level_device, options_device) {
+        (Some(top), Some(opt)) if top != opt => {
+            return Err(Error::Config(format!(
+                "graph `device` ({top:?}) conflicts with `options.device` ({opt:?})"
+            )));
+        }
+        (Some(top), Some(_)) => {
+            warn!("`options.device` is deprecated; use top-level `device` instead");
+            Some(top)
+        }
+        (Some(top), None) => Some(top),
+        (None, Some(opt)) => {
+            warn!("`options.device` is deprecated; use top-level `device` instead");
+            Some(opt)
+        }
+        (None, None) => None,
+    };
+
+    // Remove the legacy key so backend parsers do not see it twice.
+    if let Value::Object(ref mut map) = options {
+        map.remove("device");
+    }
+
+    let mut config = BackendConfig::new(params.model, options);
     if let Some(precision) = params.precision.as_deref() {
         config = config.with_precision(parse_dtype(precision)?);
     }
-    if let Some(device) = params.device.as_deref() {
-        config = config.with_device(parse_device(device)?);
+    if let Some(device) = device {
+        config = config.with_device(device);
     }
     if let Some(deploy_mode) = params.deploy_mode.as_deref() {
         config = config.with_deploy_mode(parse_deploy_mode(deploy_mode)?);
@@ -621,7 +794,7 @@ connections:
     fn unknown_backend_is_rejected_during_graph_load() {
         let yaml = r#"
 apiVersion: dg/v1
-kind: Graph
+kind:  Graph
 nodes:
   - name: infer
     kind: inference

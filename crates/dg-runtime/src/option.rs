@@ -105,12 +105,29 @@ impl BackendConfig {
         self
     }
 
+    pub fn with_options(mut self, options: Value) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn precision(&self) -> Option<DataType> {
+        self.precision
+    }
+
+    pub fn device(&self) -> Option<DeviceKind> {
+        self.device
+    }
+
     pub fn deploy_mode(&self) -> Option<DeployMode> {
         self.deploy_mode
     }
 
     pub fn core_mask(&self) -> Option<u32> {
         self.core_mask
+    }
+
+    pub fn options(&self) -> &Value {
+        &self.options
     }
 
     pub fn parse_options<T: DeserializeOwned>(&self, backend: &str) -> Result<T> {
@@ -196,12 +213,14 @@ impl BackendOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenVINOOptions {
     pub device: String,
+    pub max_in_flight: usize,
 }
 
 impl Default for OpenVINOOptions {
     fn default() -> Self {
         Self {
             device: "CPU".to_string(),
+            max_in_flight: 2,
         }
     }
 }
