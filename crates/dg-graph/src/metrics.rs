@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use dg_runtime::{BackendMetrics, BackendMetricsSnapshot};
 
 #[derive(Debug, Default)]
 pub(crate) struct ElementMetrics {
@@ -13,6 +16,7 @@ pub(crate) struct ElementMetrics {
     max_queue_depth: AtomicUsize,
     drop_count: AtomicU64,
     backpressure_count: AtomicU64,
+    backend_metrics: Mutex<Option<Arc<BackendMetrics>>>,
 }
 
 impl ElementMetrics {
@@ -50,6 +54,12 @@ impl ElementMetrics {
         self.backpressure_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn attach_backend_metrics(&self, metrics: Arc<BackendMetrics>) {
+        if let Ok(mut guard) = self.backend_metrics.lock() {
+            *guard = Some(metrics);
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> ElementMetricsSnapshot {
         let packets_processed = self.packets_processed.load(Ordering::Relaxed);
         let processing_latency_ns = self.processing_latency_ns.load(Ordering::Relaxed);
@@ -66,6 +76,11 @@ impl ElementMetrics {
             max_queue_depth: self.max_queue_depth.load(Ordering::Relaxed),
             drop_count: self.drop_count.load(Ordering::Relaxed),
             backpressure_count: self.backpressure_count.load(Ordering::Relaxed),
+            backend_metrics: self
+                .backend_metrics
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|m| m.snapshot())),
         }
     }
 }
@@ -82,6 +97,7 @@ pub struct ElementMetricsSnapshot {
     pub max_queue_depth: usize,
     pub drop_count: u64,
     pub backpressure_count: u64,
+    pub backend_metrics: Option<BackendMetricsSnapshot>,
 }
 
 /// Receives per-node snapshots for future exporters such as Prometheus.

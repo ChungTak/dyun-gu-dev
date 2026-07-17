@@ -387,6 +387,7 @@ fn parse_mock_inference(node: &NodeSpec) -> Result<MockInferenceConfig> {
             output_infos: vec![output_info],
             echo_inputs,
             fill_value,
+            ..Default::default()
         }),
     );
     Ok(MockInferenceConfig {

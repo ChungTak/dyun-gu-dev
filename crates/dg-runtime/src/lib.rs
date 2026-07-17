@@ -8,6 +8,7 @@
 mod backend;
 mod capabilities;
 mod error;
+mod metrics;
 mod mock;
 mod option;
 mod regression;
@@ -20,9 +21,10 @@ pub use backend::{
 };
 pub use capabilities::{
     backend_capabilities, supports_deployment, supports_device, supports_precision,
-    BackendCapabilities, RuntimeCapabilities,
+    BackendCapabilities, RuntimeCapabilities, RuntimeDeviceCapabilities,
 };
 pub use error::{Error, Result};
+pub use metrics::{BackendMetrics, BackendMetricsSnapshot, LatencyPercentiles};
 pub use mock::MockOptions;
 pub use option::{
     BackendConfig, BackendOptions, CoreSelection, ExternalStreamHandle, ModelFormat, ModelSource,

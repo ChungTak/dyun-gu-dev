@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use crate::{
-    backend_capabilities, BackendConfig, Error, Result, RuntimeCapabilities, RuntimeOption,
-    TensorInfo,
+    backend_capabilities, BackendConfig, BackendMetrics, Error, InferPoll, Result,
+    RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 
 /// Backend families available to the runtime.
@@ -34,6 +36,50 @@ pub trait InferBackend: Send {
         self.run(inputs)
     }
 
+    /// Returns true when this backend uses a real submit/poll contract.
+    ///
+    /// Synchronous backends may omit [`InferBackend::submit`] and
+    /// [`InferBackend::poll`].
+    fn is_async(&self) -> bool {
+        false
+    }
+
+    /// Maximum number of in-flight submissions this backend allows.
+    fn max_in_flight(&self) -> usize {
+        1
+    }
+
+    /// Number of in-flight submissions currently held by the backend.
+    fn in_flight(&self) -> usize {
+        0
+    }
+
+    /// Submits one inference without waiting for completion.
+    ///
+    /// `sequence` is a caller-assigned identifier returned by [`poll`] so that
+    /// out-of-order completion can be matched back to the original submission.
+    fn submit(
+        &mut self,
+        _inputs: &[dg_core::Tensor],
+        _stream: Option<&dyn dg_core::Stream>,
+        _sequence: u64,
+    ) -> Result<()> {
+        Err(Error::Backend(
+            "backend does not support async submit".to_string(),
+        ))
+    }
+
+    /// Polls the backend for any completed submission.
+    fn poll(&mut self) -> Result<InferPoll> {
+        Ok(InferPoll::Pending)
+    }
+
+    /// Attaches the runtime-owned metrics handle to this backend.
+    fn attach_metrics(&mut self, _metrics: Arc<BackendMetrics>) {}
+
+    /// Cancels all in-flight submissions.
+    fn cancel(&mut self) {}
+
     /// Probes backend capabilities after initialization.
     fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
         Ok(backend_capabilities(self.kind())
@@ -44,6 +90,7 @@ pub trait InferBackend: Send {
                 device_count: 0,
                 precisions: Vec::new(),
                 deploy_modes: Vec::new(),
+                device_records: Vec::new(),
             }))
     }
 }

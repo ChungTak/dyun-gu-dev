@@ -25,6 +25,18 @@ impl BackendCapabilities {
     }
 }
 
+/// Per-device capabilities observed from a live backend probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeDeviceCapabilities {
+    pub kind: DeviceKind,
+    pub logical_id: String,
+    pub runtime_name: String,
+    pub async_capable: bool,
+    pub external_memory: bool,
+    pub remote_tensor: bool,
+    pub verified_precisions: Vec<DataType>,
+}
+
 /// Capabilities observed from a live backend or its no-hardware fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeCapabilities {
@@ -33,6 +45,7 @@ pub struct RuntimeCapabilities {
     pub device_count: usize,
     pub precisions: Vec<DataType>,
     pub deploy_modes: Vec<DeployMode>,
+    pub device_records: Vec<RuntimeDeviceCapabilities>,
 }
 
 impl RuntimeCapabilities {
@@ -44,6 +57,7 @@ impl RuntimeCapabilities {
             device_count: capabilities.devices.len(),
             precisions: capabilities.precisions.to_vec(),
             deploy_modes: capabilities.deploy_modes.to_vec(),
+            device_records: Vec::new(),
         }
     }
 
@@ -60,6 +74,17 @@ impl RuntimeCapabilities {
     /// Returns whether a deployment mode is available at runtime.
     pub fn supports_deployment(&self, deploy_mode: DeployMode) -> bool {
         self.deploy_modes.contains(&deploy_mode)
+    }
+
+    /// Looks up live capabilities for a specific device kind and logical id.
+    pub fn device_capabilities(
+        &self,
+        kind: DeviceKind,
+        logical_id: Option<&str>,
+    ) -> Option<&RuntimeDeviceCapabilities> {
+        self.device_records.iter().find(|record| {
+            record.kind == kind && logical_id.is_none_or(|id| record.logical_id == id)
+        })
     }
 }
 

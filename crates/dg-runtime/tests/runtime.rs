@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use dg_core::{
     DataFormat, DataType, DeviceKind, Quantization, QuantizationScheme, Shape, Strides, Tensor,
     TensorDesc, TypeCode,
@@ -21,6 +23,7 @@ fn mock_backend_registry_and_run_identity() {
             output_infos: vec![output_info.clone()],
             echo_inputs: true,
             fill_value: 0,
+            ..Default::default()
         }),
     );
 
@@ -282,6 +285,7 @@ fn runtime_submit_poll_round_trip_and_overlap_guard() {
             output_infos: vec![info],
             echo_inputs: true,
             fill_value: 0,
+            ..Default::default()
         }),
     );
     let mut runtime = Runtime::new(option).expect("construct runtime");
@@ -303,16 +307,266 @@ fn runtime_submit_poll_round_trip_and_overlap_guard() {
         .write_from_slice(&[4, 3, 2, 1])
         .expect("seed input");
 
-    runtime.submit(&[input], None).expect("submit inference");
+    runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit inference");
     let overlap = runtime
-        .submit(&[], None)
+        .submit(std::slice::from_ref(&input), None)
         .expect_err("overlapping submit should fail");
-    assert!(matches!(overlap, Error::Backend(message) if message.contains("already in flight")));
+    assert!(
+        matches!(overlap, Error::Backend(message) if message.contains("in-flight limit reached"))
+    );
 
-    let InferPoll::Ready(outputs) = runtime.poll().expect("poll result") else {
+    let InferPoll::Ready { outputs, .. } = runtime.poll().expect("poll result") else {
         panic!("submission should be ready");
     };
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0].buffer().read_bytes(), vec![4, 3, 2, 1]);
     assert!(matches!(runtime.poll().expect("poll"), InferPoll::Pending));
+}
+
+#[test]
+fn delayed_mock_submit_returns_immediately_and_poll_becomes_ready() {
+    let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
+    let option = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions {
+            input_infos: vec![info.clone()],
+            output_infos: vec![info],
+            echo_inputs: true,
+            fill_value: 0,
+            delay: Some(Duration::from_millis(50)),
+            max_in_flight: 2,
+            ..Default::default()
+        }),
+    );
+    let mut runtime = Runtime::new(option).expect("construct runtime");
+
+    let device = dg_core::CpuDevice::new();
+    let input = Tensor::allocate(
+        &device,
+        TensorDesc::new(
+            Shape::new([1, 4]),
+            DataType::U8,
+            DataFormat::NC,
+            DeviceKind::Cpu,
+        ),
+    )
+    .expect("allocate input");
+    input
+        .buffer()
+        .write_from_slice(&[1, 2, 3, 4])
+        .expect("seed input");
+
+    let before = Instant::now();
+    let sequence = runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit");
+    assert!(
+        before.elapsed() < Duration::from_millis(10),
+        "submit must return immediately"
+    );
+
+    assert!(matches!(runtime.poll().expect("poll"), InferPoll::Pending));
+
+    std::thread::sleep(Duration::from_millis(75));
+    let InferPoll::Ready {
+        outputs,
+        sequence: ready_seq,
+    } = runtime.poll().expect("poll ready")
+    else {
+        panic!("submission should be ready after delay");
+    };
+    assert_eq!(ready_seq, sequence);
+    assert_eq!(outputs[0].buffer().read_bytes(), vec![1, 2, 3, 4]);
+}
+
+fn make_input_tensor(device: &dg_core::CpuDevice, values: &[u8]) -> Tensor {
+    let tensor = Tensor::allocate(
+        device,
+        TensorDesc::new(
+            Shape::new([1, 4]),
+            DataType::U8,
+            DataFormat::NC,
+            DeviceKind::Cpu,
+        ),
+    )
+    .expect("allocate");
+    tensor.buffer().write_from_slice(values).expect("seed");
+    tensor
+}
+
+#[test]
+fn delayed_mock_out_of_order_completion_preserves_sequence() {
+    let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
+    // Per-request delays: the second submission finishes first, then third, then first.
+    let option = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions {
+            input_infos: vec![info.clone()],
+            output_infos: vec![info],
+            echo_inputs: true,
+            fill_value: 0,
+            delays: vec![
+                Duration::from_millis(100),
+                Duration::from_millis(20),
+                Duration::from_millis(60),
+            ],
+            max_in_flight: 3,
+            ..Default::default()
+        }),
+    );
+    let mut runtime = Runtime::new(option).expect("construct runtime");
+
+    let device = dg_core::CpuDevice::new();
+    let inputs: Vec<Tensor> = (0..3u8)
+        .map(|value| make_input_tensor(&device, &[value, value + 1, value + 2, value + 3]))
+        .collect();
+
+    // Submit in quick succession. Completion order is determined by per-request delay.
+    let seq0 = runtime
+        .submit(std::slice::from_ref(&inputs[0]), None)
+        .expect("submit 0");
+    let seq1 = runtime
+        .submit(std::slice::from_ref(&inputs[1]), None)
+        .expect("submit 1");
+    let seq2 = runtime
+        .submit(std::slice::from_ref(&inputs[2]), None)
+        .expect("submit 2");
+
+    let mut results = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while results.len() < 3 && Instant::now() < deadline {
+        if let InferPoll::Ready { outputs, sequence } = runtime.poll().expect("poll") {
+            results.push((sequence, outputs[0].buffer().read_bytes().clone()));
+        } else {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(results.len(), 3);
+
+    // Completion order is seq1, seq2, seq0 because of the per-request delays.
+    assert_eq!(results[0].0, seq1);
+    assert_eq!(results[1].0, seq2);
+    assert_eq!(results[2].0, seq0);
+    assert_eq!(results[0].1, vec![1, 2, 3, 4]);
+    assert_eq!(results[1].1, vec![2, 3, 4, 5]);
+    assert_eq!(results[2].1, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn delayed_mock_in_flight_limit_and_cancel() {
+    let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
+    let option = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions {
+            input_infos: vec![info.clone()],
+            output_infos: vec![info],
+            echo_inputs: true,
+            fill_value: 0,
+            delay: Some(Duration::from_millis(200)),
+            max_in_flight: 2,
+            ..Default::default()
+        }),
+    );
+    let mut runtime = Runtime::new(option).expect("construct runtime");
+
+    let device = dg_core::CpuDevice::new();
+    let input = Tensor::allocate(
+        &device,
+        TensorDesc::new(
+            Shape::new([1, 4]),
+            DataType::U8,
+            DataFormat::NC,
+            DeviceKind::Cpu,
+        ),
+    )
+    .expect("allocate input");
+    input
+        .buffer()
+        .write_from_slice(&[9, 8, 7, 6])
+        .expect("seed input");
+
+    runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit first");
+    runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit second");
+    let third = runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect_err("third submit exceeds in-flight limit");
+    assert!(
+        matches!(third, Error::Backend(message) if message.contains("in-flight limit reached"))
+    );
+
+    runtime.cancel().expect("cancel");
+    assert_eq!(runtime.in_flight(), 0);
+
+    let sequence = runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit after cancel");
+    std::thread::sleep(Duration::from_millis(250));
+    let InferPoll::Ready {
+        outputs,
+        sequence: ready_seq,
+    } = runtime.poll().expect("poll ready")
+    else {
+        panic!("should be ready after cancel and re-submit");
+    };
+    assert_eq!(ready_seq, sequence);
+    assert_eq!(outputs[0].buffer().read_bytes(), vec![9, 8, 7, 6]);
+}
+
+#[test]
+fn delayed_mock_backend_error_does_not_leak_in_flight() {
+    let input_info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
+    // Output shape differs from input so echo will fail with a size mismatch.
+    let output_info = TensorInfo::new(Shape::new([1, 2]), DataType::U8).with_layout(DataFormat::NC);
+    let option = RuntimeOption::new(
+        BackendKind::Mock,
+        ModelSource::Bytes(Vec::new()),
+        BackendOptions::Mock(MockOptions {
+            input_infos: vec![input_info],
+            output_infos: vec![output_info],
+            echo_inputs: true,
+            fill_value: 0,
+            delay: Some(Duration::from_millis(20)),
+            max_in_flight: 2,
+            ..Default::default()
+        }),
+    );
+    let mut runtime = Runtime::new(option).expect("construct runtime");
+
+    let device = dg_core::CpuDevice::new();
+    let input = Tensor::allocate(
+        &device,
+        TensorDesc::new(
+            Shape::new([1, 4]),
+            DataType::U8,
+            DataFormat::NC,
+            DeviceKind::Cpu,
+        ),
+    )
+    .expect("allocate input");
+    input
+        .buffer()
+        .write_from_slice(&[1, 2, 3, 4])
+        .expect("seed input");
+
+    runtime
+        .submit(std::slice::from_ref(&input), None)
+        .expect("submit");
+    assert_eq!(runtime.in_flight(), 1);
+
+    std::thread::sleep(Duration::from_millis(50));
+    let err = runtime
+        .poll()
+        .expect_err("poll should return backend error");
+    assert!(matches!(err, Error::Backend(_)));
+    assert_eq!(runtime.in_flight(), 0);
+    assert!(runtime.metrics().backend_errors() > 0);
 }
