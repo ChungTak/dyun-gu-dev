@@ -26,7 +26,7 @@
 | INT5-08 | In Progress | #8 `devin/1784262000-int5-08-ops` | ops server `/livez`/ `/readyz`/ `/metrics` + `ResourceLimits` + 结构化日志；已 rebase 至 main+#6+#7；CI 15/15 | 待 #6/#7/#9 合并 |
 | INT5-09 | In Progress | #8 `devin/1784262000-int5-08-ops` | C ABI v1 init/stop/shutdown/status/metrics + `dg_abi_version` + header/snapshot/example；已 rebase 至 main+#6+#7；CI 15/15 | 待 #6/#7/#9 合并 |
 | INT5-10 | In Progress | #5 `devin/1784258000-int5-10-oci`（已合并至 `main`） | Ubuntu 24.04 product-intel OCI + SBOM/signature；CI 15/15 | iGPU runner 实机验证 |
-| INT5-11 | Planned | - | - | INT5-01～10 |
+| INT5-11 | In Progress | #9 `devin/1784260544-int5-06-07-openvino` | README/user-guide/acceptance 收敛；等待 #6/#7/#8 合并后更新 final SHAs | #6/#7/#8 合并 |
 
 ## 状态更新规则
 
