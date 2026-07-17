@@ -13,7 +13,10 @@ use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
     ExternalHandle, MemoryDomain, Shape, Tensor, TensorDesc, TypeCode,
 };
-use dg_graph::{Graph, GraphDiff, GraphFormat, GraphSpec, NodeSpec};
+use dg_graph::{
+    ElementMetricsSnapshot, Graph, GraphDiff, GraphFormat, GraphSpec, GraphStatus, NodeSpec,
+    RunningGraph,
+};
 #[cfg(feature = "media")]
 use dg_media as _;
 use dg_runtime::{
@@ -44,6 +47,18 @@ pub enum DgStatus {
     Unsupported = -7,
     Panic = -8,
     InternalError = -9,
+}
+
+/// Lifecycle status of a running graph engine.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DgGraphStatus {
+    Starting = 0,
+    Running = 1,
+    Draining = 2,
+    Stopped = 3,
+    Failed = 4,
+    NotRunning = -1,
 }
 
 /// Graph serialization format.
@@ -172,6 +187,7 @@ pub struct DgBackend {
 struct Engine {
     spec: GraphSpec,
     graph: Option<Graph>,
+    running: Option<RunningGraph>,
     outputs: VecDeque<Tensor>,
     pending_inputs: BTreeMap<String, Vec<Tensor>>,
 }
@@ -181,6 +197,7 @@ impl Engine {
         Self {
             spec: GraphSpec::default(),
             graph: None,
+            running: None,
             outputs: VecDeque::new(),
             pending_inputs: BTreeMap::new(),
         }
@@ -188,6 +205,7 @@ impl Engine {
 
     fn invalidate(&mut self) {
         self.graph = None;
+        self.running = None;
         self.outputs.clear();
         self.pending_inputs.clear();
     }
@@ -247,6 +265,80 @@ impl Engine {
         }
         Ok(())
     }
+
+    fn init(&mut self) -> Result<(), String> {
+        if self.running.is_some() {
+            return Err("engine is already running".to_string());
+        }
+        if self.graph.is_none() {
+            self.spec.validate().map_err(|error| error.to_string())?;
+            self.graph = Some(Graph::new(self.spec.clone()).map_err(|error| error.to_string())?);
+        }
+        let graph = self.graph.as_ref().expect("graph built above");
+        self.running = Some(
+            graph
+                .start(std::collections::HashMap::new())
+                .map_err(|error| error.to_string())?,
+        );
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        let running = self
+            .running
+            .as_ref()
+            .ok_or_else(|| "engine is not running".to_string())?;
+        running.request_stop();
+        Ok(())
+    }
+
+    fn shutdown(&mut self, timeout_ms: u64) -> Result<(), String> {
+        let mut running = self
+            .running
+            .take()
+            .ok_or_else(|| "engine is not running".to_string())?;
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        running
+            .shutdown(timeout)
+            .map_err(|error| error.to_string())?;
+        // After shutdown the graph is no longer running; keep the built graph
+        // so `dg_engine_run` can still be used for a final one-shot execution.
+        Ok(())
+    }
+
+    fn status(&self) -> (DgGraphStatus, Option<String>) {
+        match self.running.as_ref() {
+            Some(running) => {
+                let (status, cause) = running.status();
+                (graph_status_to_c(status), cause)
+            }
+            None => (DgGraphStatus::NotRunning, None),
+        }
+    }
+
+    fn metrics_json(&self) -> Result<String, String> {
+        let running = self
+            .running
+            .as_ref()
+            .ok_or_else(|| "engine is not running".to_string())?;
+        let metrics = running.metrics_snapshot();
+        serde_json::to_string(&MetricsPayload { metrics }).map_err(|error| error.to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct MetricsPayload {
+    metrics: BTreeMap<String, ElementMetricsSnapshot>,
+}
+
+fn graph_status_to_c(status: GraphStatus) -> DgGraphStatus {
+    match status {
+        GraphStatus::Starting => DgGraphStatus::Starting,
+        GraphStatus::Running => DgGraphStatus::Running,
+        GraphStatus::Draining => DgGraphStatus::Draining,
+        GraphStatus::Stopped => DgGraphStatus::Stopped,
+        GraphStatus::Failed => DgGraphStatus::Failed,
+    }
 }
 
 /// Formats a thread-local C error string with stable diagnostic fields.
@@ -277,6 +369,14 @@ fn set_error(message: impl Into<String>) {
 
 fn clear_error() {
     LAST_ERROR.with(|last| *last.borrow_mut() = None);
+}
+
+fn last_data_ptr() -> (*const u8, usize) {
+    LAST_DATA.with(|last| {
+        last.borrow()
+            .as_ref()
+            .map_or((ptr::null(), 0), |data| (data.as_ptr(), data.len()))
+    })
 }
 
 fn ffi_result<T>(operation: impl FnOnce() -> Result<T, (DgStatus, String)>) -> Result<T, DgStatus> {
@@ -589,6 +689,12 @@ pub extern "C" fn dg_last_error() -> *const c_char {
 #[no_mangle]
 pub extern "C" fn dg_version() -> *const c_char {
     c"0.1.0".as_ptr()
+}
+
+/// Returns the stable C ABI version as a static UTF-8 C string.
+#[no_mangle]
+pub extern "C" fn dg_abi_version() -> *const c_char {
+    c"1".as_ptr()
 }
 
 /// Creates an engine handle.
@@ -974,6 +1080,129 @@ pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
                 (DgStatus::RuntimeError, message)
             }
         })?;
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Starts the engine as a long-running graph.
+#[no_mangle]
+pub unsafe extern "C" fn dg_engine_init(engine: *mut DgEngine) -> DgStatus {
+    match ffi_result(|| {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+        }
+        let engine = unsafe { &mut *engine };
+        engine
+            .inner
+            .init()
+            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Requests a cooperative stop of the running graph.
+#[no_mangle]
+pub unsafe extern "C" fn dg_engine_stop(engine: *mut DgEngine) -> DgStatus {
+    match ffi_result(|| {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+        }
+        let engine = unsafe { &mut *engine };
+        engine
+            .inner
+            .stop()
+            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Shuts down the running graph with a timeout in milliseconds.
+#[no_mangle]
+pub unsafe extern "C" fn dg_engine_shutdown(engine: *mut DgEngine, timeout_ms: u64) -> DgStatus {
+    match ffi_result(|| {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+        }
+        let engine = unsafe { &mut *engine };
+        engine
+            .inner
+            .shutdown(timeout_ms)
+            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Returns the current lifecycle status of the engine and copies the root cause
+/// (if any) into thread-local storage. The caller can read it through
+/// `dg_last_error()` when `out_status` is `Failed`.
+#[no_mangle]
+pub unsafe extern "C" fn dg_engine_status(
+    engine: *const DgEngine,
+    out_status: *mut DgGraphStatus,
+) -> DgStatus {
+    match ffi_result(|| {
+        if engine.is_null() || out_status.is_null() {
+            return Err((
+                DgStatus::NullPointer,
+                "engine or output pointer is null".to_string(),
+            ));
+        }
+        let engine = unsafe { &*engine };
+        let (status, cause) = engine.inner.status();
+        if let Some(cause) = cause {
+            set_error(cause);
+        } else {
+            clear_error();
+        }
+        unsafe { out_status.write(status) };
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Writes a JSON snapshot of per-element metrics into thread-local storage and
+/// returns a pointer to it. The returned pointer is valid until the next call
+/// that overwrites `LAST_DATA`.
+#[no_mangle]
+pub unsafe extern "C" fn dg_engine_metrics(
+    engine: *const DgEngine,
+    out_data: *mut *const c_char,
+    out_length: *mut usize,
+) -> DgStatus {
+    match ffi_result(|| {
+        if engine.is_null() || out_data.is_null() || out_length.is_null() {
+            return Err((
+                DgStatus::NullPointer,
+                "engine or output pointer is null".to_string(),
+            ));
+        }
+        let engine = unsafe { &*engine };
+        let json = engine
+            .inner
+            .metrics_json()
+            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        let bytes = json.into_bytes().into_boxed_slice();
+        let length = bytes.len();
+        LAST_DATA.with(|last| *last.borrow_mut() = Some(bytes));
+        let (ptr, _) = last_data_ptr();
+        unsafe {
+            out_data.write(ptr as *const c_char);
+            out_length.write(length);
+        }
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,

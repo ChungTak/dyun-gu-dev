@@ -1398,6 +1398,7 @@ dependencies = [
  "dg-openvino",
  "dg-runtime",
  "dg-stream",
+ "serde",
  "serde_json",
 ]
 

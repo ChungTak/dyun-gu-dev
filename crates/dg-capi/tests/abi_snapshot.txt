@@ -8,6 +8,7 @@ DgDataType
 DgDeviceKind
 DgEngine
 DgGraphFormat
+DgGraphStatus
 DgMemoryDomain
 DgStatus
 DgTensor
@@ -16,6 +17,7 @@ dg_backend_capabilities
 dg_backend_create
 dg_backend_free
 dg_backend_io_counts
+dg_abi_version
 dg_backend_run
 dg_backend_tensor_info
 dg_buffer_free
@@ -29,14 +31,19 @@ dg_engine_diff_file
 dg_engine_diff_string
 dg_engine_disconnect
 dg_engine_free
+dg_engine_init
 dg_engine_load_file
 dg_engine_load_string
+dg_engine_metrics
 dg_engine_poll
 dg_engine_push
 dg_engine_reload_file
 dg_engine_reload_string
 dg_engine_remove_node
 dg_engine_run
+dg_engine_shutdown
+dg_engine_status
+dg_engine_stop
 dg_last_error
 dg_tensor_create
 dg_tensor_create_external

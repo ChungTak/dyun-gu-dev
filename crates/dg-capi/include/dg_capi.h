@@ -39,6 +39,18 @@ typedef enum DgGraphFormat {
 } DgGraphFormat;
 
 /**
+ * Lifecycle status of a running graph engine.
+ */
+typedef enum DgGraphStatus {
+  Starting = 0,
+  Running = 1,
+  Draining = 2,
+  Stopped = 3,
+  Failed = 4,
+  NotRunning = -1,
+} DgGraphStatus;
+
+/**
  * Backend family for direct backend lifecycle operations.
  */
 typedef enum DgBackendKind {
@@ -163,6 +175,11 @@ const char *dg_last_error(void);
 const char *dg_version(void);
 
 /**
+ * Returns the stable C ABI version as a static UTF-8 C string.
+ */
+const char *dg_abi_version(void);
+
+/**
  * Creates an engine handle.
  */
 enum DgStatus dg_engine_create(struct DgEngine **out);
@@ -257,6 +274,37 @@ enum DgStatus dg_engine_build(struct DgEngine *engine);
  * Runs the built graph with pending inputs and stores sink outputs for polling.
  */
 enum DgStatus dg_engine_run(struct DgEngine *engine);
+
+/**
+ * Starts the engine as a long-running graph.
+ */
+enum DgStatus dg_engine_init(struct DgEngine *engine);
+
+/**
+ * Requests a cooperative stop of the running graph.
+ */
+enum DgStatus dg_engine_stop(struct DgEngine *engine);
+
+/**
+ * Shuts down the running graph with a timeout in milliseconds.
+ */
+enum DgStatus dg_engine_shutdown(struct DgEngine *engine, uint64_t timeout_ms);
+
+/**
+ * Returns the current lifecycle status of the engine and copies the root cause
+ * (if any) into thread-local storage. The caller can read it through
+ * `dg_last_error()` when `out_status` is `Failed`.
+ */
+enum DgStatus dg_engine_status(const struct DgEngine *engine, enum DgGraphStatus *out_status);
+
+/**
+ * Writes a JSON snapshot of per-element metrics into thread-local storage and
+ * returns a pointer to it. The returned pointer is valid until the next call
+ * that overwrites `LAST_DATA`.
+ */
+enum DgStatus dg_engine_metrics(const struct DgEngine *engine,
+                                const char **out_data,
+                                size_t *out_length);
 
 /**
  * Creates and initializes a backend without constructing a graph.
