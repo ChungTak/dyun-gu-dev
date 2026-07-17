@@ -128,18 +128,19 @@ impl AvcodecProfile {
 
     /// Production support status for capability/CLI/docs (INT3-14).
     ///
-    /// RKMPP / OneVPL / AMF remain `Unverified` until upstream provides real-device sign-off.
-    /// NV Host / Device-frame are marked production in the plan matrix; runtime hardware
+    /// NativeFree is a development-only pure-Rust image path and must not be advertised as
+    /// production. RKMPP / OneVPL / AMF remain `Unverified` until upstream provides real-device
+    /// sign-off. NV Host / Device-frame are marked production in the plan matrix; runtime hardware
     /// verification is still environment-dependent.
     #[must_use]
     pub const fn support_level(self) -> ProfileSupportLevel {
         match self {
-            Self::NativeFree
-            | Self::Software
+            Self::Software
             | Self::NvcodecHost
             | Self::NvcodecHostFallback
             | Self::NvcodecDeviceFrame => ProfileSupportLevel::Production,
-            Self::RkmppHost
+            Self::NativeFree
+            | Self::RkmppHost
             | Self::RkmppHostFallback
             | Self::RkmppZeroCopy
             | Self::OnevplHost
@@ -324,10 +325,6 @@ mod tests {
     fn production_matrix_and_unverified_hardware() {
         use super::ProfileSupportLevel;
         assert_eq!(
-            AvcodecProfile::NativeFree.support_level(),
-            ProfileSupportLevel::Production
-        );
-        assert_eq!(
             AvcodecProfile::Software.support_level(),
             ProfileSupportLevel::Production
         );
@@ -338,6 +335,10 @@ mod tests {
         assert_eq!(
             AvcodecProfile::NvcodecDeviceFrame.support_level(),
             ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::NativeFree.support_level(),
+            ProfileSupportLevel::Unverified
         );
         assert_eq!(
             AvcodecProfile::RkmppHost.support_level(),
@@ -352,7 +353,7 @@ mod tests {
             ProfileSupportLevel::Unverified
         );
         assert!(!AvcodecProfile::AmfHost.is_production_supported());
-        assert!(AvcodecProfile::NativeFree.is_production_supported());
+        assert!(!AvcodecProfile::NativeFree.is_production_supported());
     }
 
     #[test]

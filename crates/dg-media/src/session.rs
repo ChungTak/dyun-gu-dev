@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "avcodec-sdk", feature = "avcodec-profile-native-free"))]
+    #[cfg(all(feature = "avcodec-sdk", feature = "avcodec-profile-software"))]
     fn service_drop_leaves_created_encoder_session_usable() {
         use dg_media_avcodec::{CodecId, ImageInfo, TimeBase, VideoEncoderRequest};
 
@@ -261,10 +261,10 @@ mod tests {
         )
         .expect("valid request");
         let (session, report) = service
-            .create_encoder(AvcodecProfile::NativeFree, request)
+            .create_encoder(AvcodecProfile::Software, request)
             .expect("create encoder");
         drop(service);
-        assert_eq!(report.profile, "native-free");
+        assert_eq!(report.profile, "software");
         // Session remains owned and droppable after the service is gone.
         drop(session);
     }

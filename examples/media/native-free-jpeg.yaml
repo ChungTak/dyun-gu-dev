@@ -1,4 +1,4 @@
-# Host JPEG encode → decode with native-free Profile (jpeg/zune/libyuv/rust-h264).
+# Host JPEG encode → decode with native-free Profile (jpeg/zune/libyuv).
 # Build:
 #   LIBYUV_TARGET=ubuntu-24.04_x86_64 \
 #   cargo run -p dg-cli --no-default-features \
