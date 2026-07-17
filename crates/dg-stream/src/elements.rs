@@ -554,10 +554,7 @@ fn media_frame_to_packet(
     sequence: u64,
     tracks_by_id: &HashMap<u64, TrackInfo>,
 ) -> dg_graph::Result<Packet> {
-    let mut frame = match Arc::try_unwrap(Arc::clone(frame)) {
-        Ok(frame) => frame,
-        Err(shared) => shared.as_ref().clone(),
-    };
+    let mut frame = frame.as_ref().clone();
     if frame.shape.is_empty() {
         frame.shape = vec![frame.buffer.len()];
     }

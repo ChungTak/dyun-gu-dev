@@ -1,9 +1,8 @@
 use std::future::Future;
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use async_trait::async_trait;
-use tracing::warn;
 
 use crate::connector::{install_cheetah_connector, CheetahRuntimeConnector, StreamProtocol};
 use crate::error::{Error, Result};
@@ -67,28 +66,10 @@ impl Drop for RuntimeContext {
             return;
         };
         if tokio::runtime::Handle::try_current().is_ok() {
-            let (sender, receiver) = mpsc::sync_channel(0);
-            let thread_result = thread::Builder::new()
-                .name("dg-stream-cheetah-shutdown".to_string())
-                .spawn(move || {
-                    if let Ok(runtime) = receiver.recv() {
-                        drop(runtime);
-                    }
-                });
-            match thread_result {
-                Ok(_) => {
-                    if let Err(mpsc::SendError(runtime)) = sender.send(runtime) {
-                        warn!("failed to hand off Tokio runtime for shutdown; leaking it");
-                        std::mem::forget(runtime);
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "failed to spawn Tokio runtime shutdown thread; leaking runtime"
-                    );
-                    std::mem::forget(runtime);
-                }
+            // Dropping a Runtime from inside another runtime blocks; use the
+            // non-blocking shutdown path when we own the last reference.
+            if let Ok(runtime) = Arc::try_unwrap(runtime) {
+                runtime.shutdown_background();
             }
         } else {
             drop(runtime);

@@ -123,4 +123,6 @@ EXPOSE 9090
 VOLUME ["/etc/dyun", "/var/lib/dyun", "/models"]
 
 ENTRYPOINT ["/usr/local/bin/dg"]
-CMD ["run", "--config", "/etc/dyun/graph.yaml"]
+# Bind the ops/metrics server to all container interfaces so EXPOSE 9090 is usable.
+# Host networking security (auth, TLS, firewall) must be configured separately.
+CMD ["run", "--config", "/etc/dyun/graph.yaml", "--ops-bind", "0.0.0.0:9090"]

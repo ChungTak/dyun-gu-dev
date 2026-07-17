@@ -45,6 +45,7 @@ pub struct OpenVINOBackend {
     free_requests: Vec<InferRequest>,
     in_flight: Vec<InFlightRequest>,
     max_in_flight: usize,
+    async_capable: bool,
     device: DeviceType<'static>,
     device_string: String,
     metrics: Option<Arc<BackendMetrics>>,
@@ -63,6 +64,7 @@ impl OpenVINOBackend {
             free_requests: Vec::new(),
             in_flight: Vec::new(),
             max_in_flight: 2,
+            async_capable: false,
             device: DeviceType::CPU,
             device_string: "CPU".to_string(),
             metrics: None,
@@ -467,7 +469,7 @@ impl InferBackend for OpenVINOBackend {
     }
 
     fn is_async(&self) -> bool {
-        true
+        self.async_capable
     }
 
     fn max_in_flight(&self) -> usize {
@@ -548,6 +550,8 @@ impl InferBackend for OpenVINOBackend {
                 capabilities.sdk_version.as_deref().unwrap_or("unknown")
             )));
         };
+
+        self.async_capable = target_record.async_capable;
 
         if let Some(precision) = option.precision {
             let record = target_record;
