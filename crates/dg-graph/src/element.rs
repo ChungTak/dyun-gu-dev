@@ -154,7 +154,10 @@ impl ElementIo {
                     }
                     Err(TrySendError::Disconnected(_)) => {
                         self.metrics.record_drop();
-                        return Err(Error::Runtime(format!("downstream disconnected on {port}")));
+                        return Err(Error::Runtime(format!(
+                            "{} downstream disconnected on {port}",
+                            self.name
+                        )));
                     }
                 }
             }

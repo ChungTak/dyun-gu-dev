@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -69,7 +70,7 @@ impl ElementMetrics {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ElementMetricsSnapshot {
     pub packets_processed: u64,
     pub packets_received: u64,

@@ -1,12 +1,14 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::ExitCode;
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use dg_core::{DataFormat, DataType, DeviceKind, MemoryDomain};
-use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec};
+use dg_graph::{ElementMetricsSnapshot, Graph, GraphDiff, GraphReport, GraphSpec, GraphStatus};
 use dg_media::{
     FrameLayout, FrameTransferRequest, HandleKind, MediaFrame, MemoryDtype, MemoryFormat,
     TransferReport, ZeroCopyPlanner,
@@ -15,7 +17,14 @@ use dg_media::{
 use dg_stream::{
     CodecId, MediaKind, MemoryStreamHub, PublisherSink, Rational32, TrackInfo, TrackReadiness,
 };
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
+
+mod ops;
+use ops::OpsState;
 
 use dg_elements as _;
 #[cfg(feature = "media")]
@@ -53,6 +62,10 @@ pub enum Command {
         format: OutputFormat,
         #[arg(long)]
         watch: bool,
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        ops_bind: String,
+        #[arg(long)]
+        ops_disable: bool,
     },
     #[cfg(feature = "stream")]
     Demo {
@@ -76,14 +89,21 @@ pub enum OutputFormat {
     Text,
 }
 
-pub fn run(cli: Cli) -> Result<()> {
+pub fn run(cli: Cli) -> Result<ExitCode> {
     init_logging(cli.verbose);
     match cli.command {
         Command::Run {
             config,
             format,
             watch,
-        } => run_graph_with_watch(&config, format, watch),
+            ops_bind,
+            ops_disable,
+        } => run_graph_with_watch(
+            &config,
+            format,
+            watch,
+            if ops_disable { None } else { Some(ops_bind) },
+        ),
         #[cfg(feature = "stream")]
         Command::Demo { config } => {
             let summary = run_demo(&config)?;
@@ -91,16 +111,32 @@ pub fn run(cli: Cli) -> Result<()> {
                 "demo completed: {} mock streams, {} frames, planned copy count: {}",
                 summary.streams, summary.frames, summary.planned_copy_count
             );
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
-        Command::Validate { config } => validate_graph(&config),
-        Command::ListElements => list_elements(),
-        Command::Schema { kind } => schema(kind.as_deref()),
+        Command::Validate { config } => {
+            validate_graph(&config)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ListElements => {
+            list_elements()?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Schema { kind } => {
+            schema(kind.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
 pub fn run_graph(path: &Path, format: OutputFormat) -> Result<()> {
-    run_graph_with_watch(path, format, false)
+    let exit_code = run_graph_with_watch(path, format, false, None)?;
+    if exit_code == ExitCode::SUCCESS {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "graph run failed with exit code {exit_code:?}"
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,25 +250,188 @@ fn planned_demo_copy_count() -> Result<usize> {
     Ok(report.copy_count)
 }
 
-fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Result<()> {
-    let spec = load_spec(path)?;
-    let graph = Graph::new(spec).context("build graph")?;
-    let report = graph.run().context("run graph")?;
-    print_report(&report, format)?;
+fn run_graph_with_watch(
+    path: &Path,
+    format: OutputFormat,
+    watch: bool,
+    ops_bind: Option<String>,
+) -> Result<ExitCode> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[allow(clippy::large_enum_variant)]
+    enum SupervisorEvent {
+        Signal(i32),
+        Reload(std::result::Result<(GraphSpec, GraphDiff), dg_graph::Error>),
+    }
+
+    let spec = match load_spec(path) {
+        Ok(spec) => spec,
+        Err(error) => {
+            error!(error = %error, path = %path.display(), "configuration error");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let graph = match Graph::new(spec) {
+        Ok(graph) => graph,
+        Err(error) => {
+            error!(error = %error, "failed to build graph");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let mut running = match graph.start(std::collections::HashMap::new()) {
+        Ok(running) => Some(running),
+        Err(error) => {
+            error!(error = %error, "failed to start graph");
+            return Ok(ExitCode::from(3));
+        }
+    };
+
+    let ops_state: Arc<RwLock<OpsState>> = Arc::new(RwLock::new(OpsState {
+        status: GraphStatus::Starting,
+        root_cause: None,
+        element_metrics: BTreeMap::new(),
+        ready: false,
+        ready_reason: Some("graph is starting".to_string()),
+    }));
+    let mut ops_handle: Option<ops::OpsHandle> = ops_bind
+        .as_deref()
+        .map(|bind| ops::start(Arc::clone(&ops_state), bind))
+        .transpose()?;
+
+    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>();
+
+    // Signal handler thread.
+    let signal_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        let mut signals = match Signals::new([SIGTERM, SIGINT]) {
+            Ok(signals) => signals,
+            Err(_) => return,
+        };
+        for signal in signals.forever() {
+            if signal_tx.send(SupervisorEvent::Signal(signal)).is_err() {
+                break;
+            }
+        }
+    });
+
+    // File watcher thread.
     if watch {
-        let _watch_handle = dg_graph::watch(path, move |result| match result {
-            Ok((_, diff)) if !diff.is_empty() => match render_diff(&diff, format) {
-                Ok(output) => println!("{output}"),
-                Err(error) => println!("failed to render graph reload diff: {error}"),
-            },
-            Ok(_) => {}
-            Err(error) => println!("{}", render_reload_rejected(&error.to_string())),
-        })?;
-        loop {
-            std::thread::park();
+        let watch_tx = event_tx;
+        let _watch_handle = dg_graph::watch(path, move |result| {
+            let _ = watch_tx.send(SupervisorEvent::Reload(result));
+        });
+    } else {
+        drop(event_tx);
+    }
+
+    let mut status: Option<ExitCode> = None;
+    while status.is_none() {
+        match event_rx.recv_timeout(POLL_INTERVAL) {
+            Ok(SupervisorEvent::Signal(signal)) => {
+                info!(signal, "received termination signal");
+                update_ops_state(&ops_state, GraphStatus::Draining, None, BTreeMap::new());
+                let Some(mut running) = running.take() else {
+                    break;
+                };
+                running.request_stop();
+                match running.shutdown(SHUTDOWN_TIMEOUT) {
+                    Ok(()) => {
+                        let report = running.finish()?;
+                        print_report(&report, format)?;
+                        status = Some(ExitCode::SUCCESS);
+                    }
+                    Err(error) if error.to_string().contains("shutdown timed out") => {
+                        status = Some(ExitCode::from(4));
+                    }
+                    Err(error) => {
+                        error!(error = %error, "shutdown error");
+                        status = Some(ExitCode::from(3));
+                    }
+                }
+            }
+            Ok(SupervisorEvent::Reload(Ok((_, diff)))) if !diff.is_empty() => {
+                let Some(running) = running.as_mut() else {
+                    break;
+                };
+                let output = render_diff(&diff, format)?;
+                match running.apply_hot_update(diff) {
+                    Ok(()) => {
+                        println!("{output}");
+                    }
+                    Err(error) => {
+                        println!("{}", render_reload_rejected(&error.to_string()));
+                    }
+                }
+            }
+            Ok(SupervisorEvent::Reload(Ok(_))) => {}
+            Ok(SupervisorEvent::Reload(Err(error))) => {
+                println!("{}", render_reload_rejected(&error.to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let Some(running_ref) = running.as_mut() else {
+                    break;
+                };
+                match running_ref.poll() {
+                    Ok(()) => {
+                        let (graph_status, root_cause) = running_ref.status();
+                        let metrics = running_ref.metrics_snapshot();
+                        update_ops_state(&ops_state, graph_status, root_cause.as_deref(), metrics);
+                        if graph_status == GraphStatus::Stopped {
+                            let running = running.take().expect("graph still running");
+                            let report = running.finish()?;
+                            print_report(&report, format)?;
+                            status = Some(ExitCode::SUCCESS);
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "graph worker failed");
+                        update_ops_state(
+                            &ops_state,
+                            GraphStatus::Failed,
+                            Some(&error.to_string()),
+                            BTreeMap::new(),
+                        );
+                        status = Some(ExitCode::from(3));
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                status = Some(ExitCode::from(3));
+            }
         }
     }
-    Ok(())
+
+    if let Some(handle) = ops_handle.take() {
+        handle.stop();
+    }
+
+    Ok(status.unwrap_or(ExitCode::SUCCESS))
+}
+
+fn update_ops_state(
+    ops_state: &Arc<RwLock<OpsState>>,
+    status: GraphStatus,
+    root_cause: Option<&str>,
+    metrics: BTreeMap<String, ElementMetricsSnapshot>,
+) {
+    let ready = status == GraphStatus::Running;
+    let ready_reason = if ready {
+        None
+    } else {
+        Some(
+            root_cause
+                .map(|cause| cause.to_string())
+                .unwrap_or_else(|| format!("graph status is {status:?}")),
+        )
+    };
+    if let Ok(mut state) = ops_state.write() {
+        state.status = status;
+        state.root_cause = root_cause.map(str::to_string);
+        state.element_metrics = metrics;
+        state.ready = ready;
+        state.ready_reason = ready_reason;
+    }
 }
 
 pub fn validate_graph(path: &Path) -> Result<()> {
