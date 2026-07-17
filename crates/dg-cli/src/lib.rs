@@ -1,13 +1,14 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use dg_core::{DataFormat, DataType, DeviceKind, MemoryDomain};
-use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec, GraphStatus};
+use dg_graph::{ElementMetricsSnapshot, Graph, GraphDiff, GraphReport, GraphSpec, GraphStatus};
 use dg_media::{
     FrameLayout, FrameTransferRequest, HandleKind, MediaFrame, MemoryDtype, MemoryFormat,
     TransferReport, ZeroCopyPlanner,
@@ -21,6 +22,9 @@ use tracing_subscriber::EnvFilter;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
+
+mod ops;
+use ops::OpsState;
 
 use dg_elements as _;
 #[cfg(feature = "media")]
@@ -58,6 +62,10 @@ pub enum Command {
         format: OutputFormat,
         #[arg(long)]
         watch: bool,
+        #[arg(long, default_value = "127.0.0.1:9090")]
+        ops_bind: String,
+        #[arg(long)]
+        ops_disable: bool,
     },
     #[cfg(feature = "stream")]
     Demo {
@@ -88,7 +96,14 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             config,
             format,
             watch,
-        } => run_graph_with_watch(&config, format, watch),
+            ops_bind,
+            ops_disable,
+        } => run_graph_with_watch(
+            &config,
+            format,
+            watch,
+            if ops_disable { None } else { Some(ops_bind) },
+        ),
         #[cfg(feature = "stream")]
         Command::Demo { config } => {
             let summary = run_demo(&config)?;
@@ -114,7 +129,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 }
 
 pub fn run_graph(path: &Path, format: OutputFormat) -> Result<()> {
-    let exit_code = run_graph_with_watch(path, format, false)?;
+    let exit_code = run_graph_with_watch(path, format, false, None)?;
     if exit_code == ExitCode::SUCCESS {
         Ok(())
     } else {
@@ -235,7 +250,12 @@ fn planned_demo_copy_count() -> Result<usize> {
     Ok(report.copy_count)
 }
 
-fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Result<ExitCode> {
+fn run_graph_with_watch(
+    path: &Path,
+    format: OutputFormat,
+    watch: bool,
+    ops_bind: Option<String>,
+) -> Result<ExitCode> {
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -266,6 +286,18 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
             return Ok(ExitCode::from(3));
         }
     };
+
+    let ops_state: Arc<RwLock<OpsState>> = Arc::new(RwLock::new(OpsState {
+        status: GraphStatus::Starting,
+        root_cause: None,
+        element_metrics: BTreeMap::new(),
+        ready: false,
+        ready_reason: Some("graph is starting".to_string()),
+    }));
+    let mut ops_handle: Option<ops::OpsHandle> = ops_bind
+        .as_deref()
+        .map(|bind| ops::start(Arc::clone(&ops_state), bind))
+        .transpose()?;
 
     let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>();
 
@@ -298,6 +330,7 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
         match event_rx.recv_timeout(POLL_INTERVAL) {
             Ok(SupervisorEvent::Signal(signal)) => {
                 info!(signal, "received termination signal");
+                update_ops_state(&ops_state, GraphStatus::Draining, None, BTreeMap::new());
                 let Some(mut running) = running.take() else {
                     break;
                 };
@@ -341,7 +374,10 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
                 };
                 match running_ref.poll() {
                     Ok(()) => {
-                        if running_ref.status().0 == GraphStatus::Stopped {
+                        let (graph_status, root_cause) = running_ref.status();
+                        let metrics = running_ref.metrics_snapshot();
+                        update_ops_state(&ops_state, graph_status, root_cause.as_deref(), metrics);
+                        if graph_status == GraphStatus::Stopped {
                             let running = running.take().expect("graph still running");
                             let report = running.finish()?;
                             print_report(&report, format)?;
@@ -350,6 +386,12 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
                     }
                     Err(error) => {
                         error!(error = %error, "graph worker failed");
+                        update_ops_state(
+                            &ops_state,
+                            GraphStatus::Failed,
+                            Some(&error.to_string()),
+                            BTreeMap::new(),
+                        );
                         status = Some(ExitCode::from(3));
                     }
                 }
@@ -360,7 +402,36 @@ fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Resul
         }
     }
 
+    if let Some(handle) = ops_handle.take() {
+        handle.stop();
+    }
+
     Ok(status.unwrap_or(ExitCode::SUCCESS))
+}
+
+fn update_ops_state(
+    ops_state: &Arc<RwLock<OpsState>>,
+    status: GraphStatus,
+    root_cause: Option<&str>,
+    metrics: BTreeMap<String, ElementMetricsSnapshot>,
+) {
+    let ready = status == GraphStatus::Running;
+    let ready_reason = if ready {
+        None
+    } else {
+        Some(
+            root_cause
+                .map(|cause| cause.to_string())
+                .unwrap_or_else(|| format!("graph status is {status:?}")),
+        )
+    };
+    if let Ok(mut state) = ops_state.write() {
+        state.status = status;
+        state.root_cause = root_cause.map(str::to_string);
+        state.element_metrics = metrics;
+        state.ready = ready;
+        state.ready_reason = ready_reason;
+    }
 }
 
 pub fn validate_graph(path: &Path) -> Result<()> {

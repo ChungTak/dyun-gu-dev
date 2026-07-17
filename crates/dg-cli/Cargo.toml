@@ -46,6 +46,7 @@ sophon-soc = ["sophon", "dg-sophon/soc"]
 anyhow.workspace = true
 clap.workspace = true
 signal-hook = "0.3"
+tiny_http = "0.12.0"
 dg-elements = { path = "../dg-elements" }
 dg-core = { path = "../dg-core" }
 dg-graph = { path = "../dg-graph" }

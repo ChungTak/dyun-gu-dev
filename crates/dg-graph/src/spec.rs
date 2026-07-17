@@ -15,6 +15,9 @@ use crate::registry::{element_ports, find_element, validate_element};
 const DEFAULT_API_VERSION: &str = "dg/v1";
 const DEFAULT_KIND: &str = "Graph";
 
+const DEFAULT_MAX_INCLUDE_DEPTH: usize = 16;
+const DEFAULT_MAX_INCLUDE_COUNT: usize = 64;
+
 /// How graph elements are scheduled onto threads (from nndeploy).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +86,43 @@ pub struct DefaultsSpec {
     pub backend: Option<String>,
     pub device: Option<DeviceDefault>,
     pub precision: Option<String>,
+}
+
+/// Resource and input-size limits for a graph.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceLimits {
+    /// Maximum size of a raw graph configuration file in bytes.
+    pub max_config_bytes: usize,
+    /// Maximum include depth for nested configuration files.
+    pub max_include_depth: usize,
+    /// Maximum number of included configuration files.
+    pub max_include_count: usize,
+    /// Maximum number of nodes in a graph.
+    pub max_nodes: usize,
+    /// Maximum number of connections (edges) in a graph.
+    pub max_connections: usize,
+    /// Maximum size of a single tensor buffer in bytes.
+    pub max_tensor_bytes: usize,
+    /// Maximum size of a single media frame in bytes.
+    pub max_frame_bytes: usize,
+    /// Maximum size of a model artifact in bytes.
+    pub max_model_bytes: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_config_bytes: 8 * 1024 * 1024,
+            max_include_depth: DEFAULT_MAX_INCLUDE_DEPTH,
+            max_include_count: DEFAULT_MAX_INCLUDE_COUNT,
+            max_nodes: 1024,
+            max_connections: 8192,
+            max_tensor_bytes: 512 * 1024 * 1024,
+            max_frame_bytes: 512 * 1024 * 1024,
+            max_model_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -175,6 +215,8 @@ pub struct GraphSpec {
     #[serde(default)]
     #[serde(alias = "edges")]
     pub connections: Vec<String>,
+    #[serde(default)]
+    pub limits: ResourceLimits,
 }
 
 fn default_api_version() -> String {
@@ -198,6 +240,7 @@ impl Default for GraphSpec {
             execution: ExecutionSpec::default(),
             nodes: Vec::new(),
             connections: Vec::new(),
+            limits: ResourceLimits::default(),
         }
     }
 }
@@ -268,6 +311,15 @@ impl GraphSpec {
                 message: format!("include cycle detected at {}", path.display()),
             });
         }
+        if resolving.len() > DEFAULT_MAX_INCLUDE_DEPTH.saturating_add(1) {
+            return Err(Error::Validation {
+                path: "includes".to_string(),
+                message: format!(
+                    "include depth exceeds maximum {}",
+                    DEFAULT_MAX_INCLUDE_DEPTH
+                ),
+            });
+        }
         let result = Self::load_from_path_tracked_inner(path, resolving, included);
         resolving.remove(&canonical_path);
         result
@@ -280,7 +332,27 @@ impl GraphSpec {
     ) -> Result<Self> {
         let format = GraphFormat::from_path(path)?;
         let content = fs::read_to_string(path)?;
+        if content.len() > ResourceLimits::default().max_config_bytes {
+            return Err(Error::Validation {
+                path: path.display().to_string(),
+                message: format!(
+                    "config file size {} exceeds default maximum {}",
+                    content.len(),
+                    ResourceLimits::default().max_config_bytes
+                ),
+            });
+        }
         let spec = Self::from_str_with_format(&content, format)?;
+        if content.len() > spec.limits.max_config_bytes {
+            return Err(Error::Validation {
+                path: path.display().to_string(),
+                message: format!(
+                    "config file size {} exceeds configured maximum {}",
+                    content.len(),
+                    spec.limits.max_config_bytes
+                ),
+            });
+        }
         spec.normalize_with_base_dir_tracked(path.parent(), resolving, included)
     }
 
@@ -324,6 +396,15 @@ impl GraphSpec {
                 let canonical_included = fs::canonicalize(&included_path)?;
                 if main_path.as_ref() != Some(&canonical_included) {
                     included.push(canonical_included);
+                }
+                if included.len() > self.limits.max_include_count.saturating_add(1) {
+                    return Err(Error::Validation {
+                        path: "includes".to_string(),
+                        message: format!(
+                            "include count exceeds maximum {}",
+                            self.limits.max_include_count
+                        ),
+                    });
                 }
                 let included =
                     GraphSpec::load_from_path_tracked(&included_path, resolving, included)?;
@@ -490,6 +571,26 @@ impl GraphSpec {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.nodes.len() > self.limits.max_nodes {
+            return Err(Error::Validation {
+                path: "nodes".to_string(),
+                message: format!(
+                    "node count {} exceeds limit {}",
+                    self.nodes.len(),
+                    self.limits.max_nodes
+                ),
+            });
+        }
+        if self.connections.len() > self.limits.max_connections {
+            return Err(Error::Validation {
+                path: "connections".to_string(),
+                message: format!(
+                    "connection count {} exceeds limit {}",
+                    self.connections.len(),
+                    self.limits.max_connections
+                ),
+            });
+        }
         if self.execution.queue_capacity == 0 {
             return Err(Error::Validation {
                 path: "execution.queue_capacity".to_string(),
