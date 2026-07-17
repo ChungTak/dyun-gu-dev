@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Per-backend counters for inference submissions, in-flight requests, and
@@ -161,7 +162,7 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 }
 
 /// Percentile summary of inference latencies recorded by [`BackendMetrics`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencyPercentiles {
     pub count: u64,
     pub p50_ns: u64,
@@ -170,7 +171,7 @@ pub struct LatencyPercentiles {
 }
 
 /// A point-in-time snapshot of [`BackendMetrics`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendMetricsSnapshot {
     pub submissions: u64,
     pub in_flight: u64,
