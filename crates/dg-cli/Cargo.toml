@@ -45,6 +45,7 @@ sophon-soc = ["sophon", "dg-sophon/soc"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+signal-hook = "0.3"
 dg-elements = { path = "../dg-elements" }
 dg-core = { path = "../dg-core" }
 dg-graph = { path = "../dg-graph" }

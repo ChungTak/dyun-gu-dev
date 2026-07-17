@@ -244,11 +244,23 @@ impl GraphSpec {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let mut resolving = BTreeSet::new();
-        Self::load_from_path_tracked(path.as_ref(), &mut resolving)
+        Self::load_from_path_with_includes(path).map(|(spec, _)| spec)
     }
 
-    fn load_from_path_tracked(path: &Path, resolving: &mut BTreeSet<PathBuf>) -> Result<Self> {
+    pub(crate) fn load_from_path_with_includes(
+        path: impl AsRef<Path>,
+    ) -> Result<(Self, Vec<PathBuf>)> {
+        let mut resolving = BTreeSet::new();
+        let mut included = vec![fs::canonicalize(path.as_ref())?];
+        let spec = Self::load_from_path_tracked(path.as_ref(), &mut resolving, &mut included)?;
+        Ok((spec, included))
+    }
+
+    fn load_from_path_tracked(
+        path: &Path,
+        resolving: &mut BTreeSet<PathBuf>,
+        included: &mut Vec<PathBuf>,
+    ) -> Result<Self> {
         let canonical_path = fs::canonicalize(path)?;
         if !resolving.insert(canonical_path.clone()) {
             return Err(Error::Validation {
@@ -256,7 +268,7 @@ impl GraphSpec {
                 message: format!("include cycle detected at {}", path.display()),
             });
         }
-        let result = Self::load_from_path_tracked_inner(path, resolving);
+        let result = Self::load_from_path_tracked_inner(path, resolving, included);
         resolving.remove(&canonical_path);
         result
     }
@@ -264,22 +276,25 @@ impl GraphSpec {
     fn load_from_path_tracked_inner(
         path: &Path,
         resolving: &mut BTreeSet<PathBuf>,
+        included: &mut Vec<PathBuf>,
     ) -> Result<Self> {
         let format = GraphFormat::from_path(path)?;
         let content = fs::read_to_string(path)?;
         let spec = Self::from_str_with_format(&content, format)?;
-        spec.normalize_with_base_dir_tracked(path.parent(), resolving)
+        spec.normalize_with_base_dir_tracked(path.parent(), resolving, included)
     }
 
     pub fn normalize_with_base_dir(self, base_dir: Option<&Path>) -> Result<Self> {
         let mut resolving = BTreeSet::new();
-        self.normalize_with_base_dir_tracked(base_dir, &mut resolving)
+        let mut included = Vec::new();
+        self.normalize_with_base_dir_tracked(base_dir, &mut resolving, &mut included)
     }
 
     fn normalize_with_base_dir_tracked(
         self,
         base_dir: Option<&Path>,
         resolving: &mut BTreeSet<PathBuf>,
+        included: &mut Vec<PathBuf>,
     ) -> Result<Self> {
         if !(self.api_version == "dg/v1" || self.api_version == "v1") {
             return Err(Error::Validation {
@@ -302,10 +317,16 @@ impl GraphSpec {
         }
 
         let mut merged = GraphSpec::default();
+        let main_path = base_dir.map(Path::to_path_buf);
         if let Some(base_dir) = base_dir {
             for include in &self.includes {
                 let included_path = base_dir.join(include);
-                let included = GraphSpec::load_from_path_tracked(&included_path, resolving)?;
+                let canonical_included = fs::canonicalize(&included_path)?;
+                if main_path.as_ref() != Some(&canonical_included) {
+                    included.push(canonical_included);
+                }
+                let included =
+                    GraphSpec::load_from_path_tracked(&included_path, resolving, included)?;
                 merged.merge_included(included);
             }
         }

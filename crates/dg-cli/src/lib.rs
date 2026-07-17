@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::ExitCode;
+use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use dg_core::{DataFormat, DataType, DeviceKind, MemoryDomain};
-use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec};
+use dg_graph::{Graph, GraphDiff, GraphReport, GraphSpec, GraphStatus};
 use dg_media::{
     FrameLayout, FrameTransferRequest, HandleKind, MediaFrame, MemoryDtype, MemoryFormat,
     TransferReport, ZeroCopyPlanner,
@@ -15,7 +16,11 @@ use dg_media::{
 use dg_stream::{
     CodecId, MediaKind, MemoryStreamHub, PublisherSink, Rational32, TrackInfo, TrackReadiness,
 };
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+
+use signal_hook::consts::{SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 use dg_elements as _;
 #[cfg(feature = "media")]
@@ -76,7 +81,7 @@ pub enum OutputFormat {
     Text,
 }
 
-pub fn run(cli: Cli) -> Result<()> {
+pub fn run(cli: Cli) -> Result<ExitCode> {
     init_logging(cli.verbose);
     match cli.command {
         Command::Run {
@@ -91,16 +96,32 @@ pub fn run(cli: Cli) -> Result<()> {
                 "demo completed: {} mock streams, {} frames, planned copy count: {}",
                 summary.streams, summary.frames, summary.planned_copy_count
             );
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
-        Command::Validate { config } => validate_graph(&config),
-        Command::ListElements => list_elements(),
-        Command::Schema { kind } => schema(kind.as_deref()),
+        Command::Validate { config } => {
+            validate_graph(&config)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ListElements => {
+            list_elements()?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Schema { kind } => {
+            schema(kind.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
 pub fn run_graph(path: &Path, format: OutputFormat) -> Result<()> {
-    run_graph_with_watch(path, format, false)
+    let exit_code = run_graph_with_watch(path, format, false)?;
+    if exit_code == ExitCode::SUCCESS {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "graph run failed with exit code {exit_code:?}"
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,25 +235,132 @@ fn planned_demo_copy_count() -> Result<usize> {
     Ok(report.copy_count)
 }
 
-fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Result<()> {
-    let spec = load_spec(path)?;
-    let graph = Graph::new(spec).context("build graph")?;
-    let report = graph.run().context("run graph")?;
-    print_report(&report, format)?;
+fn run_graph_with_watch(path: &Path, format: OutputFormat, watch: bool) -> Result<ExitCode> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[allow(clippy::large_enum_variant)]
+    enum SupervisorEvent {
+        Signal(i32),
+        Reload(std::result::Result<(GraphSpec, GraphDiff), dg_graph::Error>),
+    }
+
+    let spec = match load_spec(path) {
+        Ok(spec) => spec,
+        Err(error) => {
+            error!(error = %error, path = %path.display(), "configuration error");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let graph = match Graph::new(spec) {
+        Ok(graph) => graph,
+        Err(error) => {
+            error!(error = %error, "failed to build graph");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let mut running = match graph.start(std::collections::HashMap::new()) {
+        Ok(running) => Some(running),
+        Err(error) => {
+            error!(error = %error, "failed to start graph");
+            return Ok(ExitCode::from(3));
+        }
+    };
+
+    let (event_tx, event_rx) = mpsc::channel::<SupervisorEvent>();
+
+    // Signal handler thread.
+    let signal_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        let mut signals = match Signals::new([SIGTERM, SIGINT]) {
+            Ok(signals) => signals,
+            Err(_) => return,
+        };
+        for signal in signals.forever() {
+            if signal_tx.send(SupervisorEvent::Signal(signal)).is_err() {
+                break;
+            }
+        }
+    });
+
+    // File watcher thread.
     if watch {
-        let _watch_handle = dg_graph::watch(path, move |result| match result {
-            Ok((_, diff)) if !diff.is_empty() => match render_diff(&diff, format) {
-                Ok(output) => println!("{output}"),
-                Err(error) => println!("failed to render graph reload diff: {error}"),
-            },
-            Ok(_) => {}
-            Err(error) => println!("{}", render_reload_rejected(&error.to_string())),
-        })?;
-        loop {
-            std::thread::park();
+        let watch_tx = event_tx;
+        let _watch_handle = dg_graph::watch(path, move |result| {
+            let _ = watch_tx.send(SupervisorEvent::Reload(result));
+        });
+    } else {
+        drop(event_tx);
+    }
+
+    let mut status: Option<ExitCode> = None;
+    while status.is_none() {
+        match event_rx.recv_timeout(POLL_INTERVAL) {
+            Ok(SupervisorEvent::Signal(signal)) => {
+                info!(signal, "received termination signal");
+                let Some(mut running) = running.take() else {
+                    break;
+                };
+                running.request_stop();
+                match running.shutdown(SHUTDOWN_TIMEOUT) {
+                    Ok(()) => {
+                        let report = running.finish()?;
+                        print_report(&report, format)?;
+                        status = Some(ExitCode::SUCCESS);
+                    }
+                    Err(error) if error.to_string().contains("shutdown timed out") => {
+                        status = Some(ExitCode::from(4));
+                    }
+                    Err(error) => {
+                        error!(error = %error, "shutdown error");
+                        status = Some(ExitCode::from(3));
+                    }
+                }
+            }
+            Ok(SupervisorEvent::Reload(Ok((_, diff)))) if !diff.is_empty() => {
+                let Some(running) = running.as_mut() else {
+                    break;
+                };
+                let output = render_diff(&diff, format)?;
+                match running.apply_hot_update(diff) {
+                    Ok(()) => {
+                        println!("{output}");
+                    }
+                    Err(error) => {
+                        println!("{}", render_reload_rejected(&error.to_string()));
+                    }
+                }
+            }
+            Ok(SupervisorEvent::Reload(Ok(_))) => {}
+            Ok(SupervisorEvent::Reload(Err(error))) => {
+                println!("{}", render_reload_rejected(&error.to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let Some(running_ref) = running.as_mut() else {
+                    break;
+                };
+                match running_ref.poll() {
+                    Ok(()) => {
+                        if running_ref.status().0 == GraphStatus::Stopped {
+                            let running = running.take().expect("graph still running");
+                            let report = running.finish()?;
+                            print_report(&report, format)?;
+                            status = Some(ExitCode::SUCCESS);
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "graph worker failed");
+                        status = Some(ExitCode::from(3));
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                status = Some(ExitCode::from(3));
+            }
         }
     }
-    Ok(())
+
+    Ok(status.unwrap_or(ExitCode::SUCCESS))
 }
 
 pub fn validate_graph(path: &Path) -> Result<()> {
