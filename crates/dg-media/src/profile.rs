@@ -1,6 +1,6 @@
 //! Runtime avcodec profile selection and thin mapping to the upstream V3 [`VideoProfile`].
 
-use dg_core::{Error, Result};
+use dg_core::{DeviceKind, Error, Result};
 
 /// Production support level advertised by dyun for a compiled profile.
 ///
@@ -128,18 +128,19 @@ impl AvcodecProfile {
 
     /// Production support status for capability/CLI/docs (INT3-14).
     ///
-    /// RKMPP / OneVPL / AMF remain `Unverified` until upstream provides real-device sign-off.
-    /// NV Host / Device-frame are marked production in the plan matrix; runtime hardware
+    /// NativeFree is a development-only pure-Rust image path and must not be advertised as
+    /// production. RKMPP / OneVPL / AMF remain `Unverified` until upstream provides real-device
+    /// sign-off. NV Host / Device-frame are marked production in the plan matrix; runtime hardware
     /// verification is still environment-dependent.
     #[must_use]
     pub const fn support_level(self) -> ProfileSupportLevel {
         match self {
-            Self::NativeFree
-            | Self::Software
+            Self::Software
             | Self::NvcodecHost
             | Self::NvcodecHostFallback
             | Self::NvcodecDeviceFrame => ProfileSupportLevel::Production,
-            Self::RkmppHost
+            Self::NativeFree
+            | Self::RkmppHost
             | Self::RkmppHostFallback
             | Self::RkmppZeroCopy
             | Self::OnevplHost
@@ -245,7 +246,8 @@ pub fn resolve_profile(name: Option<&str>, legacy_avcodec_only: bool) -> Result<
     }
 
     if legacy_avcodec_only {
-        let profile = AvcodecProfile::NativeFree;
+        // The legacy `avcodec` feature now maps to the software fallback profile.
+        let profile = AvcodecProfile::Software;
         profile.ensure_compiled()?;
         return Ok(profile);
     }
@@ -269,9 +271,40 @@ pub fn resolve_profile(name: Option<&str>, legacy_avcodec_only: bool) -> Result<
     }
 }
 
+/// Maps an inference device name to the preferred avcodec profile.
+///
+/// Returns `None` when the device is unknown or has no matching codec hardware.
+#[must_use]
+pub fn resolve_profile_from_device(device: &str) -> Option<AvcodecProfile> {
+    let kind = device_kind_from_name(device)?;
+    let profile = match kind {
+        DeviceKind::Cpu | DeviceKind::IntelNpu => AvcodecProfile::Software,
+        DeviceKind::IntelGpu => AvcodecProfile::OnevplHostFallback,
+        DeviceKind::CudaGpu => AvcodecProfile::NvcodecHostFallback,
+        DeviceKind::RknnNpu => AvcodecProfile::RkmppHostFallback,
+        DeviceKind::SophonTpu => return None,
+    };
+    Some(profile)
+}
+
+fn device_kind_from_name(value: &str) -> Option<DeviceKind> {
+    match value.to_ascii_lowercase().as_str() {
+        "cpu" => Some(DeviceKind::Cpu),
+        "intel_gpu" | "intel-gpu" | "igpu" => Some(DeviceKind::IntelGpu),
+        "intel_npu" | "intel-npu" | "npu" => Some(DeviceKind::IntelNpu),
+        "cuda" | "cuda_gpu" | "cuda-gpu" | "nv" | "nvidia" => Some(DeviceKind::CudaGpu),
+        "rknn" | "rknn_npu" | "rknn-npu" | "rk" | "rockchip" => Some(DeviceKind::RknnNpu),
+        "sophon" | "sophon_tpu" | "sophon-tpu" => Some(DeviceKind::SophonTpu),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compiled_profiles, reject_profile_hw_conflict, resolve_profile, AvcodecProfile};
+    use super::{
+        compiled_profiles, reject_profile_hw_conflict, resolve_profile,
+        resolve_profile_from_device, AvcodecProfile,
+    };
 
     #[cfg(feature = "avcodec-sdk")]
     use dg_media_avcodec::VideoProfile;
@@ -292,10 +325,6 @@ mod tests {
     fn production_matrix_and_unverified_hardware() {
         use super::ProfileSupportLevel;
         assert_eq!(
-            AvcodecProfile::NativeFree.support_level(),
-            ProfileSupportLevel::Production
-        );
-        assert_eq!(
             AvcodecProfile::Software.support_level(),
             ProfileSupportLevel::Production
         );
@@ -306,6 +335,10 @@ mod tests {
         assert_eq!(
             AvcodecProfile::NvcodecDeviceFrame.support_level(),
             ProfileSupportLevel::Production
+        );
+        assert_eq!(
+            AvcodecProfile::NativeFree.support_level(),
+            ProfileSupportLevel::Unverified
         );
         assert_eq!(
             AvcodecProfile::RkmppHost.support_level(),
@@ -320,7 +353,7 @@ mod tests {
             ProfileSupportLevel::Unverified
         );
         assert!(!AvcodecProfile::AmfHost.is_production_supported());
-        assert!(AvcodecProfile::NativeFree.is_production_supported());
+        assert!(!AvcodecProfile::NativeFree.is_production_supported());
     }
 
     #[test]
@@ -358,12 +391,34 @@ mod tests {
     }
 
     #[test]
-    fn resolve_profile_legacy_avcodec_maps_native_free() {
+    fn resolve_profile_legacy_avcodec_maps_software() {
         let result = resolve_profile(None, true);
-        #[cfg(feature = "avcodec-profile-native-free")]
-        assert_eq!(result, Ok(AvcodecProfile::NativeFree));
-        #[cfg(not(feature = "avcodec-profile-native-free"))]
+        #[cfg(feature = "avcodec-profile-software")]
+        assert_eq!(result, Ok(AvcodecProfile::Software));
+        #[cfg(not(feature = "avcodec-profile-software"))]
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_profile_from_device_maps_inference_hardware() {
+        assert_eq!(
+            resolve_profile_from_device("intel_gpu"),
+            Some(AvcodecProfile::OnevplHostFallback)
+        );
+        assert_eq!(
+            resolve_profile_from_device("CPU"),
+            Some(AvcodecProfile::Software)
+        );
+        assert_eq!(
+            resolve_profile_from_device("cuda"),
+            Some(AvcodecProfile::NvcodecHostFallback)
+        );
+        assert_eq!(
+            resolve_profile_from_device("rknn_npu"),
+            Some(AvcodecProfile::RkmppHostFallback)
+        );
+        assert_eq!(resolve_profile_from_device("sophon"), None);
+        assert_eq!(resolve_profile_from_device("unknown"), None);
     }
 
     #[test]

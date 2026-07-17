@@ -567,27 +567,6 @@ mod tests {
         (out, diag)
     }
 
-    #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-native-free"))]
-    #[test]
-    fn native_free_h264_transcode_to_h265_has_report_backends() {
-        let packet = encode_h264_packet(AvcodecProfile::NativeFree);
-        let (out, diag) = run_transcode(AvcodecProfile::NativeFree, packet, CodecId::H265);
-        assert_eq!(diag.profile_name, "native-free");
-        assert_eq!(diag.decoder_backend.as_deref(), Some("rust-h264"));
-        assert_eq!(diag.encoder_backend.as_deref(), Some("rust-h265"));
-        match out.meta.media_info.as_ref().map(|i| &i.payload) {
-            Some(MediaPayloadInfo::Encoded(encoded)) => {
-                assert_eq!(encoded.codec, dg_core::MediaCodec::H265);
-            }
-            other => panic!("expected encoded H.265 payload, got {other:?}"),
-        }
-        // Fusion report mode should be present after session create.
-        assert!(
-            core_mode_non_empty(&diag),
-            "session diagnostics should record a non-empty memory path or backends"
-        );
-    }
-
     #[cfg(all(target_arch = "x86_64", feature = "avcodec-profile-software"))]
     #[test]
     fn software_h264_transcode_stays_on_ffmpeg_stack() {

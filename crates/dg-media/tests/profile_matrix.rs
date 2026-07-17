@@ -42,10 +42,10 @@ fn compiled_profiles_map_to_sdk_profiles() {
 }
 
 #[test]
-fn legacy_avcodec_alias_resolves_native_free() {
+fn legacy_avcodec_alias_resolves_software() {
     let result = resolve_profile(None, true);
-    #[cfg(feature = "avcodec-profile-native-free")]
-    assert_eq!(result, Ok(AvcodecProfile::NativeFree));
+    #[cfg(feature = "avcodec-profile-software")]
+    assert_eq!(result, Ok(AvcodecProfile::Software));
 }
 
 #[test]
@@ -62,8 +62,9 @@ fn multi_profile_requires_explicit_choice() {
 }
 
 #[test]
-fn unverified_hardware_is_not_production() {
+fn unverified_and_development_profiles_are_not_production() {
     for profile in [
+        AvcodecProfile::NativeFree,
         AvcodecProfile::RkmppHost,
         AvcodecProfile::RkmppZeroCopy,
         AvcodecProfile::OnevplHost,
@@ -72,8 +73,4 @@ fn unverified_hardware_is_not_production() {
         assert_eq!(profile.support_level(), ProfileSupportLevel::Unverified);
         assert!(!profile.is_production_supported());
     }
-    assert_eq!(
-        AvcodecProfile::NativeFree.support_level(),
-        ProfileSupportLevel::Production
-    );
 }

@@ -220,23 +220,24 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 ### 5.1 avcodec Profile
 
 真实 codec 需要选择一个 **`avcodec-profile-*` Cargo feature**，并在节点参数里写
-同名运行时 `profile`（例如 `native-free`、`software`、`rkmpp-host`）。
+同名运行时 `profile`（例如 `software`、`onevpl-host-fallback`、`rkmpp-host`）。
 
 | Cargo feature | 支持级别 | 典型用途 |
 | --- | --- | --- |
-| `avcodec-profile-native-free` | production | 纯 Rust JPEG + rust-h264 Host（推荐本地验证） |
+| `avcodec-profile-native-free` | development | 纯 Rust JPEG + rust-h264 Host（本地验证，不作为产品默认） |
 | `avcodec-profile-software` | production | FFmpeg Host（libavcodec ≥ 58；H.264 需 libx264） |
+| `avcodec-profile-onevpl-host-fallback` | production | Intel iGPU Host，失败时回退到 FFmpeg/x264 |
 | `avcodec-profile-nvcodec-host` / `-fallback` | production | NV Host（真机；CI 仅 compile-only） |
 | `avcodec-profile-nvcodec-device-frame` | production | CudaDevice NV12 device-frame（非完整 CUDA 零拷贝） |
 | `avcodec-profile-rkmpp-host` / `-fallback` | **unverified** | Rockchip Host（fallback 才可回退软件） |
 | `avcodec-profile-rkmpp-zero-copy` | **unverified** | DrmPrime→RGA→DmaBuf 图像链 |
-| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | **unverified** | Intel/AMD Host |
+| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | **unverified** | Intel/AMD Host（无 fallback 时不保证可用） |
 
 规则摘要：
 
-- 未写 `profile` 且只编译了一个 Profile 时自动选用；编译多个时必须显式选择。
+- 未写 `profile` 且只编译了一个 Profile 时自动选用；编译多个时优先按推理 `device` 自动选择，无 device 则默认 `software`。
 - 不能同时写 `profile` 与遗留 `hw`。
-- 旧 feature 名 `avcodec` 兼容映射到 native-free，并告警。
+- 旧 feature 名 `avcodec` 兼容映射到 `software`。
 - **零拷贝**必须同时有 MemoryDomain、external handle、plane layout、ownership guard
   与 `TransferReport.copy_count == 0` 证据；不得仅凭 domain 同名宣称。
 
