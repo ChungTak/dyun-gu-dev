@@ -5,19 +5,19 @@
 | Field | Value |
 |---|---|
 | 计划创建基线 | `main@cca9639` |
-| 正式执行基线 | 待 Phase 0 填写 |
+| 正式执行基线 | `main@1bae8c8` |
 | 产品形态 | 长运行 Intel 边缘运行时 |
 | 首发设备 | OpenVINO CPU + Intel iGPU |
 | 正式制品 | Ubuntu 24.04 x86_64 OCI |
 | 媒体/协议 | Software H.264 + Cheetah 真流 |
-| 状态 | 尚未开始实施 |
+| 状态 | Phase 0 进行中 |
 
 ## INT5 状态
 
 | ID | 状态 | PR/Commit | Evidence | Blocker |
 |---|---|---|---|---|
-| INT5-01 | Planned | - | - | - |
-| INT5-02 | Planned | - | - | - |
+| INT5-01 | In Progress | `devin/1784256357-phase0-openvino-baseline` | 见 `OPENVINO_PRODUCT_ACCEPTANCE.md` | 待 iGPU runner |
+| INT5-02 | In Progress | `devin/1784256357-phase0-openvino-baseline` | fmt/clippy/test/deny 全绿；`product-intel` 可编译 | - |
 | INT5-03 | Planned | - | - | - |
 | INT5-04 | Planned | - | - | - |
 | INT5-05 | Planned | - | - | - |

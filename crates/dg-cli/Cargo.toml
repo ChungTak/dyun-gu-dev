@@ -27,6 +27,15 @@ avcodec-profile-amf-host-fallback = ["media", "dg-media/avcodec-profile-amf-host
 avcodec-profile-rkmpp-zero-copy = ["media", "dg-media/avcodec-profile-rkmpp-zero-copy"]
 avcodec-profile-nvcodec-device-frame = ["media", "dg-media/avcodec-profile-nvcodec-device-frame"]
 
+# Production Intel edge runtime feature set (OpenVINO CPU/iGPU + Cheetah + software H.264).
+product-intel = [
+    "openvino",
+    "stream",
+    "dg-stream/cheetah",
+    "media",
+    "avcodec-profile-software",
+]
+
 openvino = ["dep:dg-openvino", "dg-openvino/backend"]
 rknn = ["dep:dg-rknn", "dg-rknn/backend"]
 tensorrt = ["dep:dg-tensorrt", "dg-tensorrt/backend"]

@@ -2092,7 +2092,9 @@ mod tests {
         let mut saw_error = false;
         for _ in 0..64 {
             match encoder.poll() {
-                Ok(MediaPoll::Ready(_)) => panic!("device-frame must not encode Host NV12 silently"),
+                Ok(MediaPoll::Ready(_)) => {
+                    panic!("device-frame must not encode Host NV12 silently")
+                }
                 Ok(MediaPoll::Pending) => continue,
                 Ok(MediaPoll::EndOfStream) => break,
                 Err(err) => {

@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 |---|---|
-| dyun commit | 待填写 |
-| Cargo.lock hash | 待填写 |
-| OCI reference | 待填写 |
-| OCI digest | 待填写 |
+| dyun commit | `1bae8c85c732b08705c47cb26e9375bad66b77bc` |
+| Cargo.lock hash | `375e51d95233f9e0114223895ca4d5dc40fa6ec3a432fd334cf89e9f24c2be5e` |
+| OCI reference | 待 release 阶段生成 |
+| OCI digest | 待 release 阶段生成 |
 | OpenVINO version | `2026.2.1`（实施时复核） |
 | GraphSpec API | `dg/v1` |
 | C ABI | v1，待冻结 |
@@ -18,10 +18,10 @@
 
 | Gate | Runner/Device | Driver/Plugin | Result | Evidence |
 |---|---|---|---|---|
-| OpenVINO CPU | 待填写 | 待填写 | Pending | - |
-| Intel iGPU | 待填写 | 待填写 | Pending | - |
-| Protocol E2E | 待填写 | Cheetah/software codec | Pending | - |
-| 24h soak | 待填写 | 同 release OCI | Pending | - |
+| OpenVINO CPU | `devin-box` / x86_64 | OpenVINO 2026.2.1 (runtime 待安装) | Compile & unit tests pass | fmt/clippy/test/deny green |
+| Intel iGPU | - | `/dev/dri` not present on this runner | Blocked | 需自托管 iGPU runner |
+| Protocol E2E | `devin-box` | Cheetah/software codec | Pending | INT5-05/08 |
+| 24h soak | - | 同 release OCI | Pending | INT5-10 |
 
 ## 接纳清单
 
