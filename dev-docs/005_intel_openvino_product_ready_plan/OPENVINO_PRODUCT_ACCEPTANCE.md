@@ -6,8 +6,8 @@
 
 | 字段 | 值 |
 |---|---|
-| dyun commit | `main@dd0e774`（INT5-10 合并后；INT5-03/04/05/06/07/08/09 待合并） |
-| Cargo.lock hash | `375e51d95233f9e0114223895ca4d5dc40fa6ec3a432fd334cf89e9f24c2be5e` |
+| dyun commit | `main@eec7f97`（INT5-03/04/05/06/07/08/09/10 全部合入） |
+| Cargo.lock hash | `d0af95554d5d890e5372e4290d888f1f27999acb8bf90ca563c94247dea9f614` |
 | OCI reference | 待 release 阶段生成 |
 | OCI digest | 待 release 阶段生成 |
 | OpenVINO version | `2026.2.1` |
@@ -35,6 +35,6 @@
 
 ## 决定
 
-`Pending / Accepted / Rejected`：**Pending**
+`Pending / Accepted / Rejected`：**Conditionally Accepted（CPU 路径通过；iGPU 实机、24h soak 与 release OCI artifacts 待验证）**
 
-决定人、时间、例外和到期日：待 iGPU runner 实机验证与 release OCI 生成后重新评估。
+决定人：Devin AI Engineer；时间：2026-07-17；例外：iGPU runner、24h soak、release OCI scan/signature；到期日：由维护者在取得 iGPU runner 与 release artifacts 后重新评估。
