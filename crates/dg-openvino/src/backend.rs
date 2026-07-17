@@ -442,10 +442,10 @@ impl InferBackend for OpenVINOBackend {
         if let Some(capabilities) = &self.capabilities {
             return Ok(capabilities.clone());
         }
-        if self.core.is_some() {
+        if let Some(core) = &self.core {
             // SAFETY: `core` is only accessed through `self` and this is a
             // private helper that borrows it immutably.
-            return self.probe_live_capabilities(self.core.as_ref().unwrap());
+            return self.probe_live_capabilities(core);
         }
         backend_capabilities(BackendKind::OpenVINO)
             .map(RuntimeCapabilities::from_static)
@@ -812,20 +812,11 @@ fn create_openvino_backend() -> Box<dyn InferBackend> {
     Box::new(OpenVINOBackend::new())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct OpenVinoConfig {
     device: Option<String>,
     max_in_flight: Option<usize>,
-}
-
-impl Default for OpenVinoConfig {
-    fn default() -> Self {
-        Self {
-            device: None,
-            max_in_flight: None,
-        }
-    }
 }
 
 fn configure_openvino(config: BackendConfig) -> Result<RuntimeOption> {
