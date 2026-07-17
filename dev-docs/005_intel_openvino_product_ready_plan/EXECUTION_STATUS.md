@@ -25,7 +25,7 @@
 | INT5-07 | Planned | - | - | INT5-06 |
 | INT5-08 | Planned | - | - | INT5-03/05 |
 | INT5-09 | Planned | - | - | INT5-03/08 |
-| INT5-10 | Planned | - | - | Intel iGPU runner |
+| INT5-10 | In Progress | `devin/1784258000-int5-10-oci` | OCI Dockerfile + release workflow with SBOM/provenance/cosign | Intel iGPU runner |
 | INT5-11 | Planned | - | - | INT5-01～10 |
 
 ## 状态更新规则
