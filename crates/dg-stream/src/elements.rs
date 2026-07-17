@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dg_core::{
     BitstreamFormat, DataType, EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaCodecConfig,
@@ -24,8 +25,8 @@ use crate::connector::{open_pull, open_push, validate_endpoint_url, PullEndpoint
 use crate::hub::{KEYFRAME_TAG, MEDIA_TAG};
 use crate::stream::SubscriberSourceSyncExt;
 use crate::stream::{
-    BackpressurePolicy, DispatchResult, MediaFilter, PublisherOptions, PublisherSink,
-    SubscriberOptions,
+    BackpressurePolicy, BootstrapPolicy, DispatchResult, MediaFilter, PublisherOptions,
+    PublisherSink, RetryConfig, SubscriberOptions,
 };
 use crate::track::{CodecExtradata, CodecId as TrackCodec, TrackInfo, TrackReadiness};
 use dg_media::{MediaFrame, MediaFrameKind};
@@ -49,8 +50,26 @@ const PULL_PARAM_FIELDS: &[&str] = &[
     "backpressure",
     "enable_video",
     "enable_audio",
+    "connect_timeout_ms",
+    "io_timeout_ms",
+    "retry_initial_backoff_ms",
+    "retry_max_backoff_ms",
+    "retry_multiplier",
+    "retry_jitter_percent",
+    "retry_max_attempts",
 ];
-const PUSH_PARAM_FIELDS: &[&str] = &["url", "announce_tracks", "tracks"];
+const PUSH_PARAM_FIELDS: &[&str] = &[
+    "url",
+    "announce_tracks",
+    "tracks",
+    "connect_timeout_ms",
+    "io_timeout_ms",
+    "retry_initial_backoff_ms",
+    "retry_max_backoff_ms",
+    "retry_multiplier",
+    "retry_jitter_percent",
+    "retry_max_attempts",
+];
 const TRACK_FIELDS: &[&str] = &[
     "track_id",
     "media_kind",
@@ -163,123 +182,370 @@ inventory::submit! {
 }
 
 struct StreamPullElement {
-    endpoint: PullEndpoint,
+    protocol: StreamProtocol,
+    url: String,
+    options: SubscriberOptions,
+    endpoint: Option<PullEndpoint>,
 }
 
-impl Element for StreamPullElement {
-    fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
-        let mut tracks_by_id: HashMap<u64, TrackInfo> = HashMap::new();
-        for track in &self.endpoint.tracks {
+impl StreamPullElement {
+    fn open_with_retry(&mut self, io: &ElementIo) -> Result<(), crate::error::Error> {
+        let mut attempt: u64 = 0;
+        loop {
+            if io.should_stop() {
+                return Err(crate::error::Error::Closed);
+            }
+            match open_pull(self.protocol, &self.url, self.options.clone()) {
+                Ok(endpoint) => {
+                    self.endpoint = Some(endpoint);
+                    return Ok(());
+                }
+                Err(err)
+                    if err.retryable()
+                        && self.options.retry.should_retry(attempt.saturating_add(1)) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    let backoff = self.options.retry.backoff(attempt);
+                    warn!(
+                        node = %io.name,
+                        attempt,
+                        backoff_ms = %backoff.as_millis(),
+                        error = %err.redacted(),
+                        "stream pull open failed; retrying"
+                    );
+                    sleep_with_stop(backoff, io)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn validate_tracks(tracks: &[TrackInfo]) -> dg_graph::Result<()> {
+        for track in tracks {
             if track.readiness != TrackReadiness::Ready {
-                let _ = self.endpoint.source.close_blocking();
                 return Err(dg_graph::Error::Runtime(format!(
                     "track {} is not ready ({:?})",
                     track.track_id, track.readiness
                 )));
             }
             if let Err(err) = track.validate_codec_config() {
-                let _ = self.endpoint.source.close_blocking();
                 return Err(dg_graph::Error::Runtime(format!(
                     "track codec config invalid: {err}"
                 )));
             }
-            tracks_by_id.insert(track.track_id, track.clone());
         }
+        Ok(())
+    }
+}
+
+impl Element for StreamPullElement {
+    fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
+        self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .ok_or_else(|| dg_graph::Error::Runtime("pull endpoint not opened".to_string()))?;
+        Self::validate_tracks(&endpoint.tracks)?;
+        let mut tracks_by_id: HashMap<u64, TrackInfo> = endpoint
+            .tracks
+            .iter()
+            .map(|track| (track.track_id, track.clone()))
+            .collect();
+        let mut reconnect_attempt: u64 = 0;
         let mut sequence = 0u64;
+        let mut needs_keyframe = false;
+
         loop {
             if io.should_stop() {
-                let _ = self.endpoint.source.close_blocking();
+                if let Some(endpoint) = self.endpoint.as_mut() {
+                    let _ = endpoint.source.close_blocking();
+                }
                 return Err(dg_graph::Error::NotRunning);
             }
-            match self.endpoint.source.recv_blocking() {
+
+            if self.endpoint.is_none() {
+                self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+                let endpoint = self.endpoint.as_ref().ok_or_else(|| {
+                    dg_graph::Error::Runtime("pull endpoint not opened after retry".to_string())
+                })?;
+                Self::validate_tracks(&endpoint.tracks)?;
+                tracks_by_id = endpoint
+                    .tracks
+                    .iter()
+                    .map(|track| (track.track_id, track.clone()))
+                    .collect();
+                reconnect_attempt = 0;
+                needs_keyframe = true;
+            }
+
+            let endpoint = self.endpoint.as_mut().ok_or_else(|| {
+                dg_graph::Error::Runtime("pull endpoint missing in run loop".to_string())
+            })?;
+
+            match endpoint.source.recv_blocking() {
                 Ok(Some(frame)) if frame.is_end_of_stream() => break,
                 Ok(Some(frame)) => {
-                    let packet = media_frame_to_packet(&frame, sequence, &tracks_by_id)?;
+                    let is_resumed = needs_keyframe;
+                    if needs_keyframe {
+                        if !is_keyframe(&frame) {
+                            continue;
+                        }
+                        needs_keyframe = false;
+                    }
+                    let mut packet = media_frame_to_packet(&frame, sequence, &tracks_by_id)?;
+                    if is_resumed {
+                        packet
+                            .meta
+                            .tags
+                            .insert("discontinuity".to_string(), "true".to_string());
+                    }
                     sequence = sequence.saturating_add(1);
                     io.send("out", packet)?;
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    let _ = self.endpoint.source.close_blocking();
-                    return Err(dg_graph::Error::Runtime(format!(
-                        "stream source error: {err}"
-                    )));
+                    if err.retryable()
+                        && self
+                            .options
+                            .retry
+                            .should_retry(reconnect_attempt.saturating_add(1))
+                    {
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        let backoff = self.options.retry.backoff(reconnect_attempt);
+                        warn!(
+                            node = %io.name,
+                            reconnect_attempt,
+                            backoff_ms = %backoff.as_millis(),
+                            error = %err.redacted(),
+                            "stream source recv failed; reconnecting"
+                        );
+                        let _ = endpoint.source.close_blocking();
+                        self.endpoint = None;
+                        sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
+                        continue;
+                    }
+                    let _ = endpoint.source.close_blocking();
+                    return Err(stream_to_graph_error(err));
                 }
             }
         }
-        let _ = self.endpoint.source.close_blocking();
+
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            let _ = endpoint.source.close_blocking();
+        }
         io.broadcast_eos()
     }
 }
 
 struct StreamPushElement {
-    sink: Box<dyn PublisherSink>,
+    protocol: StreamProtocol,
+    url: String,
+    options: PublisherOptions,
     tracks: Vec<TrackInfo>,
     announce_tracks: bool,
+    sink: Option<Box<dyn PublisherSink>>,
+}
+
+impl StreamPushElement {
+    fn open_with_retry(&mut self, io: &ElementIo) -> Result<(), crate::error::Error> {
+        let mut attempt: u64 = 0;
+        loop {
+            if io.should_stop() {
+                return Err(crate::error::Error::Closed);
+            }
+            match open_push(self.protocol, &self.url, self.options.clone()) {
+                Ok(sink) => {
+                    self.sink = Some(sink);
+                    return Ok(());
+                }
+                Err(err)
+                    if err.retryable()
+                        && self.options.retry.should_retry(attempt.saturating_add(1)) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    let backoff = self.options.retry.backoff(attempt);
+                    warn!(
+                        node = %io.name,
+                        attempt,
+                        backoff_ms = %backoff.as_millis(),
+                        error = %err.redacted(),
+                        "stream push open failed; retrying"
+                    );
+                    sleep_with_stop(backoff, io)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn announce(&self, sink: &dyn PublisherSink) -> dg_graph::Result<()> {
+        if !self.announce_tracks || self.tracks.is_empty() {
+            return Ok(());
+        }
+        for track in &self.tracks {
+            if track.readiness == TrackReadiness::Ready {
+                track.validate_codec_config().map_err(|err| {
+                    dg_graph::Error::Runtime(format!("track codec config invalid: {err}"))
+                })?;
+            }
+        }
+        sink.update_tracks(self.tracks.clone())
+            .map_err(|err| dg_graph::Error::Runtime(format!("track announcement failed: {err}")))
+    }
 }
 
 impl Element for StreamPushElement {
-    fn run(self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
-        if self.announce_tracks && !self.tracks.is_empty() {
-            for track in &self.tracks {
-                if track.readiness == TrackReadiness::Ready {
-                    track.validate_codec_config().map_err(|err| {
-                        dg_graph::Error::Runtime(format!("track codec config invalid: {err}"))
-                    })?;
-                }
-            }
-            self.sink
-                .update_tracks(self.tracks.clone())
-                .map_err(|err| {
-                    dg_graph::Error::Runtime(format!("track announcement failed: {err}"))
-                })?;
-        }
+    fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
+        self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+        let sink = self
+            .sink
+            .as_ref()
+            .ok_or_else(|| dg_graph::Error::Runtime("push sink not opened".to_string()))?;
+        self.announce(sink.as_ref())?;
+        let mut reconnect_attempt: u64 = 0;
+
         loop {
+            if io.should_stop() {
+                if let Some(sink) = self.sink.as_ref() {
+                    let _ = sink.close();
+                }
+                return Err(dg_graph::Error::NotRunning);
+            }
+
+            if self.sink.is_none() {
+                self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+                let sink = self.sink.as_ref().ok_or_else(|| {
+                    dg_graph::Error::Runtime("push sink not opened after retry".to_string())
+                })?;
+                self.announce(sink.as_ref())?;
+                reconnect_attempt = 0;
+            }
+
+            let sink = self.sink.as_ref().ok_or_else(|| {
+                dg_graph::Error::Runtime("push sink missing in run loop".to_string())
+            })?;
+
             let packet = match io.recv("in") {
                 Ok(Some(packet)) => packet,
                 Ok(None) => {
                     if io.should_stop() {
-                        let _ = self.sink.close();
+                        let _ = sink.close();
                         return Err(dg_graph::Error::NotRunning);
                     }
                     continue;
                 }
                 Err(err) => {
-                    let _ = self.sink.close();
+                    let _ = sink.close();
                     return Err(err);
                 }
             };
+
             if packet.is_eos() {
-                self.sink.close().map_err(|err| {
+                sink.close().map_err(|err| {
                     dg_graph::Error::Runtime(format!("publisher close failed: {err}"))
                 })?;
                 return Ok(());
             }
+
             let frame = packet_to_media_frame(packet)?;
-            match self.sink.push_frame(Arc::new(frame)) {
+            let push_result = sink.push_frame(Arc::new(frame));
+            match push_result {
                 Ok(DispatchResult::Accepted) => {}
                 Ok(DispatchResult::DroppedByPolicy) => {
                     debug!(node = %io.name, "frame dropped by backpressure policy");
                     io.drop_packet()?;
+                    continue;
                 }
                 Ok(DispatchResult::RejectedClosed) => {
-                    return Err(dg_graph::Error::Runtime(
-                        "publisher rejected frame: stream closed".to_string(),
-                    ));
+                    if !self
+                        .options
+                        .retry
+                        .should_retry(reconnect_attempt.saturating_add(1))
+                    {
+                        return Err(dg_graph::Error::Runtime(
+                            "publisher rejected frame: stream closed".to_string(),
+                        ));
+                    }
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    let backoff = self.options.retry.backoff(reconnect_attempt);
+                    warn!(
+                        node = %io.name,
+                        reconnect_attempt,
+                        backoff_ms = %backoff.as_millis(),
+                        "stream sink rejected frame; reconnecting"
+                    );
+                    io.drop_packet()?;
+                    let _ = sink.close();
+                    self.sink = None;
+                    sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
+                    continue;
                 }
                 Err(err) => {
-                    let _ = self.sink.close();
-                    return Err(dg_graph::Error::Runtime(format!(
-                        "stream sink error: {err}"
-                    )));
+                    if !err.retryable()
+                        || !self
+                            .options
+                            .retry
+                            .should_retry(reconnect_attempt.saturating_add(1))
+                    {
+                        let _ = sink.close();
+                        return Err(stream_to_graph_error(err));
+                    }
+                    reconnect_attempt = reconnect_attempt.saturating_add(1);
+                    let backoff = self.options.retry.backoff(reconnect_attempt);
+                    warn!(
+                        node = %io.name,
+                        reconnect_attempt,
+                        backoff_ms = %backoff.as_millis(),
+                        error = %err.redacted(),
+                        "stream sink push failed; reconnecting"
+                    );
+                    io.drop_packet()?;
+                    let _ = sink.close();
+                    self.sink = None;
+                    sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
+                    continue;
                 }
             }
+
             io.finish_packet()?;
-            let keyframe_requests = self.sink.take_keyframe_requests();
+            let keyframe_requests = sink.take_keyframe_requests();
             if keyframe_requests > 0 {
                 debug!(node = %io.name, keyframe_requests, "keyframe requested by remote peer");
             }
+            reconnect_attempt = 0;
         }
+    }
+}
+
+fn is_keyframe(frame: &MediaFrame) -> bool {
+    frame
+        .meta
+        .media_info
+        .as_ref()
+        .is_some_and(|info| info.is_keyframe())
+        || frame
+            .meta
+            .tags
+            .get(crate::hub::KEYFRAME_TAG)
+            .is_some_and(|value| value == "true")
+}
+
+fn sleep_with_stop(duration: Duration, io: &ElementIo) -> Result<(), crate::error::Error> {
+    let start = Instant::now();
+    while start.elapsed() < duration {
+        if io.should_stop() {
+            return Err(crate::error::Error::Closed);
+        }
+        let remaining = duration - start.elapsed();
+        std::thread::sleep(Duration::from_millis(50).min(remaining));
+    }
+    Ok(())
+}
+
+fn stream_to_graph_error(err: crate::error::Error) -> dg_graph::Error {
+    match err {
+        crate::error::Error::InvalidArgument(message) => dg_graph::Error::Config(message),
+        other => dg_graph::Error::Runtime(other.redacted()),
     }
 }
 
@@ -679,9 +945,13 @@ struct PullConfig {
 
 fn create_pull(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<CreatedElement> {
     let config = parse_pull(node, protocol)?;
-    let endpoint = open_pull(protocol, &config.url, config.options).map_err(create_error)?;
     Ok(CreatedElement {
-        element: Box::new(StreamPullElement { endpoint }),
+        element: Box::new(StreamPullElement {
+            protocol,
+            url: config.url,
+            options: config.options,
+            endpoint: None,
+        }),
         handle: ElementHandle::None,
     })
 }
@@ -707,38 +977,48 @@ fn parse_pull(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<Pul
     let options = SubscriberOptions {
         queue_capacity,
         backpressure: read_backpressure(params)?,
+        bootstrap_policy: BootstrapPolicy::default(),
         media_filter: MediaFilter {
             enable_video,
             enable_audio,
         },
-        ..SubscriberOptions::default()
+        retry: read_retry_config(params)?,
+        connect_timeout_ms: read_u64(params, "connect_timeout_ms", 10_000)?,
+        io_timeout_ms: read_u64(params, "io_timeout_ms", 30_000)?,
     };
     Ok(PullConfig { url, options })
 }
 
-struct PushConfig {
-    url: String,
-    announce_tracks: bool,
-    tracks: Vec<TrackInfo>,
-}
-
 fn create_push(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<CreatedElement> {
     let config = parse_push(node, protocol)?;
-    let options = PublisherOptions {
-        announce_tracks: config.announce_tracks,
-    };
-    let sink = open_push(protocol, &config.url, options).map_err(create_error)?;
     Ok(CreatedElement {
         element: Box::new(StreamPushElement {
-            sink,
+            protocol,
+            url: config.url,
+            options: PublisherOptions {
+                announce_tracks: config.announce_tracks,
+                retry: config.retry,
+                connect_timeout_ms: config.connect_timeout_ms,
+                io_timeout_ms: config.io_timeout_ms,
+            },
             tracks: config.tracks,
             announce_tracks: config.announce_tracks,
+            sink: None,
         }),
         handle: ElementHandle::None,
     })
 }
 
-fn parse_push(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<PushConfig> {
+struct PushConfigFull {
+    url: String,
+    announce_tracks: bool,
+    tracks: Vec<TrackInfo>,
+    retry: RetryConfig,
+    connect_timeout_ms: u64,
+    io_timeout_ms: u64,
+}
+
+fn parse_push(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<PushConfigFull> {
     let params = params_object(node)?;
     reject_unknown_fields(params, PUSH_PARAM_FIELDS)?;
     let url = read_url(params, node)?;
@@ -746,18 +1026,63 @@ fn parse_push(node: &NodeSpec, protocol: StreamProtocol) -> dg_graph::Result<Pus
     let announce_tracks = read_bool(params, "announce_tracks", true)?;
     let tracks = read_tracks(params)?;
     validate_tracks(&tracks)?;
-    Ok(PushConfig {
+    Ok(PushConfigFull {
         url,
         announce_tracks,
         tracks,
+        retry: read_retry_config(params)?,
+        connect_timeout_ms: read_u64(params, "connect_timeout_ms", 10_000)?,
+        io_timeout_ms: read_u64(params, "io_timeout_ms", 30_000)?,
     })
 }
 
 fn create_error(err: crate::error::Error) -> dg_graph::Error {
     match err {
         crate::error::Error::InvalidArgument(message) => dg_graph::Error::Config(message),
-        other => dg_graph::Error::Runtime(other.to_string()),
+        other => dg_graph::Error::Runtime(other.redacted()),
     }
+}
+
+fn read_u64(params: &Map<String, Value>, key: &str, default: u64) -> dg_graph::Result<u64> {
+    match params.get(key) {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            dg_graph::Error::Config(format!("field {key} must be a non-negative integer"))
+        }),
+        None => Ok(default),
+    }
+}
+
+fn read_retry_config(params: &Map<String, Value>) -> dg_graph::Result<RetryConfig> {
+    let initial_backoff_ms = read_u64(params, "retry_initial_backoff_ms", 250)?;
+    let max_backoff_ms = read_u64(params, "retry_max_backoff_ms", 30_000)?;
+    if max_backoff_ms < initial_backoff_ms {
+        return Err(dg_graph::Error::Config(
+            "field retry_max_backoff_ms must be >= retry_initial_backoff_ms".to_string(),
+        ));
+    }
+    let multiplier = read_u64(params, "retry_multiplier", 2)?;
+    if multiplier == 0 {
+        return Err(dg_graph::Error::Config(
+            "field retry_multiplier must be non-zero".to_string(),
+        ));
+    }
+    let jitter = read_u64(params, "retry_jitter_percent", 20)?;
+    if jitter > 100 {
+        return Err(dg_graph::Error::Config(
+            "field retry_jitter_percent must be <= 100".to_string(),
+        ));
+    }
+    let max_attempts = read_u64(params, "retry_max_attempts", 0)?;
+    let max_attempts = u32::try_from(max_attempts).map_err(|_| {
+        dg_graph::Error::Config("field retry_max_attempts exceeds u32 range".to_string())
+    })?;
+    Ok(RetryConfig {
+        initial_backoff_ms,
+        max_backoff_ms,
+        multiplier,
+        jitter_percent: jitter as u8,
+        max_attempts,
+    })
 }
 
 fn params_object(node: &NodeSpec) -> dg_graph::Result<&Map<String, Value>> {

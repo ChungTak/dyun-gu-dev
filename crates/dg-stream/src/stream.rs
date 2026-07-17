@@ -8,6 +8,55 @@ use crate::ids::{PublishLease, StreamId, StreamKey, SubscriberId};
 use crate::track::TrackInfo;
 use dg_media::MediaFrame;
 
+/// Retry policy for stream connect/reconnect attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryConfig {
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub multiplier: u64,
+    pub jitter_percent: u8,
+    pub max_attempts: u32,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            initial_backoff_ms: 250,
+            max_backoff_ms: 30_000,
+            multiplier: 2,
+            jitter_percent: 20,
+            max_attempts: 0,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Returns `true` if another retry is allowed. `max_attempts == 0` means unlimited.
+    pub fn should_retry(&self, attempt: u64) -> bool {
+        self.max_attempts == 0 || attempt <= self.max_attempts as u64
+    }
+
+    /// Computes the backoff for the given attempt number (1-indexed).
+    pub fn backoff(&self, attempt: u64) -> std::time::Duration {
+        let base = self.initial_backoff_ms.saturating_mul(
+            self.multiplier
+                .saturating_pow(attempt.saturating_sub(1) as u32),
+        );
+        let clamped = base.min(self.max_backoff_ms);
+        let jitter = if self.jitter_percent == 0 {
+            0
+        } else {
+            let max_delta = clamped.saturating_mul(self.jitter_percent as u64) / 100;
+            if max_delta == 0 {
+                0
+            } else {
+                rand::random::<u64>() % max_delta
+            }
+        };
+        std::time::Duration::from_millis(clamped.saturating_add(jitter))
+    }
+}
+
 /// Backpressure policy for stream subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackpressurePolicy {
@@ -85,12 +134,18 @@ pub enum DispatchResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublisherOptions {
     pub announce_tracks: bool,
+    pub retry: RetryConfig,
+    pub connect_timeout_ms: u64,
+    pub io_timeout_ms: u64,
 }
 
 impl Default for PublisherOptions {
     fn default() -> Self {
         Self {
             announce_tracks: true,
+            retry: RetryConfig::default(),
+            connect_timeout_ms: 10_000,
+            io_timeout_ms: 30_000,
         }
     }
 }
@@ -102,6 +157,9 @@ pub struct SubscriberOptions {
     pub backpressure: BackpressurePolicy,
     pub bootstrap_policy: BootstrapPolicy,
     pub media_filter: MediaFilter,
+    pub retry: RetryConfig,
+    pub connect_timeout_ms: u64,
+    pub io_timeout_ms: u64,
 }
 
 /// Media filter for subscriber selection.
@@ -127,6 +185,9 @@ impl Default for SubscriberOptions {
             backpressure: BackpressurePolicy::DropDroppableFirst,
             bootstrap_policy: BootstrapPolicy::default(),
             media_filter: MediaFilter::default(),
+            retry: RetryConfig::default(),
+            connect_timeout_ms: 10_000,
+            io_timeout_ms: 30_000,
         }
     }
 }

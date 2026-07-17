@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{redact_url, Error, Result};
 use crate::hub::MemoryStreamHub;
 use crate::stream::{PublisherOptions, PublisherSink, SubscriberOptions, SubscriberSource};
 use crate::track::TrackInfo;
@@ -52,7 +52,8 @@ fn scheme_of(url: &str) -> Result<&str> {
     match url.split_once("://") {
         Some((scheme, rest)) if !scheme.is_empty() && !rest.is_empty() => Ok(scheme),
         _ => Err(Error::InvalidArgument(format!(
-            "url `{url}` must be of the form scheme://path"
+            "url `{}` must be of the form scheme://path",
+            redact_url(url)
         ))),
     }
 }
@@ -152,12 +153,25 @@ pub trait CheetahRuntimeConnector: Send + Sync {
 #[cfg(feature = "cheetah")]
 static CHEETAH_CONNECTOR: OnceLock<Box<dyn CheetahRuntimeConnector>> = OnceLock::new();
 
-/// Installs the process-wide cheetah runtime connector. Fails if one is already installed.
+/// Installs the process-wide cheetah runtime connector.
+///
+/// Returns an error if a different connector is already installed. Calling this
+/// repeatedly with the same connector source is treated as a configuration
+/// conflict; callers should use [`install_embedded_cheetah_connector`] for the
+/// built-in embedded runtime.
 #[cfg(feature = "cheetah")]
 pub fn install_cheetah_connector(connector: Box<dyn CheetahRuntimeConnector>) -> Result<()> {
-    CHEETAH_CONNECTOR.set(connector).map_err(|_| {
-        Error::InvalidArgument("cheetah runtime connector already installed".to_string())
-    })
+    CHEETAH_CONNECTOR
+        .set(connector)
+        .map_err(|_| Error::AlreadyInstalled)
+}
+
+#[cfg(feature = "cheetah")]
+fn ensure_cheetah_connector_installed() -> Result<()> {
+    if CHEETAH_CONNECTOR.get().is_some() {
+        return Ok(());
+    }
+    crate::embedded::install_embedded_cheetah_connector()
 }
 
 #[cfg(feature = "cheetah")]
@@ -166,13 +180,21 @@ fn open_cheetah_pull(
     url: &str,
     options: SubscriberOptions,
 ) -> Result<PullEndpoint> {
+    ensure_cheetah_connector_installed()?;
     let connector = CHEETAH_CONNECTOR.get().ok_or_else(|| {
-        Error::Runtime("no cheetah runtime connector installed; call install_cheetah_connector before opening protocol URLs".to_string())
+        Error::Runtime(
+            "no cheetah runtime connector installed; call install_cheetah_connector \
+             before opening protocol URLs"
+                .to_string(),
+        )
     })?;
     let (tracks, source) = connector.open_pull(protocol, url, options)?;
     Ok(PullEndpoint {
         tracks,
-        source: Box::new(CheetahSubscriberSourceAdapter::new(source)),
+        source: Box::new(CheetahSubscriberSourceAdapter::new(
+            source,
+            protocol.label(),
+        )),
     })
 }
 
@@ -182,11 +204,19 @@ fn open_cheetah_push(
     url: &str,
     options: PublisherOptions,
 ) -> Result<Box<dyn PublisherSink>> {
+    ensure_cheetah_connector_installed()?;
     let connector = CHEETAH_CONNECTOR.get().ok_or_else(|| {
-        Error::Runtime("no cheetah runtime connector installed; call install_cheetah_connector before opening protocol URLs".to_string())
+        Error::Runtime(
+            "no cheetah runtime connector installed; call install_cheetah_connector \
+             before opening protocol URLs"
+                .to_string(),
+        )
     })?;
     let sink = connector.open_push(protocol, url, options)?;
-    Ok(Box::new(CheetahPublisherSinkAdapter::new(sink)))
+    Ok(Box::new(CheetahPublisherSinkAdapter::new(
+        sink,
+        protocol.label(),
+    )))
 }
 
 #[cfg(not(feature = "cheetah"))]
