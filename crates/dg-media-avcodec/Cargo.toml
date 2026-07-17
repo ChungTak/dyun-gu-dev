@@ -12,9 +12,6 @@ default = []
 # Internal marker: enables the avcodec SDK dependency without selecting a profile.
 avcodec-sdk = ["dep:avcodec"]
 
-# Legacy alias mapping to the software fallback profile.
-avcodec = ["avcodec-profile-software"]
-
 # Profile features (each depends on the SDK marker and upstream profile presets).
 avcodec-profile-native-free = ["avcodec-sdk", "avcodec/profile-native-free"]
 avcodec-profile-software = ["avcodec-sdk", "avcodec/profile-software"]
