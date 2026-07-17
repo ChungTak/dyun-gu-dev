@@ -12,7 +12,7 @@ owned by the selected Profile—do not set low-level backend ids or rely on `mem
 | Example | Cargo features | Runtime `profile` | Support | Notes |
 | --- | --- | --- | --- | --- |
 | [`raw-adapter.yaml`](raw-adapter.yaml) | `media` (default) | n/a | n/a | No avcodec SDK; raw payload relabel only |
-| [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | production | Pure Rust JPEG encode/decode |
+| [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | development | Pure Rust JPEG encode/decode (not product default) |
 | [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | libavcodec ≥ 58 + libx264 for H.264 |
 | [`nvcodec-device-frame.yaml`](nvcodec-device-frame.yaml) | `media,avcodec-profile-nvcodec-device-frame` | `nvcodec-device-frame` | production* | CUDA runtime; no resize; `allow_staging=false` |
 | [`rkmpp-host-fallback.yaml`](rkmpp-host-fallback.yaml) | `media,avcodec-profile-rkmpp-host-fallback` | `rkmpp-host-fallback` | **unverified** | Compile/config only until signed |
@@ -21,8 +21,9 @@ owned by the selected Profile—do not set low-level backend ids or rely on `mem
 \* NV Host/device-frame are production after RC2 hardware sign-off (`DYUN_NV_HW=1`). CPU CI only
 enforces compile-only; do not treat `avcodec-nvcodec-compile` as media passed.
 
-Legacy `avcodec` feature maps to the native-free compatibility profile. Prefer an
-explicit `avcodec-profile-*` feature and matching `profile` field. Do not set both
+Legacy `avcodec` feature maps to the `software` fallback profile. Prefer an
+explicit `avcodec-profile-*` feature and matching `profile` field, or let the
+graph `device` select the appropriate hardware backend. Do not set both
 `profile` and legacy `hw` (`hw` is removed in **0.2.0**).
 
 ## Commands

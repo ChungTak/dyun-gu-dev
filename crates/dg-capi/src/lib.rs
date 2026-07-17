@@ -1950,7 +1950,7 @@ connections:
         );
     }
 
-    #[cfg(feature = "avcodec-profile-native-free")]
+    #[cfg(feature = "avcodec-profile-software")]
     #[test]
     fn load_rejects_unknown_media_profile_with_structured_error() {
         let mut engine = ptr::null_mut();

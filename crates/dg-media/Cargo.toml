@@ -12,8 +12,8 @@ default = []
 # Internal marker: enables dg-media-avcodec integration without selecting a profile.
 avcodec-sdk = ["dep:dg-media-avcodec", "dg-media-avcodec/avcodec-sdk"]
 
-# Legacy alias mapping to the native-free compatibility profile.
-avcodec = ["avcodec-profile-native-free"]
+# Legacy alias mapping to the software fallback profile.
+avcodec = ["avcodec-profile-software"]
 
 # Profile features forwarded to dg-media-avcodec.
 avcodec-profile-native-free = ["avcodec-sdk", "dg-media-avcodec/avcodec-profile-native-free"]

@@ -42,10 +42,10 @@ fn compiled_profiles_map_to_sdk_profiles() {
 }
 
 #[test]
-fn legacy_avcodec_alias_resolves_native_free() {
+fn legacy_avcodec_alias_resolves_software() {
     let result = resolve_profile(None, true);
-    #[cfg(feature = "avcodec-profile-native-free")]
-    assert_eq!(result, Ok(AvcodecProfile::NativeFree));
+    #[cfg(feature = "avcodec-profile-software")]
+    assert_eq!(result, Ok(AvcodecProfile::Software));
 }
 
 #[test]

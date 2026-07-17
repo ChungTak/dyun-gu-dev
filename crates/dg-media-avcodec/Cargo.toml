@@ -12,8 +12,8 @@ default = []
 # Internal marker: enables the avcodec SDK dependency without selecting a profile.
 avcodec-sdk = ["dep:avcodec"]
 
-# Legacy alias mapping to the native-free compatibility profile.
-avcodec = ["avcodec-profile-native-free"]
+# Legacy alias mapping to the software fallback profile.
+avcodec = ["avcodec-profile-software"]
 
 # Profile features (each depends on the SDK marker and upstream profile presets).
 avcodec-profile-native-free = ["avcodec-sdk", "avcodec/profile-native-free"]
@@ -30,4 +30,4 @@ avcodec-profile-rkmpp-zero-copy = ["avcodec-sdk", "avcodec/profile-rkmpp-zero-co
 avcodec-profile-nvcodec-device-frame = ["avcodec-sdk", "avcodec/profile-nvcodec-device-frame"]
 
 [dependencies]
-avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "dd3190008f2b544b51a74a9f4a225d52befc120a", package = "avcodec", default-features = false, optional = true }
+avcodec = { git = "https://github.com/TimothyWalker6922/avcodec-rs-develop.git", rev = "0b4e9067a397fa3ddc4006ce69c2057cf94a0505", package = "avcodec", default-features = false, optional = true }

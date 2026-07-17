@@ -74,6 +74,7 @@ pub fn avcodec_bitstream_to_core(format: BitstreamFormat) -> CoreBitstream {
 }
 
 pub fn avcodec_image_to_core_pixel(format: ImageInfo) -> CorePixel {
+    // Future upstream variants may appear before dyun adds explicit mappings.
     match format {
         ImageInfo::Yuv420p => CorePixel::Yuv420P,
         ImageInfo::Yuv422p => CorePixel::Yuv422P,
@@ -85,6 +86,7 @@ pub fn avcodec_image_to_core_pixel(format: ImageInfo) -> CorePixel {
         ImageInfo::Rgba => CorePixel::Rgba,
         ImageInfo::Bgra => CorePixel::Bgra,
         ImageInfo::Gray8 => CorePixel::Gray8,
+        ImageInfo::Yuv420p10le | ImageInfo::P010 => CorePixel::Unknown,
     }
 }
 

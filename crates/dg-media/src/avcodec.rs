@@ -160,6 +160,7 @@ pub(crate) fn map_video_runtime_error(error: VideoRuntimeError) -> AvError {
         packet_index: None,
         source_format: None,
         destination_format: None,
+        sample_type: None,
         width: None,
         height: None,
         memory_domain: error.source_domain.or(error.target_domain),

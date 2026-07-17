@@ -66,8 +66,8 @@ fn dg_media_avcodec_is_only_direct_codec_dependency() {
     let avcodec_manifest = include_str!("../../dg-media-avcodec/Cargo.toml");
     // Plan 4 stable 0.2.0 (annotated tag peels to this commit).
     assert!(
-        avcodec_manifest.contains("rev = \"dd3190008f2b544b51a74a9f4a225d52befc120a\""),
-        "dg-media-avcodec must pin dd31900 0.2.0 stable revision"
+        avcodec_manifest.contains("rev = \"0b4e9067a397fa3ddc4006ce69c2057cf94a0505\""),
+        "dg-media-avcodec must pin 0b4e9067 upstream main revision"
     );
     assert!(
         avcodec_manifest.contains("profile-native-free"),

@@ -768,7 +768,8 @@ fn parse_transcode_config(node: &NodeSpec) -> Result<TranscodeCoreConfig> {
         params_object(node)?
     };
     reject_unknown_fields(params, TRANSCODE_PARAM_FIELDS)?;
-    let profile = resolve_avcodec_profile(params, cfg!(feature = "avcodec"))?;
+    let profile =
+        resolve_avcodec_profile(params, node.device.as_deref(), cfg!(feature = "avcodec"))?;
     let output_codec_name = params
         .get("output_codec")
         .or_else(|| params.get("codec"))
@@ -897,7 +898,8 @@ fn parse_decode_config(node: &NodeSpec) -> Result<DecodeCoreConfig> {
         params_object(node)?
     };
     reject_unknown_fields(params, DECODE_PARAM_FIELDS)?;
-    let profile = resolve_avcodec_profile(params, cfg!(feature = "avcodec"))?;
+    let profile =
+        resolve_avcodec_profile(params, node.device.as_deref(), cfg!(feature = "avcodec"))?;
     let codec = match params.get("codec").and_then(Value::as_str) {
         Some(name) => Some(crate::avcodec::codec_from_name(Some(name))?),
         None => None,
@@ -933,7 +935,8 @@ fn parse_encode_config(node: &NodeSpec) -> Result<EncodeCoreConfig> {
     } else {
         params_object(node)?
     };
-    let profile = resolve_avcodec_profile(params, cfg!(feature = "avcodec"))?;
+    let profile =
+        resolve_avcodec_profile(params, node.device.as_deref(), cfg!(feature = "avcodec"))?;
     let codec = match params.get("codec").and_then(Value::as_str) {
         Some(name) => Some(
             crate::avcodec::codec_from_name(Some(name))
@@ -985,14 +988,17 @@ fn parse_encode_config(node: &NodeSpec) -> Result<EncodeCoreConfig> {
 #[cfg(feature = "avcodec-sdk")]
 fn parse_resize_profile(node: &NodeSpec) -> Result<crate::profile::AvcodecProfile> {
     let params = params_object(node)?;
-    resolve_avcodec_profile(params, cfg!(feature = "avcodec"))
+    resolve_avcodec_profile(params, node.device.as_deref(), cfg!(feature = "avcodec"))
 }
 
 #[cfg(feature = "avcodec-sdk")]
 fn resolve_avcodec_profile(
     params: &Map<String, Value>,
+    device: Option<&str>,
     legacy_avcodec_only: bool,
 ) -> Result<crate::profile::AvcodecProfile> {
+    use crate::profile::AvcodecProfile;
+
     if params.get("memory_domain").is_some() {
         warn!(
             "element param `memory_domain` is ignored under avcodec V3; I/O domains are owned by \
@@ -1014,12 +1020,10 @@ fn resolve_avcodec_profile(
                 advertise_profile_support(profile);
                 return Ok(profile);
             }
-            // Compatibility: when only native-free is built, `hw=auto` → software would
-            // hard-fail; fall through to the single compiled default with an extra warning.
+            // Compatibility: when only the software fallback is built, `hw=auto` can still run.
             if matches!(
                 profile,
-                crate::profile::AvcodecProfile::Software
-                    | crate::profile::AvcodecProfile::NativeFree
+                AvcodecProfile::Software | AvcodecProfile::NativeFree
             ) {
                 let compiled = crate::profile::compiled_profiles();
                 if compiled.len() == 1 {
@@ -1038,6 +1042,28 @@ fn resolve_avcodec_profile(
                 profile.cargo_feature()
             )));
         }
+    }
+    // Infer the codec backend from the graph's inference device when no explicit profile/hw.
+    if profile_name.is_none() {
+        if let Some(device) = device {
+            if let Some(profile) = crate::profile::resolve_profile_from_device(device) {
+                if profile.is_compiled() {
+                    advertise_profile_support(profile);
+                    return Ok(profile);
+                }
+                warn!(
+                    device,
+                    profile = %profile.name(),
+                    "device-matched avcodec profile is not compiled"
+                );
+            }
+        }
+    }
+    // Default to the software fallback when available; otherwise fall through to the explicit
+    // resolver so users get a clear message if no profile is compiled.
+    if profile_name.is_none() && AvcodecProfile::Software.is_compiled() {
+        advertise_profile_support(AvcodecProfile::Software);
+        return Ok(AvcodecProfile::Software);
     }
     let profile = resolve_profile(profile_name, legacy_avcodec_only)
         .map_err(|err| Error::Config(err.to_string()))?;

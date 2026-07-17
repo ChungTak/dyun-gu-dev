@@ -7,9 +7,9 @@
 
 #[cfg(feature = "avcodec-sdk")]
 use avcodec::core::{
-    AvError, BitstreamFormat, CodecId, ExternalBufferDescriptor, ExternalDropGuard, ExternalHandle,
-    ExternalImageDescriptor, ExternalPacketDescriptor, ExternalPlaneDescriptor, Image, ImageInfo,
-    MemoryDomain, Packet, PacketFlags, TimeBase,
+    AvError, BitstreamFormat, CodecId, ColorInfo, ExternalBufferDescriptor, ExternalDropGuard,
+    ExternalHandle, ExternalImageDescriptor, ExternalPacketDescriptor, ExternalPlaneDescriptor,
+    HdrStaticMetadata, Image, ImageInfo, MemoryDomain, Packet, PacketFlags, TimeBase,
 };
 
 /// Result of probing external buffer export availability.
@@ -150,6 +150,8 @@ pub fn host_packed_image_descriptor(
         info,
         coded_width,
         coded_height,
+        color: ColorInfo::unspecified(),
+        hdr: None::<HdrStaticMetadata>,
         buffer: ExternalBufferDescriptor {
             domain: MemoryDomain::Host,
             size,
