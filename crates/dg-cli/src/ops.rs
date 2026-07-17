@@ -38,9 +38,10 @@ impl OpsHandle {
 
 impl Drop for OpsHandle {
     fn drop(&mut self) {
-        if self.thread.is_some() {
+        if let Some(thread) = self.thread.take() {
             self.stop.store(true, Ordering::SeqCst);
             self.server.unblock();
+            let _ = thread.join();
         }
     }
 }
@@ -85,11 +86,23 @@ pub fn start(state: Arc<RwLock<OpsState>>, bind: &str) -> Result<OpsHandle> {
 }
 
 fn is_loopback(bind: &str) -> bool {
-    bind.starts_with("127.")
-        || bind.starts_with("[::1]")
-        || bind.starts_with("::1")
-        || bind.starts_with("localhost:")
-        || bind == "localhost"
+    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+
+    let (host, _) = bind.rsplit_once(':').unwrap_or((bind, ""));
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if host == "localhost" {
+        return true;
+    }
+
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn handle_request(state: &Arc<RwLock<OpsState>>, request: Request) {

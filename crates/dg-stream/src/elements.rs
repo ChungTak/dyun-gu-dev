@@ -630,7 +630,10 @@ fn enrich_frame_media_info_from_tracks(
         Ok(id) => id,
         Err(_) if tracks_by_id.len() == 1 => {
             // Single-track streams may omit per-frame track identity; bind to the only track.
-            *tracks_by_id.keys().next().expect("single track present")
+            *tracks_by_id
+                .keys()
+                .next()
+                .ok_or_else(|| dg_graph::Error::Runtime("single track missing".to_string()))?
         }
         Err(err) => return Err(err),
     };
@@ -680,7 +683,9 @@ fn enrich_frame_media_info_from_tracks(
         });
 
     let encoded = EncodedMediaInfo {
-        stream_index: u32::try_from(track_id).unwrap_or(u32::MAX),
+        stream_index: u32::try_from(track_id).map_err(|_| {
+            dg_graph::Error::Runtime(format!("track_id {track_id} exceeds u32 stream_index"))
+        })?,
         track_id: Some(track_id),
         media_kind: track_media_kind(track),
         codec: track_media_codec(track.codec),

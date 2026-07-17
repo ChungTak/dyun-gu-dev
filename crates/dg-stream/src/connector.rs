@@ -240,7 +240,8 @@ fn open_cheetah_push(
 #[cfg(not(feature = "cheetah"))]
 fn cheetah_feature_disabled(protocol: StreamProtocol, url: &str) -> Error {
     Error::Sdk(format!(
-        "{} endpoint `{url}` requires building dg-stream with the `cheetah` feature",
-        protocol.label()
+        "{} endpoint `{}` requires building dg-stream with the `cheetah` feature",
+        protocol.label(),
+        redact_url(url)
     ))
 }

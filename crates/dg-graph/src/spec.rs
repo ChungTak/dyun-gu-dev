@@ -441,6 +441,7 @@ impl GraphSpec {
         self.connections.extend(other.connections);
         self.allow_cycles |= other.allow_cycles;
         self.execution = other.execution;
+        self.limits = other.limits;
         self.api_version = other.api_version;
         self.kind = other.kind;
     }

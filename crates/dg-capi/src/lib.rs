@@ -3,7 +3,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -238,6 +238,12 @@ impl Engine {
     }
 
     fn push(&mut self, tensor: Tensor) -> Result<(), String> {
+        if self.running.is_some() {
+            return Err(
+                "cannot push inputs while graph is running; use run for one-shot execution"
+                    .to_string(),
+            );
+        }
         if self.graph.is_none() {
             return Err("engine must be built before pushing input".to_string());
         }
@@ -250,16 +256,24 @@ impl Engine {
     }
 
     fn run(&mut self) -> Result<(), String> {
+        if self.running.is_some() {
+            return Err(
+                "cannot run one-shot execution while graph is running; shutdown first".to_string(),
+            );
+        }
         let graph = self
             .graph
             .as_ref()
             .ok_or_else(|| "engine must be built first".to_string())?;
-        let inputs = std::mem::take(&mut self.pending_inputs)
-            .into_iter()
-            .collect::<std::collections::HashMap<_, _>>();
+        let inputs: HashMap<String, Vec<Tensor>> = self
+            .pending_inputs
+            .iter()
+            .map(|(name, tensors)| (name.clone(), tensors.clone()))
+            .collect();
         let report = graph
             .run_with_inputs(inputs)
             .map_err(|error| error.to_string())?;
+        self.pending_inputs.clear();
         for tensors in report.sinks.into_values() {
             self.outputs.extend(tensors);
         }
@@ -274,10 +288,13 @@ impl Engine {
             self.spec.validate().map_err(|error| error.to_string())?;
             self.graph = Some(Graph::new(self.spec.clone()).map_err(|error| error.to_string())?);
         }
-        let graph = self.graph.as_ref().expect("graph built above");
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "engine must be built first".to_string())?;
         self.running = Some(
             graph
-                .start(std::collections::HashMap::new())
+                .start(HashMap::new())
                 .map_err(|error| error.to_string())?,
         );
         Ok(())
@@ -828,6 +845,7 @@ pub unsafe extern "C" fn dg_engine_reload_file(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
+        spec.validate().map_err(graph_error)?;
         let engine = unsafe { &mut *engine };
         engine.inner.reload(spec).map_err(reload_error)?;
         Ok(())

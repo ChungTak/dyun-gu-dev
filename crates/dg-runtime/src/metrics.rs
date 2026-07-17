@@ -70,7 +70,11 @@ impl BackendMetrics {
     }
 
     pub fn finish_in_flight(&self) {
-        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
     }
 
     pub fn submissions(&self) -> u64 {
@@ -130,11 +134,10 @@ impl BackendMetrics {
     }
 
     pub fn infer_latency_percentiles(&self) -> LatencyPercentiles {
-        let mut latencies = self
-            .infer_latencies_ns
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let mut latencies = match self.infer_latencies_ns.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         if latencies.is_empty() {
             return LatencyPercentiles {
                 count: 0,
