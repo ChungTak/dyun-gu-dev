@@ -889,7 +889,7 @@ impl Drop for RunningGraph {
             node.control.stop.store(true, Ordering::Relaxed);
         }
         let mut workers = std::mem::take(&mut self.workers);
-        let deadline = Instant::now() + Duration::from_millis(100);
+        let deadline = Instant::now() + Duration::from_secs(5);
         for node in workers.values_mut() {
             while let Some(worker) = node.workers.pop() {
                 while !worker.is_finished() && Instant::now() < deadline {

@@ -49,7 +49,9 @@ jobs:
           linker="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
           test -x "$linker"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$linker" >> "$GITHUB_ENV"
-      - run: cargo build --release --locked --target ${{ matrix.target }} -p dg-cli -p dg-capi
+      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: echo 'CARGO_FLAGS=--features product-intel' >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p dg-cli -p dg-capi ${CARGO_FLAGS}
       - name: Package
         run: |
           package="dyun-gu-${GITHUB_REF_NAME}-${{ matrix.target }}"
