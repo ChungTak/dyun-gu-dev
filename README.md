@@ -11,6 +11,12 @@ cargo run -p dg-cli -- demo --config examples/mock-multi-stream-demo.yaml
 cargo run -p dg-cli -- list-elements
 ```
 
+Intel 产品构建（OpenVINO + software H.264 + Cheetah 真流）：
+
+```bash
+cargo build -p dg-cli --locked --no-default-features --features product-intel
+```
+
 默认构建不依赖厂商 SDK，并使用 mock 后端、录制式内存帧和 `mock://` stream
 验证图执行、算法后处理与多分支编排。`demo` 命令运行两路 SDK-free mock 流，
 并输出由 `ZeroCopyPlanner` 计算的 planned copy count；默认的 `media_decode`
@@ -24,6 +30,7 @@ cargo run -p dg-cli -- list-elements
 - [设计方案与里程碑](docs/design.md)
 - [媒体 Profile 示例](examples/media/README.md)
 - [C API 示例](crates/dg-capi/examples/basic.c)
+- [C API 长运行生命周期示例](crates/dg-capi/examples/lifecycle.c)
 
 ## 质量门禁
 
