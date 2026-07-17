@@ -248,9 +248,39 @@ fn run_openvino_cpu_async_inflight(model_path: &Path, max_in_flight: usize) {
         })
         .collect();
 
+    fn poll_ready(
+        runtime: &mut Runtime,
+        sequences: &[u64],
+        input_values: &[[f32; 4]],
+        received: &mut u64,
+    ) {
+        if let dg_runtime::InferPoll::Ready { outputs, sequence } = runtime.poll().expect("poll") {
+            let index = sequences
+                .iter()
+                .position(|s| *s == sequence)
+                .expect("unknown sequence");
+            assert_eq!(
+                outputs[0].buffer().read_bytes(),
+                f32_bytes(&input_values[index])
+            );
+            *received += 1;
+        }
+    }
+
     let start = Instant::now();
     let mut sequences = Vec::new();
+    let mut received = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(30);
+
     for value in &input_values {
+        while runtime.in_flight() >= max_in_flight {
+            assert!(
+                Instant::now() < deadline,
+                "deadline exceeded waiting for free request"
+            );
+            poll_ready(&mut runtime, &sequences, &input_values, &mut received);
+        }
+
         let input_desc = TensorDesc::new(
             Shape::new([1, 4]),
             DataType::F32,
@@ -270,20 +300,8 @@ fn run_openvino_cpu_async_inflight(model_path: &Path, max_in_flight: usize) {
         assert!(runtime.in_flight() <= max_in_flight);
     }
 
-    let mut received = 0u64;
-    let deadline = Instant::now() + Duration::from_secs(30);
     while received < sequences.len() as u64 && Instant::now() < deadline {
-        if let dg_runtime::InferPoll::Ready { outputs, sequence } = runtime.poll().expect("poll") {
-            let index = sequences
-                .iter()
-                .position(|s| *s == sequence)
-                .expect("unknown sequence");
-            assert_eq!(
-                outputs[0].buffer().read_bytes(),
-                f32_bytes(&input_values[index])
-            );
-            received += 1;
-        }
+        poll_ready(&mut runtime, &sequences, &input_values, &mut received);
     }
     assert_eq!(
         received,
