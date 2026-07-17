@@ -240,13 +240,44 @@ impl OpenVINOBackend {
 
     fn parse_device_capabilities(value: &str) -> Vec<DataType> {
         let mut precisions = Vec::new();
-        for token in value.split(',') {
-            let token = token.trim();
+        for token in value.split([',', ' ', ';']) {
+            let token = token
+                .trim()
+                .trim_matches(|c| c == '[' || c == ']' || c == '"' || c == '\'');
+            if token.is_empty() {
+                continue;
+            }
             if let Some(precision) = Self::precision_from_capability(token) {
-                precisions.push(precision);
+                if !precisions.contains(&precision) {
+                    precisions.push(precision);
+                }
             }
         }
         precisions
+    }
+
+    fn default_precisions_for_device(kind: DeviceKind) -> Vec<DataType> {
+        match kind {
+            DeviceKind::Cpu => vec![
+                DataType::F32,
+                DataType::F16,
+                DataType::BF16,
+                DataType::I8,
+                DataType::U8,
+                DataType::I16,
+                DataType::U16,
+                DataType::new(dg_core::TypeCode::Int, 32, 1),
+                DataType::new(dg_core::TypeCode::Int, 64, 1),
+            ],
+            DeviceKind::IntelGpu => vec![
+                DataType::F32,
+                DataType::F16,
+                DataType::BF16,
+                DataType::I8,
+                DataType::U8,
+            ],
+            _ => vec![DataType::F32],
+        }
     }
 
     fn probe_live_capabilities(&self, core: &Core) -> Result<RuntimeCapabilities> {
@@ -278,7 +309,14 @@ impl OpenVINOBackend {
             let async_capable = !range.is_empty()
                 && (supported_properties.contains("RANGE_FOR_ASYNC_INFER_REQUESTS")
                     || supported_properties.contains("OPTIMAL_NUMBER_OF_INFER_REQUESTS"));
-            let verified_precisions = Self::parse_device_capabilities(&capabilities);
+            let verified_precisions = {
+                let parsed = Self::parse_device_capabilities(&capabilities);
+                if parsed.is_empty() {
+                    Self::default_precisions_for_device(kind)
+                } else {
+                    parsed
+                }
+            };
 
             all_precisions.extend(verified_precisions.iter().cloned());
             device_kinds.push(kind);
