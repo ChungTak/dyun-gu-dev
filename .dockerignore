@@ -1,5 +1,6 @@
-# Ignore build artifacts and local secrets.
+# Ignore build artifacts, local secrets and git history.
 /target
+.git
 **/*.rs.bk
 *.tar.gz
 *.log

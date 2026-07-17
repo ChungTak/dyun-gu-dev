@@ -183,6 +183,10 @@ impl OpenVINOBackend {
                             .read_model_from_file(model_path, weights_path)
                             .map_err(|err| Error::BackendUnavailable(err.to_string()));
                     }
+                    return Err(Error::BackendUnavailable(format!(
+                        "OpenVINO IR weights file missing: {}",
+                        weights.display()
+                    )));
                 }
                 let bytes = std::fs::read(path)?;
                 core.read_model_from_buffer(&bytes, None)
@@ -209,15 +213,15 @@ impl OpenVINOBackend {
         }
     }
 
-    fn device_kind_from_name(name: &str) -> DeviceKind {
+    fn device_kind_from_name(name: &str) -> Option<DeviceKind> {
         if name.starts_with("CPU") {
-            DeviceKind::Cpu
+            Some(DeviceKind::Cpu)
         } else if name.starts_with("GPU") {
-            DeviceKind::IntelGpu
+            Some(DeviceKind::IntelGpu)
         } else if name.starts_with("NPU") {
-            DeviceKind::IntelNpu
+            Some(DeviceKind::IntelNpu)
         } else {
-            DeviceKind::Cpu
+            None
         }
     }
 
@@ -293,7 +297,9 @@ impl OpenVINOBackend {
         for device in available {
             let device = device.to_owned();
             let name = device.as_ref().to_string();
-            let kind = Self::device_kind_from_name(&name);
+            let Some(kind) = Self::device_kind_from_name(&name) else {
+                continue;
+            };
             let full_name = core
                 .get_property(&device, &PropertyKey::DeviceFullName)
                 .unwrap_or_else(|_| name.clone());
@@ -524,22 +530,27 @@ impl InferBackend for OpenVINOBackend {
         self.device_string = device_string;
 
         let capabilities = self.probe_live_capabilities(&core)?;
-        let target_kind = Self::device_kind_from_name(&self.device_string);
-        let target_record = capabilities
+        let Some(target_kind) = Self::device_kind_from_name(&self.device_string) else {
+            return Err(Error::CapabilityUnsupported(format!(
+                "OpenVINO device {} has an unknown device kind",
+                self.device_string
+            )));
+        };
+        let Some(target_record) = capabilities
             .device_records
             .iter()
-            .find(|record| record.kind == target_kind);
-        if target_record.is_none() {
+            .find(|record| record.kind == target_kind)
+        else {
             return Err(Error::CapabilityUnsupported(format!(
                 "OpenVINO device {} is not available; live devices: {:?}; sdk_version={}",
                 self.device_string,
                 capabilities.devices,
                 capabilities.sdk_version.as_deref().unwrap_or("unknown")
             )));
-        }
+        };
 
         if let Some(precision) = option.precision {
-            let record = target_record.unwrap();
+            let record = target_record;
             if !record.verified_precisions.contains(&precision) {
                 return Err(Error::CapabilityUnsupported(format!(
                     "OpenVINO device {} does not support precision {:?}; verified={:?}; sdk_version={}",
@@ -840,7 +851,7 @@ impl InferBackend for OpenVINOBackend {
     }
 
     fn cancel(&mut self) {
-        for in_flight in &mut self.in_flight {
+        for mut in_flight in self.in_flight.drain(..) {
             let _ = in_flight.request.cancel();
         }
     }
