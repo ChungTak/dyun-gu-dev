@@ -22,14 +22,21 @@ export LIBYUV_TARGET="${LIBYUV_TARGET:-ubuntu-24.04_x86_64}"
 # rust-toolchain.toml pins 1.94.1; do not override it with stable here.
 # User can still set RUSTUP_TOOLCHAIN before sourcing if needed.
 
-# Prefer llvm-21 layout used by Ubuntu 25.x packages.
+# Prefer the newest llvm-* layout, falling back to older Ubuntu LTS versions.
 _LLVM_LIB=""
-for candidate in /usr/lib/llvm-21/lib /usr/lib/llvm-20/lib /usr/lib/llvm-19/lib; do
-  if [[ -e "${candidate}/libclang-21.so.1" || -e "${candidate}/libclang.so" || -e "${candidate}/libclang.so.1" ]]; then
+for candidate in /usr/lib/llvm-21/lib /usr/lib/llvm-20/lib /usr/lib/llvm-19/lib \
+                 /usr/lib/llvm-18/lib /usr/lib/llvm-17/lib /usr/lib/llvm-16/lib \
+                 /usr/lib/llvm-15/lib /usr/lib/llvm-14/lib /usr/lib/llvm-13/lib; do
+  if [[ -e "${candidate}/libclang.so" || -e "${candidate}/libclang.so.1" || -e "${candidate}/libclang-"*.so.1 ]]; then
     _LLVM_LIB="${candidate}"
     break
   fi
 done
+
+# Last resort: system-wide libclang used by the distro's clang package.
+if [[ -z "${_LLVM_LIB}" && -e /usr/lib/x86_64-linux-gnu/libclang.so.1 ]]; then
+  _LLVM_LIB="/usr/lib/x86_64-linux-gnu"
+fi
 
 if [[ -n "${_LLVM_LIB}" ]]; then
   _SHIM="${TMPDIR:-/tmp}/dyun-libclang-shim"
@@ -49,7 +56,9 @@ fi
 _GCC_INC=""
 for candidate in /usr/lib/gcc/x86_64-linux-gnu/15/include \
                  /usr/lib/gcc/x86_64-linux-gnu/14/include \
-                 /usr/lib/gcc/x86_64-linux-gnu/13/include; do
+                 /usr/lib/gcc/x86_64-linux-gnu/13/include \
+                 /usr/lib/gcc/x86_64-linux-gnu/12/include \
+                 /usr/lib/gcc/x86_64-linux-gnu/11/include; do
   if [[ -d "${candidate}" ]]; then
     _GCC_INC="${candidate}"
     break

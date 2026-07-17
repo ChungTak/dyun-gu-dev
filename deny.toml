@@ -8,7 +8,10 @@ targets = [
 ]
 
 [advisories]
-ignore = ["RUSTSEC-2025-0134", "RUSTSEC-2026-0192"]
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "Indirect transitive dependency of optional/experimental crates (TensorRT/RKNN/Sophon bindings) that are not in the production Intel path; tracked to remove when upstream patches propagate." },
+    { id = "RUSTSEC-2026-0192", reason = "Same as above; remove once the affected dependency publishes a patched release and the vendor SDK binding crates update." },
+]
 
 [licenses]
 allow = [
