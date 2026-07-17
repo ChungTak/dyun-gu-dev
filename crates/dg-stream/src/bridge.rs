@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[cfg(feature = "cheetah")]
-use crate::error::{Error, Result};
+use crate::error::{EndpointClass, Error, Result};
 #[cfg(feature = "cheetah")]
 use crate::ids::SubscriberId;
 #[cfg(feature = "cheetah")]
@@ -255,17 +255,37 @@ pub fn media_frame_to_cheetah_avframe_with_transfer(
 }
 
 #[cfg(feature = "cheetah")]
+fn map_sdk_error(
+    err: dg_stream_cheetah::SdkError,
+    protocol: &'static str,
+    class: EndpointClass,
+    operation: &'static str,
+) -> Error {
+    let retryable = matches!(err, dg_stream_cheetah::SdkError::Unavailable(_));
+    Error::Connector {
+        protocol,
+        operation,
+        retryable,
+        class,
+        status: None,
+        message: err.to_string(),
+    }
+}
+
+#[cfg(feature = "cheetah")]
 pub struct CheetahPublisherSinkAdapter {
     inner: Box<dyn dg_stream_cheetah::PublisherSink>,
     tracks: Mutex<HashMap<u64, TrackInfo>>,
+    protocol: &'static str,
 }
 
 #[cfg(feature = "cheetah")]
 impl CheetahPublisherSinkAdapter {
-    pub fn new(inner: Box<dyn dg_stream_cheetah::PublisherSink>) -> Self {
+    pub fn new(inner: Box<dyn dg_stream_cheetah::PublisherSink>, protocol: &'static str) -> Self {
         Self {
             inner,
             tracks: Mutex::new(HashMap::new()),
+            protocol,
         }
     }
 }
@@ -279,7 +299,7 @@ impl PublisherSink for CheetahPublisherSinkAdapter {
             .collect();
         self.inner
             .update_tracks(cheetah_tracks)
-            .map_err(|err| Error::Sdk(err.to_string()))?;
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Push, "negotiate"))?;
         let mut cached = self
             .tracks
             .lock()
@@ -345,13 +365,13 @@ impl PublisherSink for CheetahPublisherSinkAdapter {
         self.inner
             .push_frame(Arc::new(avframe))
             .map(Into::into)
-            .map_err(|err| Error::Sdk(err.to_string()))
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Push, "write"))
     }
 
     fn close(&self) -> Result<()> {
         self.inner
             .close()
-            .map_err(|err| Error::Sdk(err.to_string()))
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Push, "close"))
     }
 
     fn take_keyframe_requests(&self) -> u64 {
@@ -579,12 +599,16 @@ fn canonical_format(codec: CodecId) -> MediaStreamFormat {
 #[cfg(feature = "cheetah")]
 pub struct CheetahSubscriberSourceAdapter {
     inner: Box<dyn dg_stream_cheetah::SubscriberSource>,
+    protocol: &'static str,
 }
 
 #[cfg(feature = "cheetah")]
 impl CheetahSubscriberSourceAdapter {
-    pub fn new(inner: Box<dyn dg_stream_cheetah::SubscriberSource>) -> Self {
-        Self { inner }
+    pub fn new(
+        inner: Box<dyn dg_stream_cheetah::SubscriberSource>,
+        protocol: &'static str,
+    ) -> Self {
+        Self { inner, protocol }
     }
 }
 
@@ -596,7 +620,7 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
             .inner
             .recv()
             .await
-            .map_err(|err| Error::Sdk(err.to_string()))?;
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "read"))?;
         Ok(next.map(|frame| {
             let bridged = cheetah_avframe_to_media_frame_with_transfer(frame);
             Arc::new(bridged.frame)
@@ -607,7 +631,7 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
         self.inner
             .close()
             .await
-            .map_err(|err| Error::Sdk(err.to_string()))
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "close"))
     }
 
     fn id(&self) -> SubscriberId {

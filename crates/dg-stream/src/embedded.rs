@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 
 use async_trait::async_trait;
@@ -34,13 +34,13 @@ impl RuntimeContext {
         let connector = dg_stream_cheetah::cheetah_connector::ConnectorBuilder::new(runtime_api)
             .with_default_modules()
             .build()
-            .map_err(map_connector_error)?;
+            .map_err(|err| map_connector_error(err, crate::error::EndpointClass::Pull))?;
         let connector = run_on_runtime(runtime.clone(), async move {
             connector
                 .start()
                 .await
                 .map(|()| connector)
-                .map_err(map_connector_error)
+                .map_err(|err| map_connector_error(err, crate::error::EndpointClass::Pull))
         })?;
         Ok(Arc::new(Self {
             connector,
@@ -113,8 +113,57 @@ where
     }
 }
 
-fn map_connector_error(err: CheetahConnectorError) -> Error {
-    Error::Sdk(err.to_string())
+fn map_connector_error(err: CheetahConnectorError, class: crate::error::EndpointClass) -> Error {
+    let retryable = err.retryable();
+    let protocol = err.protocol();
+    let protocol_label = protocol.map(cheetah_protocol_label).unwrap_or("unknown");
+
+    let (operation, status) = match &err {
+        CheetahConnectorError::InvalidUrl { .. } => ("open", None),
+        CheetahConnectorError::UnsupportedProtocol { .. } => ("open", None),
+        CheetahConnectorError::FeatureDisabled { .. } => ("open", None),
+        CheetahConnectorError::Connect { .. } => ("connect", None),
+        CheetahConnectorError::Protocol { operation: op, .. } => {
+            let op_label = match op {
+                dg_stream_cheetah::cheetah_connector::Operation::Open => "open",
+                dg_stream_cheetah::cheetah_connector::Operation::Connect => "connect",
+                dg_stream_cheetah::cheetah_connector::Operation::Handshake => "handshake",
+                dg_stream_cheetah::cheetah_connector::Operation::Publish => "publish",
+                dg_stream_cheetah::cheetah_connector::Operation::Play => "play",
+                dg_stream_cheetah::cheetah_connector::Operation::Read => "read",
+                dg_stream_cheetah::cheetah_connector::Operation::Write => "write",
+                dg_stream_cheetah::cheetah_connector::Operation::Negotiate => "negotiate",
+                dg_stream_cheetah::cheetah_connector::Operation::Close => "close",
+            };
+            (op_label, None)
+        }
+        CheetahConnectorError::Media { .. } => ("media", None),
+        CheetahConnectorError::Backpressure { .. } => ("backpressure", None),
+        CheetahConnectorError::Closed { .. } => ("close", None),
+        CheetahConnectorError::InvalidArgument(_) => ("open", None),
+        CheetahConnectorError::Internal(_) => ("runtime", None),
+        _ => ("unknown", None),
+    };
+
+    Error::Connector {
+        protocol: protocol_label,
+        operation,
+        retryable,
+        class,
+        status,
+        message: err.to_string(),
+    }
+}
+
+fn cheetah_protocol_label(
+    protocol: dg_stream_cheetah::cheetah_connector::Protocol,
+) -> &'static str {
+    match protocol {
+        dg_stream_cheetah::cheetah_connector::Protocol::Rtsp => "rtsp",
+        dg_stream_cheetah::cheetah_connector::Protocol::HttpFlv => "http-flv",
+        dg_stream_cheetah::cheetah_connector::Protocol::Rtmp => "rtmp",
+        dg_stream_cheetah::cheetah_connector::Protocol::WebRtc => "webrtc",
+    }
 }
 
 fn map_protocol(protocol: StreamProtocol) -> dg_stream_cheetah::cheetah_connector::Protocol {
@@ -260,7 +309,7 @@ impl CheetahRuntimeConnector for EmbeddedCheetahRuntimeConnector {
                 options,
             )
             .await
-            .map_err(map_connector_error)?;
+            .map_err(|err| map_connector_error(err, crate::error::EndpointClass::Pull))?;
             let tracks = dg_stream_cheetah::SubscriberSource::tracks(&handle)
                 .into_iter()
                 .map(|track| crate::bridge::cheetah_track_info_to_media_frame(&track))
@@ -299,7 +348,7 @@ impl CheetahRuntimeConnector for EmbeddedCheetahRuntimeConnector {
                 options,
             )
             .await
-            .map_err(map_connector_error)
+            .map_err(|err| map_connector_error(err, crate::error::EndpointClass::Push))
         })?;
         Ok(Box::new(RuntimeOwnedPush {
             inner: handle,
@@ -308,7 +357,17 @@ impl CheetahRuntimeConnector for EmbeddedCheetahRuntimeConnector {
     }
 }
 
+static EMBEDDED_INSTALL_RESULT: OnceLock<crate::error::Result<()>> = OnceLock::new();
+
 /// Installs a newly constructed embedded connector as the process-wide connector.
+///
+/// This function is idempotent: subsequent calls return the cached result from the
+/// first installation attempt. If a different connector is already installed,
+/// [`Error::AlreadyInstalled`] is returned.
 pub fn install_embedded_cheetah_connector() -> Result<()> {
-    install_cheetah_connector(Box::new(EmbeddedCheetahRuntimeConnector::new()?))
+    EMBEDDED_INSTALL_RESULT
+        .get_or_init(|| {
+            install_cheetah_connector(Box::new(EmbeddedCheetahRuntimeConnector::new()?))
+        })
+        .clone()
 }

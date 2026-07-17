@@ -10,8 +10,7 @@ use dg_media::{
 };
 use dg_stream::{
     cheetah_avframe_to_media_frame, CheetahPublisherSinkAdapter, CheetahRuntimeConnector,
-    EmbeddedCheetahRuntimeConnector, Error, PublisherSink, StreamProtocol,
-    TrackInfo as StreamTrackInfo,
+    EmbeddedCheetahRuntimeConnector, PublisherSink, StreamProtocol, TrackInfo as StreamTrackInfo,
 };
 use dg_stream_cheetah::cheetah_connector::{
     ConnectorBuilder, LoopbackLayer, LoopbackOptions, LoopbackTopology, Protocol,
@@ -100,7 +99,7 @@ fn cheetah_bridge_preserves_frame_metadata() {
 
     let capture = CapturingSink::default();
     let captured = Arc::clone(&capture.frame);
-    let adapter = CheetahPublisherSinkAdapter::new(Box::new(capture));
+    let adapter = CheetahPublisherSinkAdapter::new(Box::new(capture), "rtmp");
     adapter.push_frame(Arc::new(converted)).expect("push frame");
     let pushed = captured
         .lock()
@@ -121,7 +120,7 @@ fn cheetah_bridge_preserves_frame_metadata() {
 fn cheetah_bridge_resolves_metadata_from_announced_track() {
     let capture = CapturingSink::default();
     let captured = Arc::clone(&capture.frame);
-    let adapter = CheetahPublisherSinkAdapter::new(Box::new(capture));
+    let adapter = CheetahPublisherSinkAdapter::new(Box::new(capture), "rtmp");
     let mut track = StreamTrackInfo::new(
         7,
         dg_stream::MediaKind::Video,
@@ -175,7 +174,7 @@ fn embedded_connector_routes_all_stream_protocols() {
                 Ok(_) => panic!("invalid endpoint unexpectedly opened"),
                 Err(error) => error,
             };
-            assert!(matches!(error, Error::Sdk(_)), "{error:?}");
+            assert!(!error.retryable(), "{error:?}");
         }
 
         let push_cases = [
@@ -187,7 +186,7 @@ fn embedded_connector_routes_all_stream_protocols() {
                 Ok(_) => panic!("invalid endpoint unexpectedly opened"),
                 Err(error) => error,
             };
-            assert!(matches!(error, Error::Sdk(_)), "{error:?}");
+            assert!(!error.retryable(), "{error:?}");
         }
     });
 }
