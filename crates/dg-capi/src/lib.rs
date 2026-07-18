@@ -2308,24 +2308,61 @@ pub unsafe extern "C" fn dg_engine_push(
 }
 
 /// Polls one output tensor. `Again` means the queue is empty.
+/// On `Again` no `DgError` is written and `*out` is set to null.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_poll(
     engine: *mut DgEngine,
     out: *mut *mut DgTensor,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    ffi_result_with_out(out, out_error, || {
+    if out.is_null() {
+        write_error(out_error, DgStatus::NullPointer, "output pointer is null");
+        return DgStatus::NullPointer;
+    }
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid pointer; we own writing the initial null.
+        unsafe { out_error.write(ptr::null_mut()) };
+    }
+    // SAFETY: `out` was checked non-null above.
+    unsafe { out.write(ptr::null_mut()) };
+
+    enum PollResult {
+        Tensor(usize),
+        Again,
+        Error(DgStatus, String),
+    }
+
+    match catch_unwind(AssertUnwindSafe(|| {
         if engine.is_null() {
-            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+            return PollResult::Error(DgStatus::NullPointer, "engine pointer is null".to_string());
         }
         let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
-        let tensor = engine
-            .outputs
-            .pop_front()
-            .ok_or((DgStatus::Again, "no output is available".to_string()))?;
-        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
-    })
+        match lock_engine_write(engine_handle) {
+            Ok(mut engine) => match engine.outputs.pop_front() {
+                Some(tensor) => {
+                    PollResult::Tensor(Box::into_raw(Box::new(DgTensor { tensor })) as usize)
+                }
+                None => PollResult::Again,
+            },
+            Err((status, message)) => PollResult::Error(status, message),
+        }
+    })) {
+        Ok(PollResult::Tensor(tensor)) => {
+            // SAFETY: `out` was checked non-null above and `tensor` came from `Box::into_raw`.
+            unsafe { out.write(tensor as *mut DgTensor) };
+            DgStatus::Ok
+        }
+        Ok(PollResult::Again) => DgStatus::Again,
+        Ok(PollResult::Error(status, message)) => {
+            write_error(out_error, status, message);
+            status
+        }
+        Err(_) => {
+            let status = DgStatus::Panic;
+            write_error(out_error, status, "panic crossed C ABI boundary");
+            status
+        }
+    }
 }
 
 /// Imports an external buffer handle without dereferencing the external address.
@@ -2587,6 +2624,42 @@ connections:
             dg_tensor_free(tensor);
             dg_engine_destroy(engine, 5000, ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn engine_poll_empty_returns_again_without_error() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let mut output = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, &mut error) },
+            DgStatus::Again
+        );
+        assert!(output.is_null());
+        assert!(error.is_null(), "Again must not allocate a DgError");
+
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
     }
 
     #[cfg(feature = "stream")]

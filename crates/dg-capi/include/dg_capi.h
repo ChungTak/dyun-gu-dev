@@ -578,6 +578,7 @@ enum DgStatus dg_engine_push(struct DgEngine *engine,
 
 /**
  * Polls one output tensor. `Again` means the queue is empty.
+ * On `Again` no `DgError` is written and `*out` is set to null.
  */
 enum DgStatus dg_engine_poll(struct DgEngine *engine,
                              struct DgTensor **out,
