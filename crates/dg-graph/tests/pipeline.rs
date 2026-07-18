@@ -299,6 +299,45 @@ fn running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomical
     };
     assert!(running.apply_hot_update(invalid).is_err());
 
+    // Config-only hot update (limits) should succeed without topology changes.
+    // Rebuild a full candidate from the original builder template + updated limits.
+    let mut with_limits = GraphSpecBuilder::new()
+        .add_node(NodeSpec {
+            name: "source".to_string(),
+            kind: "source".to_string(),
+            params: json!({"count": 128, "shape": [1, 4], "start": 1.0}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            params: json!({"shape": [1, 4], "echo_inputs": false, "fill_value": 7}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "sink".to_string(),
+            kind: "sink".to_string(),
+            params: json!({}),
+            ..NodeSpec::default()
+        })
+        .connect("source.out -> infer.in")
+        .connect("infer.out -> sink.in")
+        .build()
+        .expect("rebuild candidate");
+    with_limits.limits.max_nodes = 42;
+    let config_diff = running
+        .apply_hot_update_spec(with_limits)
+        .expect("config-only hot update");
+    // Topology matches the post-replace graph; only limits differ.
+    assert!(config_diff.is_empty());
+    assert_eq!(
+        running
+            .metrics_snapshot()
+            .get("infer")
+            .map(|m| m.state_reset_total),
+        Some(1)
+    );
+
     let report = running.finish().expect("finish updated graph");
     let outputs = report.sinks.get("sink").expect("sink outputs");
     assert!(!outputs.is_empty());

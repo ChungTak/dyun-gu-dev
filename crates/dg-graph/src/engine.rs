@@ -79,6 +79,8 @@ pub enum GraphStatus {
     Draining = 2,
     Stopped = 3,
     Failed = 4,
+    /// Transactional hot-update in progress (readiness should be false).
+    Reloading = 5,
 }
 
 fn status_from_u8(value: u8) -> GraphStatus {
@@ -87,6 +89,7 @@ fn status_from_u8(value: u8) -> GraphStatus {
         1 => GraphStatus::Running,
         2 => GraphStatus::Draining,
         3 => GraphStatus::Stopped,
+        5 => GraphStatus::Reloading,
         _ => GraphStatus::Failed,
     }
 }
@@ -491,8 +494,12 @@ impl RunningGraph {
 
     /// Idempotently requests a cooperative stop of all workers.
     pub fn request_stop(&self) {
-        let current = self.status.load(Ordering::SeqCst);
-        if current < GraphStatus::Draining as u8 {
+        // Reloading is numeric 5; do not use integer comparison against Draining.
+        let status = status_from_u8(self.status.load(Ordering::SeqCst));
+        if matches!(
+            status,
+            GraphStatus::Starting | GraphStatus::Running | GraphStatus::Reloading
+        ) {
             self.set_status(GraphStatus::Draining);
         }
         self.stop.store(true, Ordering::Relaxed);
@@ -594,12 +601,78 @@ impl RunningGraph {
     /// The update follows the transaction boundary: validate, prepare, quiesce
     /// affected workers, switch routes/spec, spawn replacement workers, and
     /// drain in-flight packets.
+    ///
+    /// Prefer [`Self::apply_hot_update_spec`] when the full candidate
+    /// configuration is available so top-level fields (`limits`, `execution`,
+    /// `defaults`, …) are applied rather than only topology diffs.
     pub fn apply_hot_update(&mut self, diff: GraphDiff) -> Result<()> {
         if diff.is_empty() {
             return Ok(());
         }
         let candidate = self.spec.clone().merge_for_diff(diff.clone())?;
+        self.set_status(GraphStatus::Reloading);
+        match self.apply_hot_update_candidate(diff, candidate) {
+            Ok(()) => {
+                self.set_status(GraphStatus::Running);
+                Ok(())
+            }
+            Err(error) => {
+                if !matches!(self.status().0, GraphStatus::Failed) {
+                    self.set_status(GraphStatus::Running);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Applies a full candidate graph specification while workers are running.
+    ///
+    /// Topology-only changes rebuild affected nodes; configuration-only changes
+    /// (limits / execution / defaults / variables) update `self.spec` without
+    /// restarting workers.
+    pub fn apply_hot_update_spec(&mut self, new_spec: GraphSpec) -> Result<GraphDiff> {
+        let diff = Graph::diff(&self.spec, &new_spec);
+        let topology_changed = !diff.is_empty();
+        let config_changed = self.spec.limits != new_spec.limits
+            || self.spec.execution != new_spec.execution
+            || self.spec.defaults != new_spec.defaults
+            || self.spec.variables != new_spec.variables
+            || self.spec.allow_cycles != new_spec.allow_cycles
+            || self.spec.templates != new_spec.templates;
+
+        if !topology_changed && !config_changed {
+            return Ok(diff);
+        }
+
+        new_spec.validate()?;
+
+        if !topology_changed {
+            // Config-only: no worker restart. New queue capacities apply to
+            // edges created by a later topology update.
+            self.spec = new_spec;
+            return Ok(diff);
+        }
+
+        self.set_status(GraphStatus::Reloading);
+        match self.apply_hot_update_candidate(diff.clone(), new_spec) {
+            Ok(()) => {
+                self.set_status(GraphStatus::Running);
+                Ok(diff)
+            }
+            Err(error) => {
+                // Fail-closed: leave Failed if the candidate apply already set it;
+                // otherwise restore Running when only pre-quiesce validation failed.
+                if !matches!(self.status().0, GraphStatus::Failed) {
+                    self.set_status(GraphStatus::Running);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn apply_hot_update_candidate(&mut self, diff: GraphDiff, candidate: GraphSpec) -> Result<()> {
         candidate.validate()?;
+        let previous_spec = self.spec.clone();
 
         let mut affected = BTreeSet::new();
         for name in diff
@@ -622,6 +695,7 @@ impl RunningGraph {
             affected.insert(parsed.to_node);
         }
 
+        // Prepare replacements first so create failures never touch live workers.
         let mut prepared = BTreeMap::new();
         for node in &candidate.nodes {
             if affected.contains(&node.name) {
@@ -629,11 +703,34 @@ impl RunningGraph {
             }
         }
 
-        // Quiesce affected workers before switching routes.
+        // Quiesce and join affected workers *before* switching routes so a join
+        // failure can re-spawn previous workers on the still-intact routes.
         let affected_names = affected.iter().cloned().collect::<Vec<_>>();
         for name in &affected_names {
             if let Some(node) = self.workers.get(name) {
                 node.control.stop.store(true, Ordering::Relaxed);
+            }
+        }
+        let mut joined = Vec::new();
+        for name in &affected_names {
+            if let Some(mut node) = self.workers.remove(name) {
+                if let Err(error) = join_workers(&mut node.workers, true) {
+                    // Routes are still the previous topology; restore workers
+                    // already joined so the graph can keep running.
+                    if let Err(restore_error) =
+                        self.respawn_nodes_from_spec(&previous_spec, &joined)
+                    {
+                        self.set_root_cause(&restore_error);
+                        self.set_status(GraphStatus::Failed);
+                        return Err(error);
+                    }
+                    return Err(error);
+                }
+                joined.push(name.clone());
+            }
+            if diff.removed_nodes.iter().any(|removed| removed == name) {
+                self.metrics.remove(name);
+                self.sinks.remove(name);
             }
         }
 
@@ -703,17 +800,8 @@ impl RunningGraph {
         self.routes.inputs = next_inputs.clone();
         self.routes.outputs = next_outputs;
 
-        for name in &affected_names {
-            if let Some(mut node) = self.workers.remove(name) {
-                if let Err(error) = join_workers(&mut node.workers, true) {
-                    self.set_root_cause(&error);
-                    self.set_status(GraphStatus::Failed);
-                    return Err(error);
-                }
-            }
-        }
-
-        // Spawn replacement workers using the switched routes.
+        // Spawn replacement workers using the switched routes (inline path
+        // matches the pre-restore implementation for success-path stability).
         for node in &candidate.nodes {
             if !affected.contains(&node.name) {
                 continue;
@@ -728,6 +816,7 @@ impl RunningGraph {
                 instances: prepared_node.elements.len(),
             }));
             let node_metrics = Arc::new(ElementMetrics::default());
+            node_metrics.record_state_reset();
             let mut routes_in = HashMap::new();
             let mut routes_out = HashMap::new();
             for connection in &candidate.connections {
@@ -774,7 +863,6 @@ impl RunningGraph {
                     workers: handles,
                 },
             );
-
             self.metrics.insert(node.name.clone(), node_metrics.clone());
             if let ElementHandle::Sink(collector) = prepared_node.handle {
                 self.sinks.insert(node.name.clone(), collector);
@@ -782,13 +870,88 @@ impl RunningGraph {
         }
 
         if let Err(error) = self.drain_routes(drain_routes) {
+            // Post-switch failure: fail-closed. Full route rollback is unsafe
+            // while Arc-shared output tables may already advertise new senders.
             self.set_root_cause(&error);
             self.set_status(GraphStatus::Failed);
             return Err(error);
         }
 
         self.spec = candidate;
-        self.set_status(GraphStatus::Running);
+        Ok(())
+    }
+
+    /// Re-spawns nodes from `spec` using the current route tables (must match `spec`).
+    /// Used after a join failure before routes were switched.
+    fn respawn_nodes_from_spec(&mut self, spec: &GraphSpec, names: &[String]) -> Result<()> {
+        for name in names {
+            let Some(node) = spec.nodes.iter().find(|node| node.name == *name) else {
+                continue;
+            };
+            if self.workers.contains_key(name) {
+                continue;
+            }
+            let prepared_node = PreparedNode::new(node)?;
+            let control = Arc::new(crate::element::NodeControl::default());
+            let eos = Arc::new(Mutex::new(EosState {
+                seen: false,
+                broadcasts: 0,
+                instances: prepared_node.elements.len(),
+            }));
+            let node_metrics = Arc::new(ElementMetrics::default());
+            let mut routes_in = HashMap::new();
+            let mut routes_out = HashMap::new();
+            for connection in &spec.connections {
+                let parsed = ConnectionSpec::parse(connection)?;
+                if parsed.to_node == node.name {
+                    let key = (node.name.clone(), parsed.to_port.clone());
+                    let route = self
+                        .routes
+                        .inputs
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| Error::Runtime("missing input route".to_string()))?;
+                    routes_in.insert(parsed.to_port, route);
+                }
+                if parsed.from_node == node.name {
+                    let key = (node.name.clone(), parsed.from_port.clone());
+                    let route = self
+                        .routes
+                        .outputs
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| Error::Runtime("missing output route".to_string()))?;
+                    routes_out.insert(parsed.from_port, route);
+                }
+            }
+            let mut handles = Vec::with_capacity(prepared_node.elements.len());
+            for element in prepared_node.elements {
+                let io = ElementIo {
+                    name: node.name.clone(),
+                    inputs: routes_in.clone(),
+                    outputs: routes_out.clone(),
+                    stop: self.stop.clone(),
+                    control: control.clone(),
+                    send_backoff: Duration::from_millis(1),
+                    eos: eos.clone(),
+                    metrics: node_metrics.clone(),
+                    packet_starts: std::cell::RefCell::new(VecDeque::new()),
+                };
+                let stop = self.stop.clone();
+                handles.push(thread::spawn(move || run_element(element, io, &stop)));
+            }
+            self.workers.insert(
+                node.name.clone(),
+                LiveNode {
+                    control,
+                    workers: handles,
+                },
+            );
+            self.metrics.insert(node.name.clone(), node_metrics);
+            if let ElementHandle::Sink(collector) = prepared_node.handle {
+                self.sinks.insert(node.name.clone(), collector);
+            }
+        }
         Ok(())
     }
 

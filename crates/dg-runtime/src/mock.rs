@@ -254,9 +254,8 @@ impl InferBackend for MockBackend {
         if let Some((index, _)) = ready {
             let pending = self.pending.remove(index);
             let outputs = self.produce_outputs(&pending.inputs)?;
-            if let Some(metrics) = &self.metrics {
-                metrics.finish_in_flight();
-            }
+            // Do not call finish_in_flight here: Runtime::poll owns the
+            // in_flight accounting for both sync and async backends.
             return Ok(InferPoll::Ready {
                 outputs,
                 sequence: pending.sequence,

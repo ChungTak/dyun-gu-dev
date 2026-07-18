@@ -11,6 +11,8 @@ build = "build.rs"
 default = ["media", "stream"]
 media = ["dep:dg-media"]
 stream = ["dep:dg-stream", "media"]
+# Optional cheetah protocol connector (also enabled by product-intel).
+cheetah = ["stream", "dg-stream/cheetah"]
 
 # Internal avcodec SDK marker and profile features forwarded to dg-media.
 avcodec-sdk = ["media", "dg-media/avcodec-sdk"]
@@ -33,7 +35,7 @@ avcodec-profile-nvcodec-device-frame = ["media", "dg-media/avcodec-profile-nvcod
 product-intel = [
     "openvino",
     "stream",
-    "dg-stream/cheetah",
+    "cheetah",
     "media",
     "avcodec-profile-software",
     "avcodec-profile-onevpl-host-fallback",

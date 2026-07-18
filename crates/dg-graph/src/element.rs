@@ -68,6 +68,21 @@ impl ElementIo {
         self.stop.load(Ordering::Relaxed) || self.control.stop.load(Ordering::Relaxed)
     }
 
+    /// Marks this element as mid-reconnect / connecting (readiness false).
+    pub fn set_reconnecting(&self, value: bool) {
+        self.metrics.set_reconnecting(value);
+    }
+
+    /// Clears connecting/reconnecting without counting a reconnect (first open).
+    pub fn clear_reconnecting(&self) {
+        self.metrics.clear_reconnecting();
+    }
+
+    /// Records a completed reconnect after the initial connection.
+    pub fn record_reconnect(&self) {
+        self.metrics.record_reconnect();
+    }
+
     pub fn recv(&self, port: &str) -> Result<Option<Packet>> {
         let receiver = self.inputs.get(port).ok_or_else(|| Error::UnknownPort {
             node: self.name.clone(),

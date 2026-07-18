@@ -64,6 +64,7 @@ fn status_enum_numeric_values_are_stable() {
         "Ok = 0",
         "Again = 1",
         "EndOfStream = 2",
+        "Busy = 3",
         "InvalidArgument = -1",
         "NullPointer = -2",
         "ParseError = -4",

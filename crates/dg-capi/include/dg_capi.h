@@ -18,6 +18,10 @@ typedef enum DgStatus {
   Ok = 0,
   Again = 1,
   EndOfStream = 2,
+  /**
+   * Engine handle is busy with another exclusive operation.
+   */
+  Busy = 3,
   InvalidArgument = -1,
   NullPointer = -2,
   InvalidHandle = -3,
@@ -47,6 +51,7 @@ typedef enum DgGraphStatus {
   Draining = 2,
   Stopped = 3,
   Failed = 4,
+  Reloading = 5,
   NotRunning = -1,
 } DgGraphStatus;
 
@@ -144,9 +149,23 @@ typedef struct DgEngine DgEngine;
 typedef struct DgTensor DgTensor;
 
 /**
+ * Runtime bootstrap options for [`dg_runtime_init`].
+ */
+typedef struct DgRuntimeInitOptions {
+  /**
+   * Must be set to `size_of::<DgRuntimeInitOptions>()` by the caller.
+   */
+  size_t struct_size;
+} DgRuntimeInitOptions;
+
+/**
  * Runtime capabilities returned by a direct backend.
  */
 typedef struct DgBackendCapabilities {
+  /**
+   * Size of this struct in bytes (`sizeof(DgBackendCapabilities)`).
+   */
+  size_t struct_size;
   size_t device_count;
   enum DgDeviceKind devices[8];
   size_t precision_count;
@@ -157,6 +176,10 @@ typedef struct DgBackendCapabilities {
  * Fixed-size tensor metadata returned by direct backend queries.
  */
 typedef struct DgTensorInfo {
+  /**
+   * Size of this struct in bytes (`sizeof(DgTensorInfo)`).
+   */
+  size_t struct_size;
   enum DgDataType dtype;
   enum DgDataFormat format;
   enum DgDeviceKind device;
@@ -180,12 +203,33 @@ const char *dg_version(void);
 const char *dg_abi_version(void);
 
 /**
+ * Returns a JSON object describing this build's C ABI capabilities.
+ *
+ * The pointer is valid until the next call that overwrites thread-local data
+ * (for example [`dg_engine_metrics`]). On failure returns null and sets
+ * [`dg_last_error`].
+ */
+const char *dg_build_capabilities_json(void);
+
+/**
+ * Idempotent process-level runtime bootstrap (INT5-09).
+ *
+ * Installs built-in stream connectors when the `stream`/`cheetah` features are
+ * enabled. `options` may be null for defaults; when non-null, `struct_size`
+ * must match `sizeof(DgRuntimeInitOptions)`.
+ */
+enum DgStatus dg_runtime_init(const struct DgRuntimeInitOptions *options);
+
+/**
  * Creates an engine handle.
  */
 enum DgStatus dg_engine_create(struct DgEngine **out);
 
 /**
  * Frees an engine handle. Null is accepted.
+ *
+ * If the engine still holds a live graph, this best-effort requests stop and
+ * waits up to 5 seconds for shutdown before dropping (INT5-09 free→shutdown).
  */
 void dg_engine_free(struct DgEngine *engine);
 

@@ -240,7 +240,10 @@ impl StreamPullElement {
 
 impl Element for StreamPullElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
+        // Not ready until the first successful open completes.
+        io.set_reconnecting(true);
         self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+        io.clear_reconnecting();
         let endpoint = self
             .endpoint
             .as_ref()
@@ -264,6 +267,7 @@ impl Element for StreamPullElement {
             }
 
             if self.endpoint.is_none() {
+                io.set_reconnecting(true);
                 self.open_with_retry(&io).map_err(stream_to_graph_error)?;
                 let endpoint = self.endpoint.as_ref().ok_or_else(|| {
                     dg_graph::Error::Runtime("pull endpoint not opened after retry".to_string())
@@ -276,6 +280,7 @@ impl Element for StreamPullElement {
                     .collect();
                 reconnect_attempt = 0;
                 needs_keyframe = true;
+                io.record_reconnect();
             }
 
             let endpoint = self.endpoint.as_mut().ok_or_else(|| {
@@ -321,6 +326,7 @@ impl Element for StreamPullElement {
                         );
                         let _ = endpoint.source.close_blocking();
                         self.endpoint = None;
+                        io.set_reconnecting(true);
                         sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
                         continue;
                     }
@@ -396,7 +402,10 @@ impl StreamPushElement {
 
 impl Element for StreamPushElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> dg_graph::Result<()> {
+        // Not ready until the first successful open completes.
+        io.set_reconnecting(true);
         self.open_with_retry(&io).map_err(stream_to_graph_error)?;
+        io.clear_reconnecting();
         let sink = self
             .sink
             .as_ref()
@@ -413,12 +422,14 @@ impl Element for StreamPushElement {
             }
 
             if self.sink.is_none() {
+                io.set_reconnecting(true);
                 self.open_with_retry(&io).map_err(stream_to_graph_error)?;
                 let sink = self.sink.as_ref().ok_or_else(|| {
                     dg_graph::Error::Runtime("push sink not opened after retry".to_string())
                 })?;
                 self.announce(sink.as_ref())?;
                 reconnect_attempt = 0;
+                io.record_reconnect();
             }
 
             let sink = self.sink.as_ref().ok_or_else(|| {
@@ -477,6 +488,7 @@ impl Element for StreamPushElement {
                     io.drop_packet()?;
                     let _ = sink.close();
                     self.sink = None;
+                    io.set_reconnecting(true);
                     sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
                     continue;
                 }
@@ -502,6 +514,7 @@ impl Element for StreamPushElement {
                     io.drop_packet()?;
                     let _ = sink.close();
                     self.sink = None;
+                    io.set_reconnecting(true);
                     sleep_with_stop(backoff, &io).map_err(stream_to_graph_error)?;
                     continue;
                 }

@@ -262,6 +262,7 @@ impl OpenVINOBackend {
         precisions
     }
 
+    #[allow(dead_code)] // retained for offline tooling / future offline probes
     fn default_precisions_for_device(kind: DeviceKind) -> Vec<DataType> {
         match kind {
             DeviceKind::Cpu => vec![
@@ -317,14 +318,9 @@ impl OpenVINOBackend {
             let async_capable = !range.is_empty()
                 && (supported_properties.contains("RANGE_FOR_ASYNC_INFER_REQUESTS")
                     || supported_properties.contains("OPTIMAL_NUMBER_OF_INFER_REQUESTS"));
-            let verified_precisions = {
-                let parsed = Self::parse_device_capabilities(&capabilities);
-                if parsed.is_empty() {
-                    Self::default_precisions_for_device(kind)
-                } else {
-                    parsed
-                }
-            };
+            // Prefer live OPTIMIZATION_CAPABILITIES only. Empty means "unknown"
+            // and must not silently advertise a static precision matrix as fact.
+            let verified_precisions = Self::parse_device_capabilities(&capabilities);
 
             all_precisions.extend(verified_precisions.iter().cloned());
             device_kinds.push(kind);
@@ -555,7 +551,18 @@ impl InferBackend for OpenVINOBackend {
 
         if let Some(precision) = option.precision {
             let record = target_record;
-            if !record.verified_precisions.contains(&precision) {
+            if record.verified_precisions.is_empty() {
+                // Live property missing: do not invent device-verified precisions.
+                // Fall back to the static backend matrix with an explicit warning.
+                if !supports_precision(BackendKind::OpenVINO, precision) {
+                    return Err(Error::UnsupportedPrecision(precision));
+                }
+                warn!(
+                    device = %self.device_string,
+                    ?precision,
+                    "OpenVINO OPTIMIZATION_CAPABILITIES empty; precision accepted via static backend matrix only"
+                );
+            } else if !record.verified_precisions.contains(&precision) {
                 return Err(Error::CapabilityUnsupported(format!(
                     "OpenVINO device {} does not support precision {:?}; verified={:?}; sdk_version={}",
                     self.device_string,

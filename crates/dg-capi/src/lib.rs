@@ -8,6 +8,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
+use std::sync::{Mutex, Once, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
@@ -38,6 +39,8 @@ pub enum DgStatus {
     Ok = 0,
     Again = 1,
     EndOfStream = 2,
+    /// Engine handle is busy with another exclusive operation.
+    Busy = 3,
     InvalidArgument = -1,
     NullPointer = -2,
     InvalidHandle = -3,
@@ -58,6 +61,7 @@ pub enum DgGraphStatus {
     Draining = 2,
     Stopped = 3,
     Failed = 4,
+    Reloading = 5,
     NotRunning = -1,
 }
 
@@ -147,6 +151,8 @@ pub enum DgBackendKind {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgTensorInfo {
+    /// Size of this struct in bytes (`sizeof(DgTensorInfo)`).
+    pub struct_size: usize,
     pub dtype: DgDataType,
     pub format: DgDataFormat,
     pub device: DgDeviceKind,
@@ -158,6 +164,8 @@ pub struct DgTensorInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgBackendCapabilities {
+    /// Size of this struct in bytes (`sizeof(DgBackendCapabilities)`).
+    pub struct_size: usize,
     pub device_count: usize,
     pub devices: [DgDeviceKind; 8],
     pub precision_count: usize,
@@ -166,7 +174,39 @@ pub struct DgBackendCapabilities {
 
 /// Opaque graph engine handle.
 pub struct DgEngine {
-    inner: Engine,
+    /// Shared lock: writers for load/build/reload/run/shutdown; readers for
+    /// stop/status/metrics (INT5-09 concurrent observability).
+    inner: RwLock<Engine>,
+}
+
+/// Runtime bootstrap options for [`dg_runtime_init`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DgRuntimeInitOptions {
+    /// Must be set to `size_of::<DgRuntimeInitOptions>()` by the caller.
+    pub struct_size: usize,
+}
+
+fn lock_engine_write(
+    engine: &DgEngine,
+) -> Result<std::sync::RwLockWriteGuard<'_, Engine>, (DgStatus, String)> {
+    engine.inner.try_write().map_err(|_| {
+        (
+            DgStatus::Busy,
+            "engine handle is busy; concurrent mutation is not allowed".to_string(),
+        )
+    })
+}
+
+fn lock_engine_read(
+    engine: &DgEngine,
+) -> Result<std::sync::RwLockReadGuard<'_, Engine>, (DgStatus, String)> {
+    engine.inner.try_read().map_err(|_| {
+        (
+            DgStatus::Busy,
+            "engine handle is busy; concurrent write holds the engine".to_string(),
+        )
+    })
 }
 
 /// Opaque tensor handle.
@@ -216,9 +256,28 @@ impl Engine {
                 "cannot reload while inputs are pending; run them before reloading".to_string(),
             ));
         }
+        spec.validate()?;
+
+        // Live path: apply the full candidate to the RunningGraph so workers
+        // and top-level fields pick up the new configuration after dg_engine_init.
+        if let Some(running) = self.running.as_mut() {
+            let diff = running.apply_hot_update_spec(spec.clone())?;
+            if let Some(graph) = self.graph.as_mut() {
+                graph.reload(spec.clone())?;
+            } else {
+                self.graph = Some(Graph::new(spec.clone())?);
+            }
+            self.spec = spec;
+            return Ok(diff);
+        }
+
         let diff = match &mut self.graph {
             Some(graph) => graph.reload(spec.clone())?,
-            None => Graph::diff(&self.spec, &spec),
+            None => {
+                let diff = Graph::diff(&self.spec, &spec);
+                self.spec = spec;
+                return Ok(diff);
+            }
         };
         self.spec = spec;
         Ok(diff)
@@ -300,7 +359,7 @@ impl Engine {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), String> {
+    fn stop(&self) -> Result<(), String> {
         let running = self
             .running
             .as_ref()
@@ -355,6 +414,7 @@ fn graph_status_to_c(status: GraphStatus) -> DgGraphStatus {
         GraphStatus::Draining => DgGraphStatus::Draining,
         GraphStatus::Stopped => DgGraphStatus::Stopped,
         GraphStatus::Failed => DgGraphStatus::Failed,
+        GraphStatus::Reloading => DgGraphStatus::Reloading,
     }
 }
 
@@ -468,79 +528,103 @@ fn validate_diff_outputs(
     Ok(())
 }
 
-fn format_from_c(format: DgGraphFormat) -> GraphFormat {
-    match format {
-        DgGraphFormat::Yaml => GraphFormat::Yaml,
-        DgGraphFormat::Json => GraphFormat::Json,
-        DgGraphFormat::Toml => GraphFormat::Toml,
+fn format_from_c(format: DgGraphFormat) -> Result<GraphFormat, (DgStatus, String)> {
+    match format as i32 {
+        x if x == DgGraphFormat::Yaml as i32 => Ok(GraphFormat::Yaml),
+        x if x == DgGraphFormat::Json as i32 => Ok(GraphFormat::Json),
+        x if x == DgGraphFormat::Toml as i32 => Ok(GraphFormat::Toml),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown graph format discriminant {other}"),
+        )),
     }
 }
 
-fn data_type_from_c(dtype: DgDataType) -> DataType {
-    match dtype {
-        DgDataType::U8 => DataType::U8,
-        DgDataType::U16 => DataType::U16,
-        DgDataType::I4 => DataType::I4,
-        DgDataType::I8 => DataType::I8,
-        DgDataType::I16 => DataType::I16,
-        DgDataType::F4 => DataType::F4,
-        DgDataType::F8 => DataType::F8,
-        DgDataType::F16 => DataType::F16,
-        DgDataType::Bf16 => DataType::BF16,
-        DgDataType::F32 => DataType::F32,
-        DgDataType::F64 => DataType::F64,
-        DgDataType::U32 => DataType::new(TypeCode::Uint, 32, 1),
-        DgDataType::I32 => DataType::new(TypeCode::Int, 32, 1),
-        DgDataType::U64 => DataType::new(TypeCode::Uint, 64, 1),
-        DgDataType::I64 => DataType::new(TypeCode::Int, 64, 1),
+fn data_type_from_c(dtype: DgDataType) -> Result<DataType, (DgStatus, String)> {
+    match dtype as i32 {
+        x if x == DgDataType::U8 as i32 => Ok(DataType::U8),
+        x if x == DgDataType::U16 as i32 => Ok(DataType::U16),
+        x if x == DgDataType::I4 as i32 => Ok(DataType::I4),
+        x if x == DgDataType::I8 as i32 => Ok(DataType::I8),
+        x if x == DgDataType::I16 as i32 => Ok(DataType::I16),
+        x if x == DgDataType::F4 as i32 => Ok(DataType::F4),
+        x if x == DgDataType::F8 as i32 => Ok(DataType::F8),
+        x if x == DgDataType::F16 as i32 => Ok(DataType::F16),
+        x if x == DgDataType::Bf16 as i32 => Ok(DataType::BF16),
+        x if x == DgDataType::F32 as i32 => Ok(DataType::F32),
+        x if x == DgDataType::F64 as i32 => Ok(DataType::F64),
+        x if x == DgDataType::U32 as i32 => Ok(DataType::new(TypeCode::Uint, 32, 1)),
+        x if x == DgDataType::I32 as i32 => Ok(DataType::new(TypeCode::Int, 32, 1)),
+        x if x == DgDataType::U64 as i32 => Ok(DataType::new(TypeCode::Uint, 64, 1)),
+        x if x == DgDataType::I64 as i32 => Ok(DataType::new(TypeCode::Int, 64, 1)),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown data type discriminant {other}"),
+        )),
     }
 }
 
-fn format_from_c_enum(format: DgDataFormat) -> DataFormat {
-    match format {
-        DgDataFormat::Auto => DataFormat::Auto,
-        DgDataFormat::N => DataFormat::N,
-        DgDataFormat::Nc => DataFormat::NC,
-        DgDataFormat::Nchw => DataFormat::NCHW,
-        DgDataFormat::Nhwc => DataFormat::NHWC,
-        DgDataFormat::Nc4hw => DataFormat::NC4HW,
-        DgDataFormat::Nc8hw => DataFormat::NC8HW,
-        DgDataFormat::Ncdhw => DataFormat::NCDHW,
-        DgDataFormat::Oihw => DataFormat::OIHW,
+fn format_from_c_enum(format: DgDataFormat) -> Result<DataFormat, (DgStatus, String)> {
+    match format as i32 {
+        x if x == DgDataFormat::Auto as i32 => Ok(DataFormat::Auto),
+        x if x == DgDataFormat::N as i32 => Ok(DataFormat::N),
+        x if x == DgDataFormat::Nc as i32 => Ok(DataFormat::NC),
+        x if x == DgDataFormat::Nchw as i32 => Ok(DataFormat::NCHW),
+        x if x == DgDataFormat::Nhwc as i32 => Ok(DataFormat::NHWC),
+        x if x == DgDataFormat::Nc4hw as i32 => Ok(DataFormat::NC4HW),
+        x if x == DgDataFormat::Nc8hw as i32 => Ok(DataFormat::NC8HW),
+        x if x == DgDataFormat::Ncdhw as i32 => Ok(DataFormat::NCDHW),
+        x if x == DgDataFormat::Oihw as i32 => Ok(DataFormat::OIHW),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown data format discriminant {other}"),
+        )),
     }
 }
 
-fn device_from_c(device: DgDeviceKind) -> DeviceKind {
-    match device {
-        DgDeviceKind::Cpu => DeviceKind::Cpu,
-        DgDeviceKind::IntelGpu => DeviceKind::IntelGpu,
-        DgDeviceKind::IntelNpu => DeviceKind::IntelNpu,
-        DgDeviceKind::CudaGpu => DeviceKind::CudaGpu,
-        DgDeviceKind::RknnNpu => DeviceKind::RknnNpu,
-        DgDeviceKind::SophonTpu => DeviceKind::SophonTpu,
+fn device_from_c(device: DgDeviceKind) -> Result<DeviceKind, (DgStatus, String)> {
+    match device as i32 {
+        x if x == DgDeviceKind::Cpu as i32 => Ok(DeviceKind::Cpu),
+        x if x == DgDeviceKind::IntelGpu as i32 => Ok(DeviceKind::IntelGpu),
+        x if x == DgDeviceKind::IntelNpu as i32 => Ok(DeviceKind::IntelNpu),
+        x if x == DgDeviceKind::CudaGpu as i32 => Ok(DeviceKind::CudaGpu),
+        x if x == DgDeviceKind::RknnNpu as i32 => Ok(DeviceKind::RknnNpu),
+        x if x == DgDeviceKind::SophonTpu as i32 => Ok(DeviceKind::SophonTpu),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown device kind discriminant {other}"),
+        )),
     }
 }
 
-fn domain_from_c(domain: DgMemoryDomain) -> MemoryDomain {
-    match domain {
-        DgMemoryDomain::Host => MemoryDomain::Host,
-        DgMemoryDomain::DmaBuf => MemoryDomain::DmaBuf,
-        DgMemoryDomain::DrmPrime => MemoryDomain::DrmPrime,
-        DgMemoryDomain::VaapiSurface => MemoryDomain::VaapiSurface,
-        DgMemoryDomain::CudaDevice => MemoryDomain::CudaDevice,
-        DgMemoryDomain::MppBuffer => MemoryDomain::MppBuffer,
-        DgMemoryDomain::SophonDevice => MemoryDomain::SophonDevice,
-        DgMemoryDomain::Opaque => MemoryDomain::Opaque,
+fn domain_from_c(domain: DgMemoryDomain) -> Result<MemoryDomain, (DgStatus, String)> {
+    match domain as i32 {
+        x if x == DgMemoryDomain::Host as i32 => Ok(MemoryDomain::Host),
+        x if x == DgMemoryDomain::DmaBuf as i32 => Ok(MemoryDomain::DmaBuf),
+        x if x == DgMemoryDomain::DrmPrime as i32 => Ok(MemoryDomain::DrmPrime),
+        x if x == DgMemoryDomain::VaapiSurface as i32 => Ok(MemoryDomain::VaapiSurface),
+        x if x == DgMemoryDomain::CudaDevice as i32 => Ok(MemoryDomain::CudaDevice),
+        x if x == DgMemoryDomain::MppBuffer as i32 => Ok(MemoryDomain::MppBuffer),
+        x if x == DgMemoryDomain::SophonDevice as i32 => Ok(MemoryDomain::SophonDevice),
+        x if x == DgMemoryDomain::Opaque as i32 => Ok(MemoryDomain::Opaque),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown memory domain discriminant {other}"),
+        )),
     }
 }
 
-fn backend_kind_from_c(kind: DgBackendKind) -> BackendKind {
-    match kind {
-        DgBackendKind::Mock => BackendKind::Mock,
-        DgBackendKind::OpenVino => BackendKind::OpenVINO,
-        DgBackendKind::Rknn => BackendKind::Rknn,
-        DgBackendKind::TensorRt => BackendKind::TensorRt,
-        DgBackendKind::Sophon => BackendKind::Sophon,
+fn backend_kind_from_c(kind: DgBackendKind) -> Result<BackendKind, (DgStatus, String)> {
+    match kind as i32 {
+        x if x == DgBackendKind::Mock as i32 => Ok(BackendKind::Mock),
+        x if x == DgBackendKind::OpenVino as i32 => Ok(BackendKind::OpenVINO),
+        x if x == DgBackendKind::Rknn as i32 => Ok(BackendKind::Rknn),
+        x if x == DgBackendKind::TensorRt as i32 => Ok(BackendKind::TensorRt),
+        x if x == DgBackendKind::Sophon as i32 => Ok(BackendKind::Sophon),
+        other => Err((
+            DgStatus::InvalidArgument,
+            format!("unknown backend kind discriminant {other}"),
+        )),
     }
 }
 
@@ -606,6 +690,7 @@ fn c_tensor_info(info: &dg_runtime::TensorInfo) -> Result<DgTensorInfo, (DgStatu
     let mut shape = [0; 8];
     shape[..dims.len()].copy_from_slice(dims);
     Ok(DgTensorInfo {
+        struct_size: std::mem::size_of::<DgTensorInfo>(),
         dtype: c_dtype(info.dtype)?,
         format: c_format(info.layout.unwrap_or(DataFormat::Auto)),
         device: DgDeviceKind::Cpu,
@@ -664,9 +749,9 @@ fn tensor_from_bytes(
 ) -> Result<Tensor, (DgStatus, String)> {
     let desc = TensorDesc::new(
         Shape::new(shape.to_vec()),
-        data_type_from_c(dtype),
-        format_from_c_enum(format),
-        device_from_c(device),
+        data_type_from_c(dtype)?,
+        format_from_c_enum(format)?,
+        device_from_c(device)?,
     );
     let expected = desc
         .storage_bytes()
@@ -712,6 +797,93 @@ pub extern "C" fn dg_abi_version() -> *const c_char {
     c"1".as_ptr()
 }
 
+/// Returns a JSON object describing this build's C ABI capabilities.
+///
+/// The pointer is valid until the next call that overwrites thread-local data
+/// (for example [`dg_engine_metrics`]). On failure returns null and sets
+/// [`dg_last_error`].
+#[no_mangle]
+pub extern "C" fn dg_build_capabilities_json() -> *const c_char {
+    match ffi_result(|| {
+        let payload = serde_json::json!({
+            "abi_version": "1",
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "apis": [
+                "dg_runtime_init",
+                "dg_engine_init",
+                "dg_engine_stop",
+                "dg_engine_shutdown",
+                "dg_engine_status",
+                "dg_engine_metrics",
+                "dg_engine_reload_string",
+                "dg_engine_reload_file",
+                "dg_build_capabilities_json"
+            ],
+            "hot_reload_live": true,
+            "free_shutdown": true,
+            "engine_busy_lock": true,
+        });
+        let text = serde_json::to_string(&payload)
+            .map_err(|error| (DgStatus::InternalError, error.to_string()))?;
+        let bytes = text.into_bytes().into_boxed_slice();
+        let length = bytes.len();
+        LAST_DATA.with(|last| *last.borrow_mut() = Some(bytes));
+        let (ptr, stored_len) = last_data_ptr();
+        debug_assert_eq!(length, stored_len);
+        Ok(ptr as *const c_char)
+    }) {
+        Ok(ptr) => ptr,
+        Err(_) => ptr::null(),
+    }
+}
+
+/// Idempotent process-level runtime bootstrap (INT5-09).
+///
+/// Installs built-in stream connectors when the `stream`/`cheetah` features are
+/// enabled. `options` may be null for defaults; when non-null, `struct_size`
+/// must match `sizeof(DgRuntimeInitOptions)`.
+#[no_mangle]
+pub unsafe extern "C" fn dg_runtime_init(options: *const DgRuntimeInitOptions) -> DgStatus {
+    match ffi_result(|| {
+        if !options.is_null() {
+            let opts = unsafe { &*options };
+            if opts.struct_size != 0
+                && opts.struct_size != std::mem::size_of::<DgRuntimeInitOptions>()
+            {
+                return Err((
+                    DgStatus::InvalidArgument,
+                    format!(
+                        "DgRuntimeInitOptions.struct_size mismatch: got {}, expected {}",
+                        opts.struct_size,
+                        std::mem::size_of::<DgRuntimeInitOptions>()
+                    ),
+                ));
+            }
+        }
+        static INIT: Once = Once::new();
+        static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+        INIT.call_once(|| {
+            #[cfg(all(feature = "stream", feature = "cheetah"))]
+            {
+                if let Err(error) = dg_stream::install_embedded_cheetah_connector() {
+                    if let Ok(mut slot) = INIT_ERROR.lock() {
+                        *slot = Some(error.to_string());
+                    }
+                }
+            }
+        });
+        if let Ok(slot) = INIT_ERROR.lock() {
+            if let Some(error) = slot.as_ref() {
+                return Err((DgStatus::RuntimeError, error.clone()));
+            }
+        }
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
+}
+
 /// Creates an engine handle.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_create(out: *mut *mut DgEngine) -> DgStatus {
@@ -723,7 +895,7 @@ pub unsafe extern "C" fn dg_engine_create(out: *mut *mut DgEngine) -> DgStatus {
             ));
         }
         let handle = Box::new(DgEngine {
-            inner: Engine::new(),
+            inner: RwLock::new(Engine::new()),
         });
         // SAFETY: `out` was checked non-null and points to writable caller storage.
         unsafe { out.write(Box::into_raw(handle)) };
@@ -735,12 +907,23 @@ pub unsafe extern "C" fn dg_engine_create(out: *mut *mut DgEngine) -> DgStatus {
 }
 
 /// Frees an engine handle. Null is accepted.
+///
+/// If the engine still holds a live graph, this best-effort requests stop and
+/// waits up to 5 seconds for shutdown before dropping (INT5-09 free→shutdown).
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_free(engine: *mut DgEngine) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if !engine.is_null() {
             // SAFETY: the pointer must have been returned by `dg_engine_create` exactly once.
-            unsafe { drop(Box::from_raw(engine)) };
+            let handle = unsafe { Box::from_raw(engine) };
+            let mut engine = match handle.inner.into_inner() {
+                Ok(engine) => engine,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(mut running) = engine.running.take() {
+                running.request_stop();
+                let _ = running.shutdown(std::time::Duration::from_secs(5));
+            }
         }
     }));
 }
@@ -759,12 +942,13 @@ pub unsafe extern "C" fn dg_engine_load_string(
         let content = unsafe { c_string(content)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec =
-            GraphSpec::from_str_with_format(content, format_from_c(format)).map_err(graph_error)?;
+        let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
+            .map_err(graph_error)?;
         spec.validate().map_err(graph_error)?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec = spec;
-        engine.inner.invalidate();
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec = spec;
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -787,9 +971,10 @@ pub unsafe extern "C" fn dg_engine_load_file(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
         spec.validate().map_err(graph_error)?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec = spec;
-        engine.inner.invalidate();
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec = spec;
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -814,11 +999,12 @@ pub unsafe extern "C" fn dg_engine_reload_string(
         let content = unsafe { c_string(content)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec =
-            GraphSpec::from_str_with_format(content, format_from_c(format)).map_err(graph_error)?;
+        let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
+            .map_err(graph_error)?;
         spec.validate().map_err(graph_error)?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.reload(spec).map_err(reload_error)?;
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.reload(spec).map_err(reload_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -844,8 +1030,9 @@ pub unsafe extern "C" fn dg_engine_reload_file(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
         spec.validate().map_err(graph_error)?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.reload(spec).map_err(reload_error)?;
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.reload(spec).map_err(reload_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -879,11 +1066,12 @@ pub unsafe extern "C" fn dg_engine_diff_string(
         let content = unsafe { c_string(content)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec =
-            GraphSpec::from_str_with_format(content, format_from_c(format)).map_err(graph_error)?;
+        let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
+            .map_err(graph_error)?;
         spec.validate().map_err(graph_error)?;
-        let engine = unsafe { &*engine };
-        let diff = Graph::diff(&engine.inner.spec, &spec);
+        let engine_handle = unsafe { &*engine };
+        let engine = lock_engine_write(engine_handle)?;
+        let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
             out_added_nodes,
@@ -924,8 +1112,9 @@ pub unsafe extern "C" fn dg_engine_diff_file(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
-        let engine = unsafe { &*engine };
-        let diff = Graph::diff(&engine.inner.spec, &spec);
+        let engine_handle = unsafe { &*engine };
+        let engine = lock_engine_write(engine_handle)?;
+        let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
             out_added_nodes,
@@ -969,15 +1158,16 @@ pub unsafe extern "C" fn dg_engine_add_node(
             serde_json::from_str(params)
                 .map_err(|error| (DgStatus::ParseError, error.to_string()))?
         };
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec.nodes.push(NodeSpec {
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec.nodes.push(NodeSpec {
             name,
             kind,
             template: None,
             params,
             ..NodeSpec::default()
         });
-        engine.inner.invalidate();
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -998,13 +1188,14 @@ pub unsafe extern "C" fn dg_engine_remove_node(
         let name = unsafe { c_string(name)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec.nodes.retain(|node| node.name != name);
-        engine.inner.spec.connections.retain(|connection| {
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec.nodes.retain(|node| node.name != name);
+        engine.spec.connections.retain(|connection| {
             dg_graph::ConnectionSpec::parse(connection)
                 .is_ok_and(|parsed| parsed.from_node != name && parsed.to_node != name)
         });
-        engine.inner.invalidate();
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1026,9 +1217,10 @@ pub unsafe extern "C" fn dg_engine_connect(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         dg_graph::ConnectionSpec::parse(connection).map_err(graph_error)?;
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec.connections.push(connection.to_string());
-        engine.inner.invalidate();
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec.connections.push(connection.to_string());
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1049,13 +1241,10 @@ pub unsafe extern "C" fn dg_engine_disconnect(
         let connection = unsafe { c_string(connection)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let engine = unsafe { &mut *engine };
-        engine
-            .inner
-            .spec
-            .connections
-            .retain(|item| item != connection);
-        engine.inner.invalidate();
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec.connections.retain(|item| item != connection);
+        engine.invalidate();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1070,10 +1259,11 @@ pub unsafe extern "C" fn dg_engine_build(engine: *mut DgEngine) -> DgStatus {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine = unsafe { &mut *engine };
-        engine.inner.spec.validate().map_err(graph_error)?;
-        engine.inner.graph = Some(Graph::new(engine.inner.spec.clone()).map_err(graph_error)?);
-        engine.inner.outputs.clear();
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.spec.validate().map_err(graph_error)?;
+        engine.graph = Some(Graph::new(engine.spec.clone()).map_err(graph_error)?);
+        engine.outputs.clear();
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1088,8 +1278,9 @@ pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine = unsafe { &mut *engine };
-        engine.inner.run().map_err(|message| {
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
+        engine.run().map_err(|message| {
             if message.contains("built") {
                 (DgStatus::NotBuilt, message)
             } else {
@@ -1110,9 +1301,9 @@ pub unsafe extern "C" fn dg_engine_init(engine: *mut DgEngine) -> DgStatus {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine = unsafe { &mut *engine };
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
         engine
-            .inner
             .init()
             .map_err(|message| (DgStatus::RuntimeError, message))?;
         Ok(())
@@ -1129,9 +1320,9 @@ pub unsafe extern "C" fn dg_engine_stop(engine: *mut DgEngine) -> DgStatus {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine = unsafe { &mut *engine };
+        let engine_handle = unsafe { &*engine };
+        let engine = lock_engine_read(engine_handle)?;
         engine
-            .inner
             .stop()
             .map_err(|message| (DgStatus::RuntimeError, message))?;
         Ok(())
@@ -1148,9 +1339,9 @@ pub unsafe extern "C" fn dg_engine_shutdown(engine: *mut DgEngine, timeout_ms: u
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine = unsafe { &mut *engine };
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
         engine
-            .inner
             .shutdown(timeout_ms)
             .map_err(|message| (DgStatus::RuntimeError, message))?;
         Ok(())
@@ -1175,8 +1366,9 @@ pub unsafe extern "C" fn dg_engine_status(
                 "engine or output pointer is null".to_string(),
             ));
         }
-        let engine = unsafe { &*engine };
-        let (status, cause) = engine.inner.status();
+        let engine_handle = unsafe { &*engine };
+        let engine = lock_engine_read(engine_handle)?;
+        let (status, cause) = engine.status();
         if let Some(cause) = cause {
             set_error(cause);
         } else {
@@ -1206,9 +1398,9 @@ pub unsafe extern "C" fn dg_engine_metrics(
                 "engine or output pointer is null".to_string(),
             ));
         }
-        let engine = unsafe { &*engine };
+        let engine_handle = unsafe { &*engine };
+        let engine = lock_engine_read(engine_handle)?;
         let json = engine
-            .inner
             .metrics_json()
             .map_err(|message| (DgStatus::RuntimeError, message))?;
         let bytes = json.into_bytes().into_boxed_slice();
@@ -1255,7 +1447,7 @@ pub unsafe extern "C" fn dg_backend_create(
         let mut option = configure_backend(backend_name(kind), config)
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         option.model_source = ModelSource::Bytes(model);
-        let mut backend = create_backend(backend_kind_from_c(kind))
+        let mut backend = create_backend(backend_kind_from_c(kind)?)
             .map_err(|error| (DgStatus::Unsupported, error.to_string()))?;
         backend
             .init(&option)
@@ -1340,6 +1532,7 @@ pub unsafe extern "C" fn dg_backend_capabilities(
         }
         unsafe {
             out.write(DgBackendCapabilities {
+                struct_size: std::mem::size_of::<DgBackendCapabilities>(),
                 device_count: capabilities.devices.len(),
                 devices,
                 precision_count: capabilities.precisions.len(),
@@ -1500,9 +1693,9 @@ pub unsafe extern "C" fn dg_tensor_create_external(
         let shape = unsafe { dims(shape, rank)? };
         let desc = TensorDesc::new(
             Shape::new(shape.to_vec()),
-            data_type_from_c(dtype),
-            format_from_c_enum(format),
-            device_from_c(device),
+            data_type_from_c(dtype)?,
+            format_from_c_enum(format)?,
+            device_from_c(device)?,
         );
         let expected = desc
             .storage_bytes()
@@ -1519,8 +1712,8 @@ pub unsafe extern "C" fn dg_tensor_create_external(
             ExternalHandle::from_raw(raw)
         };
         let buffer = Buffer::from_external(
-            device_from_c(device),
-            domain_from_c(domain),
+            device_from_c(device)?,
+            domain_from_c(domain)?,
             BufferDesc::new(size_bytes, 1),
             external,
             ExternalDropGuard::new(|| {}),
@@ -1601,20 +1794,18 @@ pub unsafe extern "C" fn dg_engine_push(
                 "engine or tensor pointer is null".to_string(),
             ));
         }
-        let engine = unsafe { &mut *engine };
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
         let tensor = unsafe { &*tensor };
-        engine
-            .inner
-            .push(tensor.tensor.clone())
-            .map_err(|message| {
-                if message.contains("input node") {
-                    (DgStatus::Unsupported, message)
-                } else if message.contains("built") {
-                    (DgStatus::NotBuilt, message)
-                } else {
-                    (DgStatus::RuntimeError, message)
-                }
-            })?;
+        engine.push(tensor.tensor.clone()).map_err(|message| {
+            if message.contains("input node") {
+                (DgStatus::Unsupported, message)
+            } else if message.contains("built") {
+                (DgStatus::NotBuilt, message)
+            } else {
+                (DgStatus::RuntimeError, message)
+            }
+        })?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1635,9 +1826,9 @@ pub unsafe extern "C" fn dg_engine_poll(
                 "engine or output pointer is null".to_string(),
             ));
         }
-        let engine = unsafe { &mut *engine };
+        let engine_handle = unsafe { &*engine };
+        let mut engine = lock_engine_write(engine_handle)?;
         let tensor = engine
-            .inner
             .outputs
             .pop_front()
             .ok_or((DgStatus::Again, "no output is available".to_string()))?;
@@ -1673,8 +1864,8 @@ pub unsafe extern "C" fn dg_buffer_import_external(
             ExternalHandle::from_raw(raw)
         };
         let buffer = Buffer::from_external(
-            device_from_c(device),
-            domain_from_c(domain),
+            device_from_c(device)?,
+            domain_from_c(domain)?,
             BufferDesc::new(size_bytes, 1),
             external,
             ExternalDropGuard::new(|| {}),
@@ -2151,6 +2342,7 @@ connections: []
         );
         assert_eq!((input_count, output_count), (1, 1));
         let mut capabilities = DgBackendCapabilities {
+            struct_size: 0,
             device_count: 0,
             devices: [DgDeviceKind::Cpu; 8],
             precision_count: 0,
@@ -2164,6 +2356,7 @@ connections: []
         assert_eq!(capabilities.devices[0], DgDeviceKind::Cpu);
         assert!(capabilities.precision_count > 0);
         let mut info = DgTensorInfo {
+            struct_size: 0,
             dtype: DgDataType::U8,
             format: DgDataFormat::Auto,
             device: DgDeviceKind::Cpu,

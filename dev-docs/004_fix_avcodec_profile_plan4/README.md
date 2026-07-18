@@ -9,10 +9,10 @@ RKMPP / OneVPL / AMF 保持 `unverified`。
 
 | 字段 | 值 |
 |---|---|
-| dyun pin | `dd3190008f2b544b51a74a9f4a225d52befc120a` |
-| SDK tag | **`0.2.0`** stable（peels to pin） |
+| Plan-4 验收 pin | `dd3190008f2b544b51a74a9f4a225d52befc120a`（tag **`0.2.0`**） |
+| **运行中 pin** | `cff861a8893c3391fafce7815f24be42cc9554d2`（见 `dg-media-avcodec`） |
 | 前序 | `0.2.0-rc.3` / `0.2.0-rc.2` 不可变 |
-| 矩阵 | NativeFree / Software / 组合 / NV Host+device-frame 通过 |
+| 矩阵 | Software / NV Host+device-frame 生产；NativeFree = unverified JPEG 路径 |
 | 上游问题 | UP4-001 Closed；UP4-002 Verified |
 
 ## 3. 需求
@@ -30,6 +30,6 @@ RKMPP / OneVPL / AMF 保持 `unverified`。
 ## 5. 完成定义
 
 - [x] INT4-01～10 Done。
-- [x] dyun pin = stable `0.2.0` / `dd31900`。
+- [x] Plan-4 曾固定 stable `0.2.0` / `dd31900`；后续已前移，以 manifest 为准。
 - [x] NativeFree/Software/组合/NV 通过。
 - [x] handoff 与回滚记录完整。

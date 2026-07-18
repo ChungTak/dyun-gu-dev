@@ -17,7 +17,7 @@ use dg_media::{
 use dg_stream::{
     CodecId, MediaKind, MemoryStreamHub, PublisherSink, Rational32, TrackInfo, TrackReadiness,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -265,6 +265,13 @@ fn run_graph_with_watch(
         Reload(std::result::Result<(GraphSpec, GraphDiff), dg_graph::Error>),
     }
 
+    // Install real-protocol connectors before build/start so failures are not
+    // deferred until the first pull/push open (INT5-05).
+    if let Err(error) = ensure_runtime_connectors() {
+        error!(error = %error, "failed to initialize runtime connectors");
+        return Ok(ExitCode::from(3));
+    }
+
     let spec = match load_spec(path) {
         Ok(spec) => spec,
         Err(error) => {
@@ -293,6 +300,9 @@ fn run_graph_with_watch(
         element_metrics: BTreeMap::new(),
         ready: false,
         ready_reason: Some("graph is starting".to_string()),
+        reload_attempts_total: 0,
+        reload_success_total: 0,
+        reload_rejected_total: 0,
     }));
     let mut ops_handle: Option<ops::OpsHandle> = ops_bind
         .as_deref()
@@ -315,15 +325,18 @@ fn run_graph_with_watch(
         }
     });
 
-    // File watcher thread.
-    if watch {
+    // Keep the watch handle alive for the entire supervisor loop. Dropping it
+    // early shuts down the watcher thread (WatchHandle::Drop) and silently
+    // disables live reload.
+    let _watch_handle = if watch {
         let watch_tx = event_tx;
-        let _watch_handle = dg_graph::watch(path, move |result| {
+        Some(dg_graph::watch(path, move |result| {
             let _ = watch_tx.send(SupervisorEvent::Reload(result));
-        });
+        })?)
     } else {
         drop(event_tx);
-    }
+        None
+    };
 
     let mut status: Option<ExitCode> = None;
     while status.is_none() {
@@ -350,22 +363,38 @@ fn run_graph_with_watch(
                     }
                 }
             }
-            Ok(SupervisorEvent::Reload(Ok((_, diff)))) if !diff.is_empty() => {
+            Ok(SupervisorEvent::Reload(Ok((spec, diff)))) => {
                 let Some(running) = running.as_mut() else {
                     break;
                 };
-                let output = render_diff(&diff, format)?;
-                match running.apply_hot_update(diff) {
-                    Ok(()) => {
-                        println!("{output}");
+                record_reload_attempt(&ops_state);
+                // Apply the full candidate spec so limits/execution updates land
+                // even when the topology diff is empty.
+                match running.apply_hot_update_spec(spec) {
+                    Ok(applied) => {
+                        record_reload_success(&ops_state);
+                        info!(
+                            added_nodes = applied.added_nodes.len(),
+                            removed_nodes = applied.removed_nodes.len(),
+                            updated_nodes = applied.updated_nodes.len(),
+                            "graph configuration reload applied"
+                        );
+                        if !applied.is_empty() || !diff.is_empty() {
+                            let output = render_diff(&applied, format)?;
+                            println!("{output}");
+                        }
                     }
                     Err(error) => {
+                        record_reload_rejected(&ops_state);
+                        warn!(error = %error, "graph configuration reload rejected");
                         println!("{}", render_reload_rejected(&error.to_string()));
                     }
                 }
             }
-            Ok(SupervisorEvent::Reload(Ok(_))) => {}
             Ok(SupervisorEvent::Reload(Err(error))) => {
+                record_reload_attempt(&ops_state);
+                record_reload_rejected(&ops_state);
+                warn!(error = %error, "graph configuration reload parse/validate failed");
                 println!("{}", render_reload_rejected(&error.to_string()));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -415,9 +444,14 @@ fn update_ops_state(
     root_cause: Option<&str>,
     metrics: BTreeMap<String, ElementMetricsSnapshot>,
 ) {
-    let ready = status == GraphStatus::Running;
+    let reconnecting = metrics.values().any(|m| m.reconnecting);
+    let ready = status == GraphStatus::Running && !reconnecting;
     let ready_reason = if ready {
         None
+    } else if reconnecting {
+        Some("stream element is connecting or reconnecting".to_string())
+    } else if status == GraphStatus::Reloading {
+        Some("graph configuration is reloading".to_string())
     } else {
         Some(
             root_cause
@@ -432,6 +466,35 @@ fn update_ops_state(
         state.ready = ready;
         state.ready_reason = ready_reason;
     }
+}
+
+fn record_reload_attempt(ops_state: &Arc<RwLock<OpsState>>) {
+    if let Ok(mut state) = ops_state.write() {
+        state.reload_attempts_total = state.reload_attempts_total.saturating_add(1);
+    }
+}
+
+fn record_reload_success(ops_state: &Arc<RwLock<OpsState>>) {
+    if let Ok(mut state) = ops_state.write() {
+        state.reload_success_total = state.reload_success_total.saturating_add(1);
+    }
+}
+
+fn record_reload_rejected(ops_state: &Arc<RwLock<OpsState>>) {
+    if let Ok(mut state) = ops_state.write() {
+        state.reload_rejected_total = state.reload_rejected_total.saturating_add(1);
+    }
+}
+
+fn ensure_runtime_connectors() -> Result<()> {
+    #[cfg(feature = "cheetah")]
+    {
+        dg_stream::install_embedded_cheetah_connector().map_err(|error| {
+            anyhow::anyhow!("failed to install cheetah stream connector: {error}")
+        })?;
+        info!("cheetah stream connector installed");
+    }
+    Ok(())
 }
 
 pub fn validate_graph(path: &Path) -> Result<()> {
@@ -558,7 +621,12 @@ fn render_diff(diff: &GraphDiff, format: OutputFormat) -> Result<String> {
 }
 
 fn render_reload_rejected(error: &str) -> String {
-    format!("graph configuration reload REJECTED: {error}; previous configuration remains active")
+    // Hot-update failures after quiesce may leave the graph Failed rather than
+    // the previous topology still running; do not claim rollback succeeded.
+    format!(
+        "graph configuration reload REJECTED: {error}; check graph status — \
+         a failed mid-update may mark the graph Failed rather than keep the previous topology"
+    )
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -773,7 +841,8 @@ connections:
         let message = render_reload_rejected("invalid node parameters");
         assert!(message.contains("REJECTED"));
         assert!(message.contains("invalid node parameters"));
-        assert!(message.contains("previous configuration remains active"));
+        assert!(message.contains("graph configuration reload REJECTED"));
+        assert!(message.contains("check graph status"));
     }
 
     #[cfg(feature = "openvino")]

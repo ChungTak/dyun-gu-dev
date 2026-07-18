@@ -12,7 +12,7 @@ owned by the selected Profile—do not set low-level backend ids or rely on `mem
 | Example | Cargo features | Runtime `profile` | Support | Notes |
 | --- | --- | --- | --- | --- |
 | [`raw-adapter.yaml`](raw-adapter.yaml) | `media` (default) | n/a | n/a | No avcodec SDK; raw payload relabel only |
-| [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | development | Pure Rust JPEG encode/decode (not product default) |
+| [`native-free-jpeg.yaml`](native-free-jpeg.yaml) | `media,avcodec-profile-native-free` | `native-free` | **unverified** / development | Pure Rust JPEG encode/decode only (not product video path) |
 | [`software-host.yaml`](software-host.yaml) | `media,avcodec-profile-software` | `software` | production | libavcodec ≥ 58 + libx264 for H.264 |
 | [`nvcodec-device-frame.yaml`](nvcodec-device-frame.yaml) | `media,avcodec-profile-nvcodec-device-frame` | `nvcodec-device-frame` | production* | CUDA runtime; no resize; `allow_staging=false` |
 | [`rkmpp-host-fallback.yaml`](rkmpp-host-fallback.yaml) | `media,avcodec-profile-rkmpp-host-fallback` | `rkmpp-host-fallback` | **unverified** | Compile/config only until signed |

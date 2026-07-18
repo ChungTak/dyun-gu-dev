@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +16,12 @@ pub(crate) struct ElementMetrics {
     max_queue_depth: AtomicUsize,
     drop_count: AtomicU64,
     backpressure_count: AtomicU64,
+    /// Times this element instance was rebuilt by a hot update (state reset).
+    state_reset_total: AtomicU64,
+    /// True while a stream element is between disconnect and successful reconnect.
+    reconnecting: AtomicBool,
+    /// Successful or attempted reconnects after the initial open.
+    reconnect_total: AtomicU64,
     backend_metrics: Mutex<Option<Arc<BackendMetrics>>>,
 }
 
@@ -54,6 +60,24 @@ impl ElementMetrics {
         self.backpressure_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_state_reset(&self) {
+        self.state_reset_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_reconnecting(&self, value: bool) {
+        self.reconnecting.store(value, Ordering::Relaxed);
+    }
+
+    /// Clears the reconnecting flag without counting a reconnect (first open).
+    pub(crate) fn clear_reconnecting(&self) {
+        self.reconnecting.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_reconnect(&self) {
+        self.reconnect_total.fetch_add(1, Ordering::Relaxed);
+        self.reconnecting.store(false, Ordering::Relaxed);
+    }
+
     pub(crate) fn attach_backend_metrics(&self, metrics: Arc<BackendMetrics>) {
         if let Ok(mut guard) = self.backend_metrics.lock() {
             *guard = Some(metrics);
@@ -76,6 +100,9 @@ impl ElementMetrics {
             max_queue_depth: self.max_queue_depth.load(Ordering::Relaxed),
             drop_count: self.drop_count.load(Ordering::Relaxed),
             backpressure_count: self.backpressure_count.load(Ordering::Relaxed),
+            state_reset_total: self.state_reset_total.load(Ordering::Relaxed),
+            reconnecting: self.reconnecting.load(Ordering::Relaxed),
+            reconnect_total: self.reconnect_total.load(Ordering::Relaxed),
             backend_metrics: self
                 .backend_metrics
                 .lock()
@@ -97,6 +124,12 @@ pub struct ElementMetricsSnapshot {
     pub max_queue_depth: usize,
     pub drop_count: u64,
     pub backpressure_count: u64,
+    /// Number of hot-update rebuilds for this node (state was reset).
+    pub state_reset_total: u64,
+    /// True while a stream source/sink is reconnecting.
+    pub reconnecting: bool,
+    /// Reconnect attempts/completions recorded by stream elements.
+    pub reconnect_total: u64,
     pub backend_metrics: Option<BackendMetricsSnapshot>,
 }
 

@@ -263,6 +263,19 @@ impl Element for InferenceElement {
                 return Ok(());
             }
 
+            // Cooperative cancel: only abort when there is no in-flight work to
+            // finish. In-flight submissions continue to be polled so stop does
+            // not strand request-pool capacity; hung backends still unblock once
+            // pending drains or the join timeout fires.
+            if io.should_stop() {
+                if self.pending.is_empty() {
+                    self.execution.cancel();
+                    return Err(Error::NotRunning);
+                }
+                thread::yield_now();
+                continue;
+            }
+
             if eos || !self.execution.has_capacity() {
                 // Either done with input or the backend request pool is full.
                 // Keep polling without consuming more upstream data so bounded
@@ -631,6 +644,26 @@ fn parse_schedule(value: &Option<String>) -> Result<SchedulingPolicy> {
 #[cfg(test)]
 mod tests {
     use super::inference_scheduler_snapshot;
+    use std::thread;
+    use std::time::Duration;
+
+    fn assert_scheduler_load_released() {
+        // The inference scheduler is process-global; sibling tests may briefly hold
+        // leases. Spin briefly so teardown Drop is observed before asserting.
+        for _ in 0..100 {
+            let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
+            if snapshot
+                .iter()
+                .flat_map(|device| device.cores.iter())
+                .all(|core| core.load == 0)
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
+        panic!("scheduler load did not return to zero: {snapshot:?}");
+    }
     use crate::{Graph, GraphFormat, GraphSpec};
 
     #[test]
@@ -706,11 +739,7 @@ connections:
                 .read_bytes(),
             vec![0, 0, 0, 0, 0, 0, 0, 0]
         );
-        let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
-        assert!(snapshot
-            .iter()
-            .flat_map(|device| device.cores.iter())
-            .all(|core| core.load == 0));
+        assert_scheduler_load_released();
     }
 
     #[test]
@@ -747,11 +776,7 @@ connections:
             .expect("normalize");
         let report = Graph::new(spec).expect("build").run().expect("run");
         assert_eq!(report.sinks.get("sink").expect("sink outputs").len(), 4);
-        let snapshot = inference_scheduler_snapshot().expect("scheduler snapshot");
-        assert!(snapshot
-            .iter()
-            .flat_map(|device| device.cores.iter())
-            .all(|core| core.load == 0));
+        assert_scheduler_load_released();
     }
 
     #[test]

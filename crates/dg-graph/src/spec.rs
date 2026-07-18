@@ -97,6 +97,7 @@ pub struct ResourceLimits {
     /// Maximum include depth for nested configuration files.
     pub max_include_depth: usize,
     /// Maximum number of included configuration files.
+    #[serde(alias = "max_include_files")]
     pub max_include_count: usize,
     /// Maximum number of nodes in a graph.
     pub max_nodes: usize,
@@ -215,7 +216,9 @@ pub struct GraphSpec {
     #[serde(default)]
     #[serde(alias = "edges")]
     pub connections: Vec<String>,
+    /// Resource and input-size limits (`limits` preferred; `resource_limits` accepted).
     #[serde(default)]
+    #[serde(alias = "resource_limits")]
     pub limits: ResourceLimits,
 }
 

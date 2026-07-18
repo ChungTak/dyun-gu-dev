@@ -1026,3 +1026,31 @@ fn graph_diff_is_empty_for_identical_specs() {
     let diff = Graph::diff(&spec, &spec);
     assert!(diff.is_empty());
 }
+
+#[test]
+fn resource_limits_alias_and_max_include_files_are_accepted() {
+    let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+resource_limits:
+  max_nodes: 16
+  max_connections: 32
+  max_include_files: 7
+  max_config_bytes: 4096
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 1
+      shape: [1, 1]
+  - name: sink
+    kind: sink
+connections:
+  - source.out -> sink.in
+"#;
+    let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml).expect("parse");
+    assert_eq!(spec.limits.max_nodes, 16);
+    assert_eq!(spec.limits.max_connections, 32);
+    assert_eq!(spec.limits.max_include_count, 7);
+    assert_eq!(spec.limits.max_config_bytes, 4096);
+}

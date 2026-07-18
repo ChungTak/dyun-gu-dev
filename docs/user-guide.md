@@ -150,7 +150,9 @@ cargo run -p dg-cli -- schema --kind media_osd
 ### 4.1 Intel 产品构建（`product-intel`）
 
 Intel 首发产品形态通过 `dg-cli` 的 **`product-intel`** feature 启用，等价于
-`openvino + stream + dg-stream/cheetah + media + avcodec-profile-software`。
+`openvino + stream + dg-stream/cheetah + media + avcodec-profile-software +
+avcodec-profile-onevpl-host-fallback`（软件 H.264 默认，Intel iGPU 时可选 OneVPL Host
+并在失败时回退 FFmpeg）。
 
 ```bash
 cargo build -p dg-cli --locked --no-default-features --features product-intel
@@ -224,20 +226,28 @@ cargo run -p dg-cli --features sophon -- run --config graph.yaml
 
 | Cargo feature | 支持级别 | 典型用途 |
 | --- | --- | --- |
-| `avcodec-profile-native-free` | development | 纯 Rust JPEG + rust-h264 Host（本地验证，不作为产品默认） |
+| `avcodec-profile-native-free` | **unverified** / development | 纯 Rust JPEG/MJPEG（zune）+ libyuv；不作为产品默认，不作为真实视频路径 |
 | `avcodec-profile-software` | production | FFmpeg Host（libavcodec ≥ 58；H.264 需 libx264） |
-| `avcodec-profile-onevpl-host-fallback` | production | Intel iGPU Host，失败时回退到 FFmpeg/x264 |
 | `avcodec-profile-nvcodec-host` / `-fallback` | production | NV Host（真机；CI 仅 compile-only） |
 | `avcodec-profile-nvcodec-device-frame` | production | CudaDevice NV12 device-frame（非完整 CUDA 零拷贝） |
+| `avcodec-profile-onevpl-host` / `-fallback` | **unverified** | Intel oneVPL Host（fallback 可回退 FFmpeg；产品化需 iGPU 验收） |
 | `avcodec-profile-rkmpp-host` / `-fallback` | **unverified** | Rockchip Host（fallback 才可回退软件） |
 | `avcodec-profile-rkmpp-zero-copy` | **unverified** | DrmPrime→RGA→DmaBuf 图像链 |
-| `avcodec-profile-onevpl-host` / `amf-host`（及 fallback） | **unverified** | Intel/AMD Host（无 fallback 时不保证可用） |
+| `avcodec-profile-amf-host` / `-fallback` | **unverified** | AMD AMF（host 以 encode 为主；无 fallback 时不保证 decode） |
+
+依赖 pin：`dg-media-avcodec` 固定 avcodec-rs
+`cff861a8893c3391fafce7815f24be42cc9554d2`（上游 main，含 0.2.0 稳定线与后续
+Plan 8 `ImageSdk`/`AudioSdk` 增量；生产视频路径仍只消费 `VideoSdk` + `VideoProfile`）。
 
 规则摘要：
 
-- 未写 `profile` 且只编译了一个 Profile 时自动选用；编译多个时优先按推理 `device` 自动选择，无 device 则默认 `software`。
+- 未写 `profile` 时：若节点带推理 `device` 则按设备映射（CPU/NPU→`software`，
+  `intel_gpu`→`onevpl-host-fallback`，`cuda`→`nvcodec-host-fallback`，
+  `rknn`→`rkmpp-host-fallback`）；否则在已编译 `software` 时默认 `software`。
+- 编译了多个 Profile 且既无 `profile` 也无可用 device 映射时，须显式写 `profile`。
 - 不能同时写 `profile` 与遗留 `hw`。
-- 旧 feature 名 `avcodec` 兼容映射到 `software`。
+- 旧 feature 名 `avcodec` 兼容映射到 `software`（不隐式启用 ffmpeg 到所有 profile）。
+- 真实视频编解码跟随推理硬件 + 软件回退；**不以纯 Rust H.264 作为产品路径**。
 - **零拷贝**必须同时有 MemoryDomain、external handle、plane layout、ownership guard
   与 `TransferReport.copy_count == 0` 证据；不得仅凭 domain 同名宣称。
 
@@ -296,32 +306,37 @@ avcodec handle，仍通过 graph YAML/JSON 的 `profile` 参数选择后端。
 `{ Starting, Running, Draining, Stopped, Failed }` 之一，`metrics` 返回 JSON
 格式的节点与后端指标快照。
 
+进程启动可调用 `dg_runtime_init`（幂等；启用 cheetah 时安装内置 connector）。
 `dg_engine_reload_string` / `dg_engine_reload_file` 会对已构建图原位应用新配置，
-无需再次 `dg_engine_build`。为避免输入被不同配置解释，仍有待处理输入时 reload
-会被拒绝；先执行或排空输入后再更新。`dg-graph::watch` 可监控文件并返回
-`GraphDiff`。
+无需再次 `dg_engine_build`。若图已 `dg_engine_init` 进入长运行，reload 会调用
+`RunningGraph::apply_hot_update_spec` 更新 live 拓扑与顶层 `limits`/`execution`。
+同一 Engine 句柄的互斥变更操作在并发时返回 `Busy`。`dg_engine_free` 在销毁前
+best-effort `request_stop` + 最多 5s `shutdown`。`DgTensorInfo` /
+`DgBackendCapabilities` / `DgRuntimeInitOptions` 以 `struct_size` 为首字段。
+`dg_build_capabilities_json` 返回本构建 ABI 能力摘要。
 
 ## 7. 运维与健康检查
 
 `dg run` 默认在 `127.0.0.1:9090` 启动轻量 HTTP ops server（`tiny_http`）：
 
 - `GET /livez`：进程存活返回 200 `ok`。
-- `GET /readyz`：图处于 `Running` 返回 200 `ready`；否则 503 并返回当前状态/错误。
-- `GET /metrics`：OpenMetrics 文本，包含 `dg_graph_status` 与每个 element 的
-  处理/队列/drop/backpressure 指标，以及 OpenVINO 后端的 submit/poll/latency/
-  copy 指标。
+- `GET /readyz`：图处于 `Running` 且无 stream element 处于连接/重连中时返回 200
+  `ready`；Starting/Reloading/Failed/Draining/连接中返回 503 及原因。
+- `GET /metrics`：OpenMetrics 文本，包含 `dg_graph_status`、reload 成功/拒绝计数，
+  与每个 element 的处理/队列/drop/backpressure/`state_reset`/`reconnect` 指标，
+  以及后端 submit/poll/latency/copy 指标。
 
 监听地址可通过 `--ops-bind <addr:port>` 修改，使用 `--ops-disable` 关闭。绑定到
 非 loopback 地址时会在日志中输出安全警告——ops 端点仅用于本地可观测性。
 
-`GraphSpec` 支持顶层 `resource_limits`：
+`GraphSpec` 支持顶层 `limits`（别名 `resource_limits`）：
 
 ```yaml
-resource_limits:
+limits:
   max_nodes: 1024
-  max_connections: 4096
+  max_connections: 8192
   max_include_depth: 8
-  max_include_files: 64
+  max_include_count: 64   # 亦接受 max_include_files
   max_config_bytes: 16777216
 ```
 

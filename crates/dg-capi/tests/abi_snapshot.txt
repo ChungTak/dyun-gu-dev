@@ -11,6 +11,7 @@ DgGraphFormat
 DgGraphStatus
 DgMemoryDomain
 DgStatus
+DgRuntimeInitOptions
 DgTensor
 DgTensorInfo
 dg_backend_capabilities
@@ -18,6 +19,8 @@ dg_backend_create
 dg_backend_free
 dg_backend_io_counts
 dg_abi_version
+dg_build_capabilities_json
+dg_runtime_init
 dg_backend_run
 dg_backend_tensor_info
 dg_buffer_free

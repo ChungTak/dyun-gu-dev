@@ -1,19 +1,18 @@
-# avcodec-rs：面向外部 Rust SDK 集成的能力缺口
+# avcodec-rs：面向外部 Rust SDK 集成的能力缺口（历史文档）
 
-本文基于 pinned checkout：
+> **归档说明：** 本文记录早期 pin `621a708` 上的 gap 分析，**不再作为集成门禁**。
+> 当前 pin、集成方向与能力对照见
+> [`avcodec-rs-media01-requirements.md`](avcodec-rs-media01-requirements.md)
+> （`cff861a8893c3391fafce7815f24be42cc9554d2`）。
+
+本文原基于 pinned checkout：
 
 ```text
 /home/ubuntu/.cargo/git/checkouts/avcodec-rs-develop-16e024684163e26c/621a708
 ```
 
-对应 revision 为 `621a708`。本文中的“现有 API”仅指该 checkout 中可核对的代码；“建议 API”均明确标为 proposed capability，不表示当前已经存在。
-
-> 更新（2026-07）：依赖已升到 upstream `main` HEAD `8ef5a72`。本文五个 gap 在新 revision 上的
-> 复核结论与「完成 MEDIA-01 真实视频路径仍缺的能力」见
-> [`avcodec-rs-media01-requirements.md`](avcodec-rs-media01-requirements.md)：Gap 2/3/5 已关闭；
-> Gap 1（native-free H.264 **decode + encode**）与 Gap 4（`EncoderConfig.parameters`/`Packet.time_base`/
-> `Encoder::stream_parameters()`）也已基本关闭，仅剩 native-free VP8/VP9/AV1 覆盖与统一 `PacketMetadata`
-> trait 属非阻塞的可选增强。
+对应 revision 为 `621a708`。文中“现有 API”仅指该历史 checkout；“建议 API”均为当时
+proposed capability。
 
 ## 1. 背景/目标
 

@@ -17,6 +17,10 @@ pub struct OpsState {
     pub element_metrics: BTreeMap<String, ElementMetricsSnapshot>,
     pub ready: bool,
     pub ready_reason: Option<String>,
+    /// Supervisor-level reload counters (INT5-04/08).
+    pub reload_attempts_total: u64,
+    pub reload_success_total: u64,
+    pub reload_rejected_total: u64,
 }
 
 /// Handle to the ops server thread.
@@ -193,6 +197,37 @@ fn render_metrics(state: &Arc<RwLock<OpsState>>) -> Result<String> {
         }
     )?;
     writeln!(out)?;
+    writeln!(
+        out,
+        "# HELP dg_graph_reload_attempts_total Graph configuration reload attempts"
+    )?;
+    writeln!(out, "# TYPE dg_graph_reload_attempts_total counter")?;
+    writeln!(
+        out,
+        "dg_graph_reload_attempts_total {}",
+        snapshot.reload_attempts_total
+    )?;
+    writeln!(
+        out,
+        "# HELP dg_graph_reload_success_total Successful graph configuration reloads"
+    )?;
+    writeln!(out, "# TYPE dg_graph_reload_success_total counter")?;
+    writeln!(
+        out,
+        "dg_graph_reload_success_total {}",
+        snapshot.reload_success_total
+    )?;
+    writeln!(
+        out,
+        "# HELP dg_graph_reload_rejected_total Rejected graph configuration reloads"
+    )?;
+    writeln!(out, "# TYPE dg_graph_reload_rejected_total counter")?;
+    writeln!(
+        out,
+        "dg_graph_reload_rejected_total {}",
+        snapshot.reload_rejected_total
+    )?;
+    writeln!(out)?;
 
     for (node, metrics) in &snapshot.element_metrics {
         let node_label = sanitize_label(node);
@@ -225,6 +260,28 @@ fn render_metrics(state: &Arc<RwLock<OpsState>>) -> Result<String> {
             "dg_element_backpressure_events_total",
             &node_label,
             metrics.backpressure_count,
+        )?;
+        render_counter(
+            &mut out,
+            "dg_element_state_resets_total",
+            &node_label,
+            metrics.state_reset_total,
+        )?;
+        render_counter(
+            &mut out,
+            "dg_element_reconnects_total",
+            &node_label,
+            metrics.reconnect_total,
+        )?;
+        writeln!(
+            out,
+            "# HELP dg_element_reconnecting 1 if the element is mid-reconnect"
+        )?;
+        writeln!(out, "# TYPE dg_element_reconnecting gauge")?;
+        writeln!(
+            out,
+            "dg_element_reconnecting{{node=\"{node_label}\"}} {}",
+            u8::from(metrics.reconnecting)
         )?;
 
         writeln!(
@@ -290,6 +347,103 @@ fn render_metrics(state: &Arc<RwLock<OpsState>>) -> Result<String> {
             "dg_element_processing_latency_avg_nanoseconds{{node=\"{node_label}\"}} {}",
             metrics.processing_latency_avg_ns
         )?;
+
+        if let Some(backend) = &metrics.backend_metrics {
+            render_counter(
+                &mut out,
+                "dg_backend_submissions_total",
+                &node_label,
+                backend.submissions,
+            )?;
+            writeln!(
+                out,
+                "# HELP dg_backend_in_flight Current backend in-flight submissions"
+            )?;
+            writeln!(out, "# TYPE dg_backend_in_flight gauge")?;
+            writeln!(
+                out,
+                "dg_backend_in_flight{{node=\"{node_label}\"}} {}",
+                backend.in_flight
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_poll_pending_total",
+                &node_label,
+                backend.poll_pending,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_errors_total",
+                &node_label,
+                backend.backend_errors,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_h2d_copies_total",
+                &node_label,
+                backend.h2d_count,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_h2d_bytes_total",
+                &node_label,
+                backend.h2d_bytes,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_d2h_copies_total",
+                &node_label,
+                backend.d2h_count,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_d2h_bytes_total",
+                &node_label,
+                backend.d2h_bytes,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_host_copies_total",
+                &node_label,
+                backend.host_copy_count,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_host_copy_bytes_total",
+                &node_label,
+                backend.host_copy_bytes,
+            )?;
+            writeln!(
+                out,
+                "# HELP dg_backend_infer_latency_p50_nanoseconds Inference latency p50"
+            )?;
+            writeln!(out, "# TYPE dg_backend_infer_latency_p50_nanoseconds gauge")?;
+            writeln!(
+                out,
+                "dg_backend_infer_latency_p50_nanoseconds{{node=\"{node_label}\"}} {}",
+                backend.infer_latencies.p50_ns
+            )?;
+            writeln!(
+                out,
+                "# HELP dg_backend_infer_latency_p95_nanoseconds Inference latency p95"
+            )?;
+            writeln!(out, "# TYPE dg_backend_infer_latency_p95_nanoseconds gauge")?;
+            writeln!(
+                out,
+                "dg_backend_infer_latency_p95_nanoseconds{{node=\"{node_label}\"}} {}",
+                backend.infer_latencies.p95_ns
+            )?;
+            writeln!(
+                out,
+                "# HELP dg_backend_infer_latency_p99_nanoseconds Inference latency p99"
+            )?;
+            writeln!(out, "# TYPE dg_backend_infer_latency_p99_nanoseconds gauge")?;
+            writeln!(
+                out,
+                "dg_backend_infer_latency_p99_nanoseconds{{node=\"{node_label}\"}} {}",
+                backend.infer_latencies.p99_ns
+            )?;
+        }
 
         writeln!(out)?;
     }

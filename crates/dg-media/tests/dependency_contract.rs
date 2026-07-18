@@ -64,10 +64,10 @@ fn dg_media_avcodec_is_only_direct_codec_dependency() {
         "dg-media must treat dg-media-avcodec as optional"
     );
     let avcodec_manifest = include_str!("../../dg-media-avcodec/Cargo.toml");
-    // Plan 4 stable 0.2.0 (annotated tag peels to this commit).
+    // Pinned to upstream avcodec-rs main (includes Plan 8 AudioSdk/ImageSdk lineage).
     assert!(
-        avcodec_manifest.contains("rev = \"0b4e9067a397fa3ddc4006ce69c2057cf94a0505\""),
-        "dg-media-avcodec must pin 0b4e9067 upstream main revision"
+        avcodec_manifest.contains("rev = \"cff861a8893c3391fafce7815f24be42cc9554d2\""),
+        "dg-media-avcodec must pin cff861a8 upstream main revision"
     );
     assert!(
         avcodec_manifest.contains("profile-native-free"),
