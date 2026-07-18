@@ -22,6 +22,7 @@ mod spec;
 pub use element::{CreatedElement, Element, ElementHandle, ElementIo, PortSchema, SinkCollector};
 pub use engine::{watch, Graph, GraphDiff, GraphReport, GraphStatus, RunningGraph, WatchHandle};
 pub use error::{Error, Result};
+pub use inventory;
 pub use metrics::{ElementMetricsSnapshot, MetricsSink};
 pub use packet::{Packet, PacketMeta, PacketPayload};
 pub use pipe::{DataPipe, PipeReceiver, PipeSender, DEFAULT_QUEUE_CAPACITY};

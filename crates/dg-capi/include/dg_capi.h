@@ -341,7 +341,9 @@ enum DgStatus dg_engine_create(struct DgEngine **out, struct DgError **out_error
  *
  * On success the handle is freed. If the running graph cannot be shut down
  * within `timeout_ms`, `DgStatus::Busy` is returned and the handle remains
- * valid so the caller can retry.
+ * valid so the caller can retry. Other shutdown errors still free the handle
+ * because the running graph has already stopped; the returned error handle
+ * explains the failure.
  */
 enum DgStatus dg_engine_destroy(struct DgEngine *engine,
                                 uint64_t timeout_ms,
