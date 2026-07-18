@@ -251,7 +251,7 @@ impl Runtime {
 
     /// Current number of in-flight submissions.
     pub fn in_flight(&self) -> usize {
-        self.metrics.in_flight() as usize
+        usize::try_from(self.metrics.in_flight()).unwrap_or(usize::MAX)
     }
 
     /// Maximum number of in-flight submissions this runtime allows.
