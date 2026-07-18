@@ -221,6 +221,9 @@ impl DgOwnedBytes {
     }
 
     fn data(&self) -> *const u8 {
+        if self.bytes.is_empty() {
+            return ptr::null();
+        }
         self.bytes.as_ptr()
     }
 
