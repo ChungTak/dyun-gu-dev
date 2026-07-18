@@ -1,9 +1,22 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use dg_core::ResourcePolicy;
 
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
     BackendMetrics, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
+
+fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
+    match source {
+        crate::ModelSource::File(path) => {
+            let path: &PathBuf = path;
+            Ok(std::fs::metadata(path)?.len() as usize)
+        }
+        crate::ModelSource::Bytes(bytes) => Ok(bytes.len()),
+    }
+}
 
 /// Result of polling a submitted inference.
 #[derive(Debug)]
@@ -111,11 +124,17 @@ pub struct Runtime {
     sync_result: Option<(u64, Vec<dg_core::Tensor>)>,
     metrics: Arc<BackendMetrics>,
     max_in_flight: usize,
+    policy: ResourcePolicy,
 }
 
 impl Runtime {
     pub fn new(option: RuntimeOption) -> Result<Self> {
+        Self::new_with_policy(option, ResourcePolicy::default())
+    }
+
+    pub fn new_with_policy(option: RuntimeOption, policy: ResourcePolicy) -> Result<Self> {
         validate_runtime_option(&option)?;
+        policy.check_model_bytes(model_source_size(&option.model_source)?)?;
         let mut backend = create_backend(option.backend)?;
         let metrics = Arc::new(BackendMetrics::default());
         backend.attach_metrics(Arc::clone(&metrics));
@@ -130,6 +149,7 @@ impl Runtime {
             sync_result: None,
             metrics,
             max_in_flight,
+            policy,
         })
     }
 
@@ -151,7 +171,12 @@ impl Runtime {
             sync_result: None,
             metrics,
             max_in_flight,
+            policy: ResourcePolicy::default(),
         }
+    }
+
+    pub fn policy(&self) -> &ResourcePolicy {
+        &self.policy
     }
 
     pub fn backend_kind(&self) -> BackendKind {

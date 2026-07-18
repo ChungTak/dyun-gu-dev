@@ -17,6 +17,7 @@ mod format;
 mod media;
 mod memory;
 mod quantization;
+mod resource;
 mod shape;
 mod stream;
 mod tensor;
@@ -47,6 +48,7 @@ pub use memory::{
     Allocator, CpuAllocator, ExternalDropGuard, ExternalHandle, MemoryDomain, MemoryPool,
 };
 pub use quantization::{Quantization, QuantizationScheme};
+pub use resource::ResourcePolicy;
 pub use shape::{Shape, Strides};
 pub use stream::{CpuEvent, CpuStream, Event, EventKind, Stream, StreamKind};
 pub use tensor::{Tensor, TensorDesc};

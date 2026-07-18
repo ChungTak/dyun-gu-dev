@@ -11,8 +11,8 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 
 | ID | 等级 | 模块/证据 | 当前事实 | 目标与关闭证据 | 状态 | Owner |
 |---|---|---|---|---|---|---|
-| R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Reproduced | John Doe |
-| R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | Open | John Doe |
+| R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Closed | John Doe |
+| R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | In Progress | John Doe |
 | R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Open | John Doe |
 | R6-004 | P1 | `dg-graph/src/inference.rs` | pool 只 attach 首 Runtime metrics | 全 pool 共享 metrics，2/4/8 实例对账 | Open | John Doe |
 | R6-005 | P1 | `dg-runtime/src/metrics.rs` | latency 保存到无界 `Vec<u64>` | 固定 buckets，百万观测常量内存 | Open | John Doe |
@@ -51,3 +51,17 @@ Reviewer:
 Closed commit/date:
 ```
 
+## 4. CORE6-02 关闭记录
+
+**R6-001**
+- Owner: John Doe
+- Branch/PR: `devin/1784344499-core6-02-resource-policy`
+- Reproduction: `from_str_with_format_ignores_max_config_bytes`, `load_from_path_ignores_configured_include_depth`
+- Root cause: `GraphSpec` 入口未根据 `limits.max_config_bytes` 与 `limits.max_include_depth` 校验输入；include resolver 只检查默认常量。
+- Chosen fix: 新增 `dg_core::ResourcePolicy`，`GraphSpec` 在 `from_str_with_policy`/`load_from_path_tracked` 中计算 `effective = min(hard, requested)`，累计 config 字节，include depth/count；`Graph`/`Runtime` 持有 `Arc<ResourcePolicy>`。
+- Public compatibility impact: `Graph::new` 行为不变；新增 `Graph::new_with_policy`、`Runtime::new_with_policy`、`ElementIo::policy()`。
+- Tests: `crates/dg-core/tests/core6_resource_policy.rs`, `crates/dg-graph/tests/core6_resource_policy.rs`, `crates/dg-runtime/tests/core6_resource_policy.rs`, `crates/dg-graph/tests/core6_baseline.rs` 回归。
+- Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`dg-media --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
+- Residual risk: 已迁移到 R6-002，待 tensor/frame 真实消费边界继续收敛。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)

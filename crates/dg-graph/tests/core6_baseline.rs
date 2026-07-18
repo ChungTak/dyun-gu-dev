@@ -1,7 +1,7 @@
-//! CORE6-01 基线失败测试（dg-graph）。
+//! CORE6-02 资源策略回归测试（dg-graph）。
 //!
-//! 这些测试验证 `GraphSpec` 在字符串入口和 include 解析中未正确执行
-//! `ResourceLimits` 的已知缺陷。对应风险关闭后应取消 ignore。
+//! 这些测试验证 `GraphSpec` 的字符串入口与 include 解析在 CORE6-02 之后
+//! 正确执行 `ResourcePolicy` 与 `ResourceLimits` 的下限。
 
 use dg_graph::{GraphFormat, GraphSpec};
 use std::fs;
@@ -24,10 +24,7 @@ fn write_graph(dir: &Path, name: &str, max_include_depth: usize, include: Option
 }
 
 #[test]
-#[ignore = "R6-001: CORE6-02 will enforce configured max_config_bytes in from_str_with_format"]
-fn from_str_with_format_ignores_max_config_bytes() {
-    // The content is clearly larger than the configured 1 byte limit, but
-    // GraphSpec::from_str_with_format does not perform the size check.
+fn from_str_with_format_enforces_max_config_bytes() {
     let yaml = "apiVersion: dg/v1\nkind: Graph\nlimits:\n  max_config_bytes: 1\nnodes: []\nconnections: []\n";
     let result = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml);
     assert!(
@@ -37,14 +34,12 @@ fn from_str_with_format_ignores_max_config_bytes() {
 }
 
 #[test]
-#[ignore = "R6-001: CORE6-02 will honor configured max_include_depth"]
-fn load_from_path_ignores_configured_include_depth() {
+fn load_from_path_enforces_configured_include_depth() {
     let dir = std::env::temp_dir().join(format!("dg-core6-include-depth-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create temp dir");
 
     // Build a chain root -> a -> b -> c with configured max_include_depth=2.
-    // The implementation currently uses DEFAULT_MAX_INCLUDE_DEPTH (16).
     write_graph(&dir, "root.yaml", 2, Some("a.yaml"));
     write_graph(&dir, "a.yaml", 2, Some("b.yaml"));
     write_graph(&dir, "b.yaml", 2, Some("c.yaml"));

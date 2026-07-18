@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use dg_core::{Classification, Detection, FaceDetection, OcrText, Tensor, Track};
+use dg_core::{Classification, Detection, FaceDetection, OcrText, ResourcePolicy, Tensor, Track};
 use tracing::{error, info};
 
 use crate::element::{Element, ElementHandle, ElementIo, EosState};
@@ -68,6 +68,7 @@ type SinkMap = BTreeMap<String, Arc<Mutex<crate::element::SinkCollector>>>;
 
 pub struct Graph {
     spec: GraphSpec,
+    policy: Arc<ResourcePolicy>,
 }
 
 /// Lifecycle status of a [`RunningGraph`].
@@ -98,6 +99,7 @@ fn status_from_u8(value: u8) -> GraphStatus {
 /// this handle until [`RunningGraph::finish`] joins them.
 pub struct RunningGraph {
     spec: GraphSpec,
+    policy: Arc<ResourcePolicy>,
     stop: Arc<AtomicBool>,
     workers: BTreeMap<String, LiveNode>,
     routes: RuntimeRoutes,
@@ -109,8 +111,26 @@ pub struct RunningGraph {
 
 impl Graph {
     pub fn new(spec: GraphSpec) -> Result<Self> {
-        spec.validate()?;
-        Ok(Self { spec })
+        Self::new_with_policy(spec, ResourcePolicy::default())
+    }
+
+    pub fn new_with_policy(spec: GraphSpec, policy: ResourcePolicy) -> Result<Self> {
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective = policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        spec.validate_with_policy(&effective)?;
+        Ok(Self {
+            spec,
+            policy: Arc::new(policy),
+        })
+    }
+
+    pub fn policy(&self) -> &ResourcePolicy {
+        &self.policy
     }
 
     pub fn spec(&self) -> &GraphSpec {
@@ -175,7 +195,15 @@ impl Graph {
 
     pub fn reload(&mut self, spec: GraphSpec) -> Result<GraphDiff> {
         let diff = Self::diff(&self.spec, &spec);
-        spec.validate()?;
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective = self
+            .policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        spec.validate_with_policy(&effective)?;
         self.spec = spec;
         Ok(diff)
     }
@@ -196,7 +224,8 @@ impl Graph {
 
     /// Starts the graph without blocking the caller.
     pub fn start(&self, inputs: HashMap<String, Vec<Tensor>>) -> Result<RunningGraph> {
-        let (runtime, sinks, metrics) = RuntimeGraph::build(self.spec.clone(), inputs)?;
+        let (runtime, sinks, metrics) =
+            RuntimeGraph::build(self.spec.clone(), inputs, Arc::clone(&self.policy))?;
         runtime.start(sinks, metrics)
     }
 }
@@ -205,6 +234,7 @@ pub struct RuntimeGraph {
     nodes: Vec<ExecNode>,
     routes: RuntimeRoutes,
     spec: GraphSpec,
+    policy: Arc<ResourcePolicy>,
     stop: Arc<AtomicBool>,
 }
 
@@ -230,6 +260,7 @@ impl RuntimeGraph {
     fn build(
         spec: GraphSpec,
         inputs: HashMap<String, Vec<Tensor>>,
+        policy: Arc<ResourcePolicy>,
     ) -> Result<(Self, SinkMap, BTreeMap<String, Arc<ElementMetrics>>)> {
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
@@ -393,6 +424,7 @@ impl RuntimeGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
+                    policy: Arc::clone(&policy),
                 };
                 exec_nodes.push(ExecNode {
                     name: node.name.clone(),
@@ -411,6 +443,7 @@ impl RuntimeGraph {
                     outputs: output_routes,
                 },
                 spec: spec.clone(),
+                policy,
                 stop,
             },
             sinks,
@@ -458,6 +491,7 @@ impl RuntimeGraph {
         }
         let running = RunningGraph {
             spec: self.spec,
+            policy: self.policy,
             stop: self.stop,
             workers,
             routes: self.routes,
@@ -644,7 +678,15 @@ impl RunningGraph {
             return Ok(diff);
         }
 
-        new_spec.validate()?;
+        let requested = ResourcePolicy::from(&new_spec.limits);
+        let effective = self
+            .policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        new_spec.validate_with_policy(&effective)?;
 
         if !topology_changed {
             // Config-only: no worker restart. New queue capacities apply to
@@ -671,7 +713,15 @@ impl RunningGraph {
     }
 
     fn apply_hot_update_candidate(&mut self, diff: GraphDiff, candidate: GraphSpec) -> Result<()> {
-        candidate.validate()?;
+        let requested = ResourcePolicy::from(&candidate.limits);
+        let effective = self
+            .policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        candidate.validate_with_policy(&effective)?;
         let previous_spec = self.spec.clone();
 
         let mut affected = BTreeSet::new();
@@ -852,6 +902,7 @@ impl RunningGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
+                    policy: Arc::clone(&self.policy),
                 };
                 let stop = self.stop.clone();
                 handles.push(thread::spawn(move || run_element(element, io, &stop)));
@@ -936,6 +987,7 @@ impl RunningGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
+                    policy: Arc::clone(&self.policy),
                 };
                 let stop = self.stop.clone();
                 handles.push(thread::spawn(move || run_element(element, io, &stop)));
