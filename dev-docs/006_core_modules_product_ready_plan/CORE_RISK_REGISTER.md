@@ -32,8 +32,8 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
 | R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Mitigated | John Doe |
 | R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Closed | John Doe |
-| R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Open | John Doe |
-| R6-022 | P2 | 横向 error paths | timeout/retry等部分路径依赖字符串判断 | typed taxonomy matrix | Open | John Doe |
+| R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Closed | John Doe |
+| R6-022 | P2 | 横向 error paths | timeout/retry等部分路径依赖字符串判断 | typed taxonomy matrix | Closed | John Doe |
 
 ## 3. 执行记录模板
 
@@ -300,5 +300,33 @@ Closed commit/date:
 - Tests: `dg-capi/src/lib.rs::external_buffer_import_preserves_handle_metadata` 验证 raw release callback 只调用一次；`tests/abi_snapshot.rs` 验证 `DgExternalMemoryV2` 和 `DgReleaseCallback` 符号存在；fuzz target 同步；本地 `cargo fmt/clippy/test/deny` 全绿。
 - Runtime evidence: 同上；`cargo test -p dg-media --locked --features avcodec-profile-native-free` 全绿；`git diff --exit-code Cargo.lock` 无变化。
 - Residual risk: 外部 FD 导入未在真实 dmabuf/VASurface 上做集成；ASan soak 留待 CORE6-10/11。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 12. CORE6-09：可观测性、安全与失败语义
+
+**R6-021**
+- Owner: John Doe
+- Branch/PR: `devin/1784640000-core6-09-observability-security-failure` (PR #25)
+- Reproduction: `dg-cli/src/ops.rs::tests::{livez_returns_200_while_supervisor_healthy,livez_returns_503_when_supervisor_unhealthy,readyz_returns_200_when_graph_ready,readyz_returns_503_with_reason_when_not_ready,metrics_expose_schema_version_and_bounded_labels}`
+- Root cause: `/metrics` 渲染时持有 `OpsState` 的 `RwLock` 读锁，慢客户端会阻塞 graph 状态更新；`/livez` 无条件返回 200，无法反映 ops server 退出或停止；metrics 缺少 schema version 与 counter 溢出诊断。
+- Chosen fix: `metrics_response` 先 clone `OpsState` 再释放 `RwLock`，再调用 `render_metrics(&snapshot)`；`OpsState` 增加 `supervisor_healthy`，`OpsHandle::stop`/`Drop` 与请求线程退出时置为 false；`livez_response` 与 `HEAD /livez` 检查 `supervisor_healthy`，失败返回 503；`/readyz` 与 `HEAD /readyz` 复用 `is_ready`（`GraphStatus::Running && !reconnecting`）；Prometheus 输出增加 `dg_cli_metrics_schema_version` gauge。
+- Public compatibility impact: `OpsState` 增加公开字段 `supervisor_healthy`；`/livez` 在停止/退出后返回 503。
+- Tests: `crates/dg-cli/src/ops.rs` 单测（livez/readyz/metrics schema）；既有 `dg-cli` 回归测试全部通过。
+- Runtime evidence: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo test -p dg-media --locked --features avcodec-profile-native-free`、`cargo deny check`、`git diff --exit-code Cargo.lock` 全绿。
+- Residual risk: 真实 supervisor fatal（ops 线程 panic）仍依赖进程级健康检查；`livez` 503 目前只在正常 stop/exit 路径触发。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+**R6-022**
+- Owner: John Doe
+- Branch/PR: `devin/1784640000-core6-09-observability-security-failure` (PR #25)
+- Reproduction: `dg-capi/src/lib.rs` 旧代码通过 `.map_err(|message| if message.contains("timed out") { DgStatus::Busy ... })` 判断超时/重试；`dg-graph/src/engine.rs` 超时/等待路径使用 `Error::Runtime("... timed out")`。
+- Root cause: 错误分类依赖人类可读的英文子串匹配，不仅脆弱，还导致超时/重试性错误被错误地映射为不可重试的 `RuntimeError`。
+- Chosen fix: `dg-core::Error` 与 `dg-graph::Error` 新增 `Timeout`、`Busy`、`Cancelled`、`Closed`、`Protocol`、`Auth`、`RemoteClosed`、`Invariant`、`Internal` 等 typed variant；`dg-graph/src/engine.rs` 的 shutdown、drain_routes、worker-join 超时统一返回 `Error::Timeout(...)`，poisoned lock 返回 `Error::Invariant(...)`；`dg-capi/src/lib.rs` 新增 `map_core_error` 与 `map_graph_error`，按 variant 映射到 `DgStatus`（`Timeout`/`Busy` -> `Busy`，`NotBuilt` -> `NotBuilt`，`Invariant`/`Internal` -> `InternalError`），不再做字符串子串判断；内部 `Engine` 方法统一返回 `dg_graph::Result<T>`。
+- Public compatibility impact: `dg-capi` 的 `DgStatus` 映射从字符串驱动改为类型驱动；`dg-capi` 测试断言同步更新，无新增破坏性 C ABI 变更。
+- Tests: `dg-capi/src/lib.rs::engine_shutdown_timeout_returns_busy_when_graph_cannot_stop`、`engine_run_and_status_without_build_returns_not_built`、`c_abi_diff_and_reload_preserve_built_graph` 回归通过；`dg-graph` 原有 `shutdown_timeout_is_retryable_and_keeps_draining_status` 仍通过。
+- Runtime evidence: 同上。
+- Residual risk: 新 taxonomy 需在所有后端/桥接代码中逐步替换剩余的 `Error::Runtime` 字符串；`dg-capi` 外部仍通过 `DgStatus` 粗粒度区分，C caller 无法看到具体 typed error variant。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)
