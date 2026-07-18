@@ -192,8 +192,12 @@ fn redact_url(url: &str) -> String {
     let Some((scheme, after_scheme)) = url.split_once("://") else {
         return url.to_string();
     };
-    let (authority, path_and_rest) = match after_scheme.split_once('/') {
-        Some((authority, rest)) => (authority, format!("/{rest}")),
+    let split_pos = after_scheme.find(['/', '?', '#']);
+    let (authority, path_and_rest) = match split_pos {
+        Some(pos) => {
+            let (authority, rest) = after_scheme.split_at(pos);
+            (authority, rest.to_string())
+        }
         None => (after_scheme, String::new()),
     };
     let authority = authority
@@ -250,6 +254,18 @@ mod tests {
         assert_eq!(
             redact_url("http://example.com/stream"),
             "http://example.com/stream"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_query_and_fragment_without_path() {
+        assert_eq!(
+            redact_url("http://example.com?token=secret"),
+            "http://example.com"
+        );
+        assert_eq!(
+            redact_url("https://user:pass@example.com?token=secret#frag"),
+            "https://example.com"
         );
     }
 }
