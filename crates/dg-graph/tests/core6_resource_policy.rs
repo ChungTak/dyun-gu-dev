@@ -243,3 +243,37 @@ fn graph_spec_builder_respects_policy_limits() {
         "{err}"
     );
 }
+
+#[test]
+fn load_from_path_rejects_directory_traversal_includes() {
+    let dir = temp_dir("dg-core6-traversal");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    // Root graph lives one level below `dir`; the include escapes the graph base.
+    let graph_dir = dir.join("graph");
+    fs::create_dir_all(&graph_dir).expect("create graph dir");
+    let escape_dir = dir.join("escape");
+    fs::create_dir_all(&escape_dir).expect("create escape dir");
+
+    let secret = escape_dir.join("secret.yaml");
+    fs::write(
+        &secret,
+        "apiVersion: dg/v1\nkind: Graph\nnodes: []\nconnections: []\n",
+    )
+    .expect("write secret");
+
+    let mut root = "apiVersion: dg/v1\nkind: Graph\nnodes: []\nconnections: []\n".to_string();
+    root.push_str("includes:\n  - ../escape/secret.yaml\n");
+    let root_path = graph_dir.join("root.yaml");
+    fs::write(&root_path, root).expect("write root");
+
+    let err = GraphSpec::load_from_path_with_policy(&root_path, ResourcePolicy::default())
+        .expect_err("directory traversal should be rejected");
+    assert!(
+        err.to_string().contains("outside the graph base directory"),
+        "{err}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

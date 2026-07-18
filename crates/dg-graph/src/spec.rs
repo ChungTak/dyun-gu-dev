@@ -405,6 +405,7 @@ impl GraphSpec {
         }
         let result = Self::load_from_path_tracked_inner(
             path,
+            &canonical_path,
             policy,
             resolving,
             included,
@@ -416,13 +417,14 @@ impl GraphSpec {
 
     fn load_from_path_tracked_inner(
         path: &Path,
+        canonical_path: &Path,
         policy: &ResourcePolicy,
         resolving: &mut BTreeSet<PathBuf>,
         included: &mut Vec<PathBuf>,
         total_config_bytes: &mut usize,
     ) -> Result<Self> {
         let format = GraphFormat::from_path(path)?;
-        let content = read_limited(path, policy.max_config_bytes.saturating_add(1))?;
+        let content = read_limited(canonical_path, policy.max_config_bytes.saturating_add(1))?;
         if content.len() > policy.max_config_bytes {
             return Err(Error::Validation {
                 path: path.display().to_string(),
@@ -461,7 +463,7 @@ impl GraphSpec {
             });
         }
         spec.normalize_with_base_dir_tracked(
-            path.parent(),
+            canonical_path.parent(),
             &effective,
             resolving,
             included,
@@ -511,11 +513,21 @@ impl GraphSpec {
         }
 
         let mut merged = GraphSpec::default();
-        let main_path = base_dir.map(Path::to_path_buf);
-        if let Some(base_dir) = base_dir {
+        let canonical_base = base_dir.map(fs::canonicalize).transpose()?;
+        let main_path = canonical_base.clone();
+        if let Some(canonical_base) = canonical_base {
             for include in &self.includes {
-                let included_path = base_dir.join(include);
+                let included_path = canonical_base.join(include);
                 let canonical_included = fs::canonicalize(&included_path)?;
+                if !canonical_included.starts_with(&canonical_base) {
+                    return Err(Error::Validation {
+                        path: "includes".to_string(),
+                        message: format!(
+                            "include {} resolves outside the graph base directory",
+                            include
+                        ),
+                    });
+                }
                 if main_path.as_ref() != Some(&canonical_included) {
                     included.push(canonical_included);
                 }
