@@ -297,23 +297,27 @@ pub struct DgRuntimeInitOptions {
 fn lock_engine_write(
     engine: &DgEngine,
 ) -> Result<std::sync::RwLockWriteGuard<'_, Engine>, (DgStatus, String)> {
-    engine.inner.try_write().map_err(|_| {
-        (
+    match engine.inner.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err((
             DgStatus::Busy,
             "engine handle is busy; concurrent mutation is not allowed".to_string(),
-        )
-    })
+        )),
+    }
 }
 
 fn lock_engine_read(
     engine: &DgEngine,
 ) -> Result<std::sync::RwLockReadGuard<'_, Engine>, (DgStatus, String)> {
-    engine.inner.try_read().map_err(|_| {
-        (
+    match engine.inner.try_read() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err((
             DgStatus::Busy,
             "engine handle is busy; concurrent write holds the engine".to_string(),
-        )
-    })
+        )),
+    }
 }
 
 #[allow(dead_code)]
@@ -343,18 +347,20 @@ fn check_struct_version(
     Ok(())
 }
 
-/// Validates an external memory descriptor and builds the ownership guard that
-/// will release the imported handle exactly once.
+/// Parses and validates an external memory descriptor without taking ownership
+/// of the underlying handle.
 #[allow(clippy::type_complexity)]
-fn import_external_memory(
+fn parse_external_memory_descriptor(
     desc: *const DgExternalMemoryV2,
 ) -> Result<
     (
         DeviceKind,
         MemoryDomain,
         usize,
-        ExternalHandle,
-        ExternalDropGuard,
+        i32,
+        u64,
+        DgReleaseCallback,
+        *mut c_void,
     ),
     (DgStatus, String),
 > {
@@ -395,12 +401,39 @@ fn import_external_memory(
             "external memory size must be non-zero".to_string(),
         ));
     }
+    Ok((
+        device,
+        domain,
+        desc.size_bytes,
+        desc.fd,
+        desc.raw,
+        desc.release,
+        desc.user_data,
+    ))
+}
 
-    let (external, guard) = if fd_valid {
+/// Takes ownership of an already validated external memory handle and builds the
+/// guard that releases it exactly once.
+fn build_external_handle(
+    fd: i32,
+    raw: u64,
+    release: DgReleaseCallback,
+    user_data: *mut c_void,
+) -> Result<(ExternalHandle, ExternalDropGuard), (DgStatus, String)> {
+    let fd_valid = fd >= 0;
+    let raw_valid = raw != 0;
+    if fd_valid && raw_valid || !fd_valid && !raw_valid {
+        return Err((
+            DgStatus::InvalidArgument,
+            "external memory descriptor has invalid fd/raw combination".to_string(),
+        ));
+    }
+
+    if fd_valid {
         // SAFETY: `BorrowedFd::borrow_raw` requires the fd to be valid. We only
         // call `try_clone_to_owned`, which duplicates it; the original remains
         // owned by the caller.
-        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(desc.fd) };
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
         let owned = borrowed.try_clone_to_owned().map_err(|error| {
             (
                 DgStatus::RuntimeError,
@@ -412,24 +445,23 @@ fn import_external_memory(
             // `owned` closes the duplicated fd when the last reference drops.
             drop(owned);
         });
-        (ExternalHandle::from_fd(dup_fd), guard)
+        Ok((ExternalHandle::from_fd(dup_fd), guard))
     } else {
-        let release = desc.release.ok_or_else(|| {
+        let release = release.ok_or_else(|| {
             (
                 DgStatus::InvalidArgument,
                 "raw external memory requires a release callback".to_string(),
             )
         })?;
         // Cast the opaque pointer to usize so the closure is Send + 'static.
-        let user_data = desc.user_data as usize;
+        let user_data = user_data as usize;
         let guard = ExternalDropGuard::new(move || {
             // SAFETY: `release` was provided by the caller and `user_data` is the
             // same opaque pointer that was passed in.
             unsafe { release(user_data as *mut c_void) };
         });
-        (ExternalHandle::from_raw(desc.raw), guard)
-    };
-    Ok((device, domain, desc.size_bytes, external, guard))
+        Ok((ExternalHandle::from_raw(raw), guard))
+    }
 }
 
 impl DgStringView {
@@ -2131,7 +2163,8 @@ pub unsafe extern "C" fn dg_tensor_create_external(
                 "tensor output pointer is null".to_string(),
             ));
         }
-        let (device, domain, size_bytes, external, guard) = import_external_memory(desc)?;
+        let (device, domain, size_bytes, fd, raw, release, user_data) =
+            parse_external_memory_descriptor(desc)?;
         let shape = unsafe { dims(shape, rank)? };
         let tensor_desc = TensorDesc::new(
             Shape::new(shape.to_vec()),
@@ -2148,6 +2181,7 @@ pub unsafe extern "C" fn dg_tensor_create_external(
                 format!("external size {size_bytes} does not match tensor size {expected}"),
             ));
         }
+        let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
         let buffer = Buffer::from_external(
             device,
             domain,
@@ -2275,7 +2309,9 @@ pub unsafe extern "C" fn dg_buffer_import_external(
                 "buffer output pointer is null".to_string(),
             ));
         }
-        let (device, domain, size_bytes, external, guard) = import_external_memory(desc)?;
+        let (device, domain, size_bytes, fd, raw, release, user_data) =
+            parse_external_memory_descriptor(desc)?;
+        let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
         let buffer = Buffer::from_external(
             device,
             domain,
