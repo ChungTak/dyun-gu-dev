@@ -22,6 +22,10 @@ include = [
     "DgBackendKind",
     "DgBackendCapabilities",
     "DgTensorInfo",
+    "DgRuntimeInitOptions",
+    "DgStringView",
+    "DgByteView",
+    "DgShapeView",
 ]
 
 [struct]

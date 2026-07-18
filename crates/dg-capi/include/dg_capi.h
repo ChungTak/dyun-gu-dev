@@ -34,15 +34,6 @@ typedef enum DgStatus {
 } DgStatus;
 
 /**
- * Graph serialization format.
- */
-typedef enum DgGraphFormat {
-  Yaml = 0,
-  Json = 1,
-  Toml = 2,
-} DgGraphFormat;
-
-/**
  * Lifecycle status of a running graph engine.
  */
 typedef enum DgGraphStatus {
@@ -54,17 +45,6 @@ typedef enum DgGraphStatus {
   Reloading = 5,
   NotRunning = -1,
 } DgGraphStatus;
-
-/**
- * Backend family for direct backend lifecycle operations.
- */
-typedef enum DgBackendKind {
-  Mock = 0,
-  OpenVino = 1,
-  Rknn = 2,
-  TensorRt = 3,
-  Sophon = 4,
-} DgBackendKind;
 
 /**
  * Logical device family.
@@ -115,6 +95,15 @@ typedef enum DgDataFormat {
 } DgDataFormat;
 
 /**
+ * Graph serialization format.
+ */
+typedef enum DgGraphFormat {
+  Yaml = 0,
+  Json = 1,
+  Toml = 2,
+} DgGraphFormat;
+
+/**
  * Imported external memory domain.
  */
 typedef enum DgMemoryDomain {
@@ -127,6 +116,17 @@ typedef enum DgMemoryDomain {
   SophonDevice = 6,
   Opaque = 7,
 } DgMemoryDomain;
+
+/**
+ * Backend family for direct backend lifecycle operations.
+ */
+typedef enum DgBackendKind {
+  Mock = 0,
+  OpenVino = 1,
+  Rknn = 2,
+  TensorRt = 3,
+  Sophon = 4,
+} DgBackendKind;
 
 /**
  * Opaque direct inference backend handle.
@@ -155,7 +155,11 @@ typedef struct DgRuntimeInitOptions {
   /**
    * Must be set to `size_of::<DgRuntimeInitOptions>()` by the caller.
    */
-  size_t struct_size;
+  uint32_t struct_size;
+  /**
+   * ABI struct version; must be 0 for the current definition.
+   */
+  uint32_t struct_version;
 } DgRuntimeInitOptions;
 
 /**
@@ -165,7 +169,11 @@ typedef struct DgBackendCapabilities {
   /**
    * Size of this struct in bytes (`sizeof(DgBackendCapabilities)`).
    */
-  size_t struct_size;
+  uint32_t struct_size;
+  /**
+   * ABI struct version; must be 0 for the current definition.
+   */
+  uint32_t struct_version;
   size_t device_count;
   enum DgDeviceKind devices[8];
   size_t precision_count;
@@ -179,13 +187,44 @@ typedef struct DgTensorInfo {
   /**
    * Size of this struct in bytes (`sizeof(DgTensorInfo)`).
    */
-  size_t struct_size;
+  uint32_t struct_size;
+  /**
+   * ABI struct version; must be 0 for the current definition.
+   */
+  uint32_t struct_version;
   enum DgDataType dtype;
   enum DgDataFormat format;
   enum DgDeviceKind device;
   size_t rank;
   size_t shape[8];
 } DgTensorInfo;
+
+/**
+ * Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
+ * the duration of the ABI call.
+ */
+typedef struct DgStringView {
+  const char *data;
+  size_t len;
+} DgStringView;
+
+/**
+ * Borrowed byte view. The caller keeps the underlying memory valid for the
+ * duration of the ABI call.
+ */
+typedef struct DgByteView {
+  const uint8_t *data;
+  size_t len;
+} DgByteView;
+
+/**
+ * Borrowed shape dimensions view. The caller keeps the underlying memory valid
+ * for the duration of the ABI call.
+ */
+typedef struct DgShapeView {
+  const size_t *dims;
+  size_t rank;
+} DgShapeView;
 
 /**
  * Returns the most recent error for the calling thread.
@@ -236,9 +275,7 @@ void dg_engine_free(struct DgEngine *engine);
 /**
  * Loads a graph specification from a UTF-8 string.
  */
-enum DgStatus dg_engine_load_string(struct DgEngine *engine,
-                                    enum DgGraphFormat format,
-                                    const char *content);
+enum DgStatus dg_engine_load_string(struct DgEngine *engine, int32_t format, const char *content);
 
 /**
  * Loads a graph specification from a UTF-8 path.
@@ -251,9 +288,7 @@ enum DgStatus dg_engine_load_file(struct DgEngine *engine, const char *path);
  * A built graph is updated in place and remains ready to run. Reload is rejected while inputs
  * are pending so that queued data is never silently interpreted by a changed graph.
  */
-enum DgStatus dg_engine_reload_string(struct DgEngine *engine,
-                                      enum DgGraphFormat format,
-                                      const char *content);
+enum DgStatus dg_engine_reload_string(struct DgEngine *engine, int32_t format, const char *content);
 
 /**
  * Reloads a graph specification from a UTF-8 path.
@@ -267,7 +302,7 @@ enum DgStatus dg_engine_reload_file(struct DgEngine *engine, const char *path);
  * Computes node and connection changes against a UTF-8 graph specification.
  */
 enum DgStatus dg_engine_diff_string(const struct DgEngine *engine,
-                                    enum DgGraphFormat format,
+                                    int32_t format,
                                     const char *content,
                                     size_t *out_added_nodes,
                                     size_t *out_removed_nodes,
@@ -353,7 +388,7 @@ enum DgStatus dg_engine_metrics(const struct DgEngine *engine,
 /**
  * Creates and initializes a backend without constructing a graph.
  */
-enum DgStatus dg_backend_create(enum DgBackendKind kind,
+enum DgStatus dg_backend_create(int32_t kind,
                                 const uint8_t *model_data,
                                 size_t model_length,
                                 const char *options_json,
@@ -402,9 +437,9 @@ enum DgStatus dg_tensor_create(const uint8_t *data,
                                size_t length,
                                const size_t *shape,
                                size_t rank,
-                               enum DgDataType dtype,
-                               enum DgDataFormat format,
-                               enum DgDeviceKind device,
+                               int32_t dtype,
+                               int32_t format,
+                               int32_t device,
                                struct DgTensor **out);
 
 /**
@@ -412,13 +447,13 @@ enum DgStatus dg_tensor_create(const uint8_t *data,
  */
 enum DgStatus dg_tensor_create_external(int fd,
                                         uint64_t raw,
-                                        enum DgMemoryDomain domain,
+                                        int32_t domain,
                                         size_t size_bytes,
                                         const size_t *shape,
                                         size_t rank,
-                                        enum DgDataType dtype,
-                                        enum DgDataFormat format,
-                                        enum DgDeviceKind device,
+                                        int32_t dtype,
+                                        int32_t format,
+                                        int32_t device,
                                         struct DgTensor **out);
 
 /**
@@ -448,8 +483,8 @@ enum DgStatus dg_engine_poll(struct DgEngine *engine, struct DgTensor **out);
  */
 enum DgStatus dg_buffer_import_external(int fd,
                                         uint64_t raw,
-                                        enum DgMemoryDomain domain,
-                                        enum DgDeviceKind device,
+                                        int32_t domain,
+                                        int32_t device,
                                         size_t size_bytes,
                                         struct DgBuffer **out);
 

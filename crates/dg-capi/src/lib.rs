@@ -147,12 +147,41 @@ pub enum DgBackendKind {
     Sophon = 4,
 }
 
+/// Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
+/// the duration of the ABI call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DgStringView {
+    pub data: *const c_char,
+    pub len: usize,
+}
+
+/// Borrowed byte view. The caller keeps the underlying memory valid for the
+/// duration of the ABI call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DgByteView {
+    pub data: *const u8,
+    pub len: usize,
+}
+
+/// Borrowed shape dimensions view. The caller keeps the underlying memory valid
+/// for the duration of the ABI call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DgShapeView {
+    pub dims: *const usize,
+    pub rank: usize,
+}
+
 /// Fixed-size tensor metadata returned by direct backend queries.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgTensorInfo {
     /// Size of this struct in bytes (`sizeof(DgTensorInfo)`).
-    pub struct_size: usize,
+    pub struct_size: u32,
+    /// ABI struct version; must be 0 for the current definition.
+    pub struct_version: u32,
     pub dtype: DgDataType,
     pub format: DgDataFormat,
     pub device: DgDeviceKind,
@@ -165,7 +194,9 @@ pub struct DgTensorInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgBackendCapabilities {
     /// Size of this struct in bytes (`sizeof(DgBackendCapabilities)`).
-    pub struct_size: usize,
+    pub struct_size: u32,
+    /// ABI struct version; must be 0 for the current definition.
+    pub struct_version: u32,
     pub device_count: usize,
     pub devices: [DgDeviceKind; 8],
     pub precision_count: usize,
@@ -184,7 +215,9 @@ pub struct DgEngine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgRuntimeInitOptions {
     /// Must be set to `size_of::<DgRuntimeInitOptions>()` by the caller.
-    pub struct_size: usize,
+    pub struct_size: u32,
+    /// ABI struct version; must be 0 for the current definition.
+    pub struct_version: u32,
 }
 
 fn lock_engine_write(
@@ -207,6 +240,102 @@ fn lock_engine_read(
             "engine handle is busy; concurrent write holds the engine".to_string(),
         )
     })
+}
+
+#[allow(dead_code)]
+const MAX_VIEW_LEN: usize = 1 << 40;
+#[allow(dead_code)]
+const MAX_SHAPE_RANK: usize = 8;
+
+fn check_struct_version(
+    name: &str,
+    struct_size: u32,
+    struct_version: u32,
+    expected_size: usize,
+) -> Result<(), (DgStatus, String)> {
+    if struct_version != 0 {
+        return Err((
+            DgStatus::InvalidArgument,
+            format!("{name}.struct_version {struct_version} is not supported"),
+        ));
+    }
+    let expected = expected_size as u32;
+    if struct_size != 0 && struct_size != expected {
+        return Err((
+            DgStatus::InvalidArgument,
+            format!("{name}.struct_size mismatch: got {struct_size}, expected {expected}"),
+        ));
+    }
+    Ok(())
+}
+
+impl DgStringView {
+    #[allow(dead_code)]
+    fn as_str(&self) -> Result<&str, (DgStatus, String)> {
+        if self.len > MAX_VIEW_LEN {
+            return Err((
+                DgStatus::InvalidArgument,
+                "string view length exceeds maximum".to_string(),
+            ));
+        }
+        if self.len == 0 {
+            return Ok("");
+        }
+        if self.data.is_null() {
+            return Err((
+                DgStatus::NullPointer,
+                "string view data is null".to_string(),
+            ));
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(self.data as *const u8, self.len) };
+        std::str::from_utf8(bytes).map_err(|error| {
+            (
+                DgStatus::InvalidArgument,
+                format!("string view is not valid UTF-8: {error}"),
+            )
+        })
+    }
+}
+
+impl DgByteView {
+    #[allow(dead_code)]
+    fn as_bytes(&self) -> Result<&[u8], (DgStatus, String)> {
+        if self.len > MAX_VIEW_LEN {
+            return Err((
+                DgStatus::InvalidArgument,
+                "byte view length exceeds maximum".to_string(),
+            ));
+        }
+        if self.len == 0 {
+            return Ok(&[]);
+        }
+        if self.data.is_null() {
+            return Err((DgStatus::NullPointer, "byte view data is null".to_string()));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(self.data, self.len) })
+    }
+}
+
+impl DgShapeView {
+    #[allow(dead_code)]
+    fn as_dims(&self) -> Result<&[usize], (DgStatus, String)> {
+        if self.rank > MAX_SHAPE_RANK {
+            return Err((
+                DgStatus::InvalidArgument,
+                format!(
+                    "shape rank {} exceeds the C ABI limit of {MAX_SHAPE_RANK}",
+                    self.rank
+                ),
+            ));
+        }
+        if self.rank == 0 {
+            return Ok(&[]);
+        }
+        if self.dims.is_null() {
+            return Err((DgStatus::NullPointer, "shape view dims is null".to_string()));
+        }
+        Ok(unsafe { std::slice::from_raw_parts(self.dims, self.rank) })
+    }
 }
 
 /// Opaque tensor handle.
@@ -528,8 +657,8 @@ fn validate_diff_outputs(
     Ok(())
 }
 
-fn format_from_c(format: DgGraphFormat) -> Result<GraphFormat, (DgStatus, String)> {
-    match format as i32 {
+fn format_from_c(format: i32) -> Result<GraphFormat, (DgStatus, String)> {
+    match format {
         x if x == DgGraphFormat::Yaml as i32 => Ok(GraphFormat::Yaml),
         x if x == DgGraphFormat::Json as i32 => Ok(GraphFormat::Json),
         x if x == DgGraphFormat::Toml as i32 => Ok(GraphFormat::Toml),
@@ -540,8 +669,8 @@ fn format_from_c(format: DgGraphFormat) -> Result<GraphFormat, (DgStatus, String
     }
 }
 
-fn data_type_from_c(dtype: DgDataType) -> Result<DataType, (DgStatus, String)> {
-    match dtype as i32 {
+fn data_type_from_c(dtype: i32) -> Result<DataType, (DgStatus, String)> {
+    match dtype {
         x if x == DgDataType::U8 as i32 => Ok(DataType::U8),
         x if x == DgDataType::U16 as i32 => Ok(DataType::U16),
         x if x == DgDataType::I4 as i32 => Ok(DataType::I4),
@@ -564,8 +693,8 @@ fn data_type_from_c(dtype: DgDataType) -> Result<DataType, (DgStatus, String)> {
     }
 }
 
-fn format_from_c_enum(format: DgDataFormat) -> Result<DataFormat, (DgStatus, String)> {
-    match format as i32 {
+fn format_from_c_enum(format: i32) -> Result<DataFormat, (DgStatus, String)> {
+    match format {
         x if x == DgDataFormat::Auto as i32 => Ok(DataFormat::Auto),
         x if x == DgDataFormat::N as i32 => Ok(DataFormat::N),
         x if x == DgDataFormat::Nc as i32 => Ok(DataFormat::NC),
@@ -582,8 +711,8 @@ fn format_from_c_enum(format: DgDataFormat) -> Result<DataFormat, (DgStatus, Str
     }
 }
 
-fn device_from_c(device: DgDeviceKind) -> Result<DeviceKind, (DgStatus, String)> {
-    match device as i32 {
+fn device_from_c(device: i32) -> Result<DeviceKind, (DgStatus, String)> {
+    match device {
         x if x == DgDeviceKind::Cpu as i32 => Ok(DeviceKind::Cpu),
         x if x == DgDeviceKind::IntelGpu as i32 => Ok(DeviceKind::IntelGpu),
         x if x == DgDeviceKind::IntelNpu as i32 => Ok(DeviceKind::IntelNpu),
@@ -597,8 +726,8 @@ fn device_from_c(device: DgDeviceKind) -> Result<DeviceKind, (DgStatus, String)>
     }
 }
 
-fn domain_from_c(domain: DgMemoryDomain) -> Result<MemoryDomain, (DgStatus, String)> {
-    match domain as i32 {
+fn domain_from_c(domain: i32) -> Result<MemoryDomain, (DgStatus, String)> {
+    match domain {
         x if x == DgMemoryDomain::Host as i32 => Ok(MemoryDomain::Host),
         x if x == DgMemoryDomain::DmaBuf as i32 => Ok(MemoryDomain::DmaBuf),
         x if x == DgMemoryDomain::DrmPrime as i32 => Ok(MemoryDomain::DrmPrime),
@@ -614,8 +743,8 @@ fn domain_from_c(domain: DgMemoryDomain) -> Result<MemoryDomain, (DgStatus, Stri
     }
 }
 
-fn backend_kind_from_c(kind: DgBackendKind) -> Result<BackendKind, (DgStatus, String)> {
-    match kind as i32 {
+fn backend_kind_from_c(kind: i32) -> Result<BackendKind, (DgStatus, String)> {
+    match kind {
         x if x == DgBackendKind::Mock as i32 => Ok(BackendKind::Mock),
         x if x == DgBackendKind::OpenVino as i32 => Ok(BackendKind::OpenVINO),
         x if x == DgBackendKind::Rknn as i32 => Ok(BackendKind::Rknn),
@@ -628,13 +757,13 @@ fn backend_kind_from_c(kind: DgBackendKind) -> Result<BackendKind, (DgStatus, St
     }
 }
 
-fn backend_name(kind: DgBackendKind) -> &'static str {
+fn backend_name(kind: BackendKind) -> &'static str {
     match kind {
-        DgBackendKind::Mock => "mock",
-        DgBackendKind::OpenVino => "openvino",
-        DgBackendKind::Rknn => "rknn",
-        DgBackendKind::TensorRt => "tensorrt",
-        DgBackendKind::Sophon => "sophon",
+        BackendKind::Mock => "mock",
+        BackendKind::OpenVINO => "openvino",
+        BackendKind::Rknn => "rknn",
+        BackendKind::TensorRt => "tensorrt",
+        BackendKind::Sophon => "sophon",
     }
 }
 
@@ -690,7 +819,8 @@ fn c_tensor_info(info: &dg_runtime::TensorInfo) -> Result<DgTensorInfo, (DgStatu
     let mut shape = [0; 8];
     shape[..dims.len()].copy_from_slice(dims);
     Ok(DgTensorInfo {
-        struct_size: std::mem::size_of::<DgTensorInfo>(),
+        struct_size: std::mem::size_of::<DgTensorInfo>() as u32,
+        struct_version: 0,
         dtype: c_dtype(info.dtype)?,
         format: c_format(info.layout.unwrap_or(DataFormat::Auto)),
         device: DgDeviceKind::Cpu,
@@ -711,6 +841,12 @@ fn c_device(device: DeviceKind) -> DgDeviceKind {
 }
 
 unsafe fn bytes<'a>(data: *const u8, length: usize) -> Result<&'a [u8], (DgStatus, String)> {
+    if length > MAX_VIEW_LEN {
+        return Err((
+            DgStatus::InvalidArgument,
+            "data length exceeds the C ABI view limit".to_string(),
+        ));
+    }
     if length == 0 {
         return Ok(&[]);
     }
@@ -722,6 +858,12 @@ unsafe fn bytes<'a>(data: *const u8, length: usize) -> Result<&'a [u8], (DgStatu
 }
 
 unsafe fn dims<'a>(values: *const usize, rank: usize) -> Result<&'a [usize], (DgStatus, String)> {
+    if rank > MAX_SHAPE_RANK {
+        return Err((
+            DgStatus::InvalidArgument,
+            format!("shape rank {rank} exceeds the C ABI limit of {MAX_SHAPE_RANK}"),
+        ));
+    }
     if rank == 0 {
         return Ok(&[]);
     }
@@ -743,9 +885,9 @@ unsafe fn c_string<'a>(value: *const c_char) -> Result<&'a CStr, (DgStatus, Stri
 fn tensor_from_bytes(
     data: &[u8],
     shape: &[usize],
-    dtype: DgDataType,
-    format: DgDataFormat,
-    device: DgDeviceKind,
+    dtype: i32,
+    format: i32,
+    device: i32,
 ) -> Result<Tensor, (DgStatus, String)> {
     let desc = TensorDesc::new(
         Shape::new(shape.to_vec()),
@@ -794,7 +936,7 @@ pub extern "C" fn dg_version() -> *const c_char {
 /// Returns the stable C ABI version as a static UTF-8 C string.
 #[no_mangle]
 pub extern "C" fn dg_abi_version() -> *const c_char {
-    c"1".as_ptr()
+    c"2.0".as_ptr()
 }
 
 /// Returns a JSON object describing this build's C ABI capabilities.
@@ -806,7 +948,7 @@ pub extern "C" fn dg_abi_version() -> *const c_char {
 pub extern "C" fn dg_build_capabilities_json() -> *const c_char {
     match ffi_result(|| {
         let payload = serde_json::json!({
-            "abi_version": "1",
+            "abi_version": "2.0",
             "package_version": env!("CARGO_PKG_VERSION"),
             "apis": [
                 "dg_runtime_init",
@@ -847,18 +989,12 @@ pub unsafe extern "C" fn dg_runtime_init(options: *const DgRuntimeInitOptions) -
     match ffi_result(|| {
         if !options.is_null() {
             let opts = unsafe { &*options };
-            if opts.struct_size != 0
-                && opts.struct_size != std::mem::size_of::<DgRuntimeInitOptions>()
-            {
-                return Err((
-                    DgStatus::InvalidArgument,
-                    format!(
-                        "DgRuntimeInitOptions.struct_size mismatch: got {}, expected {}",
-                        opts.struct_size,
-                        std::mem::size_of::<DgRuntimeInitOptions>()
-                    ),
-                ));
-            }
+            check_struct_version(
+                "DgRuntimeInitOptions",
+                opts.struct_size,
+                opts.struct_version,
+                std::mem::size_of::<DgRuntimeInitOptions>(),
+            )?;
         }
         static INIT: Once = Once::new();
         static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
@@ -932,7 +1068,7 @@ pub unsafe extern "C" fn dg_engine_free(engine: *mut DgEngine) {
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_load_string(
     engine: *mut DgEngine,
-    format: DgGraphFormat,
+    format: i32,
     content: *const c_char,
 ) -> DgStatus {
     match ffi_result(|| {
@@ -989,7 +1125,7 @@ pub unsafe extern "C" fn dg_engine_load_file(
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_reload_string(
     engine: *mut DgEngine,
-    format: DgGraphFormat,
+    format: i32,
     content: *const c_char,
 ) -> DgStatus {
     match ffi_result(|| {
@@ -1044,7 +1180,7 @@ pub unsafe extern "C" fn dg_engine_reload_file(
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_diff_string(
     engine: *const DgEngine,
-    format: DgGraphFormat,
+    format: i32,
     content: *const c_char,
     out_added_nodes: *mut usize,
     out_removed_nodes: *mut usize,
@@ -1421,7 +1557,7 @@ pub unsafe extern "C" fn dg_engine_metrics(
 /// Creates and initializes a backend without constructing a graph.
 #[no_mangle]
 pub unsafe extern "C" fn dg_backend_create(
-    kind: DgBackendKind,
+    kind: i32,
     model_data: *const u8,
     model_length: usize,
     options_json: *const c_char,
@@ -1443,12 +1579,13 @@ pub unsafe extern "C" fn dg_backend_create(
                 .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
             serde_json::from_str(text).map_err(|error| (DgStatus::ParseError, error.to_string()))?
         };
+        let kind = backend_kind_from_c(kind)?;
         let config = BackendConfig::new(None, options);
         let mut option = configure_backend(backend_name(kind), config)
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         option.model_source = ModelSource::Bytes(model);
-        let mut backend = create_backend(backend_kind_from_c(kind)?)
-            .map_err(|error| (DgStatus::Unsupported, error.to_string()))?;
+        let mut backend =
+            create_backend(kind).map_err(|error| (DgStatus::Unsupported, error.to_string()))?;
         backend
             .init(&option)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
@@ -1511,6 +1648,13 @@ pub unsafe extern "C" fn dg_backend_capabilities(
                 "backend or capabilities output pointer is null".to_string(),
             ));
         }
+        let out_ref = unsafe { &*out };
+        check_struct_version(
+            "DgBackendCapabilities",
+            out_ref.struct_size,
+            out_ref.struct_version,
+            std::mem::size_of::<DgBackendCapabilities>(),
+        )?;
         let backend = unsafe { &*backend };
         let capabilities = backend
             .backend
@@ -1532,7 +1676,8 @@ pub unsafe extern "C" fn dg_backend_capabilities(
         }
         unsafe {
             out.write(DgBackendCapabilities {
-                struct_size: std::mem::size_of::<DgBackendCapabilities>(),
+                struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
+                struct_version: 0,
                 device_count: capabilities.devices.len(),
                 devices,
                 precision_count: capabilities.precisions.len(),
@@ -1561,6 +1706,13 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
                 "backend or tensor-info output pointer is null".to_string(),
             ));
         }
+        let out_ref = unsafe { &*out };
+        check_struct_version(
+            "DgTensorInfo",
+            out_ref.struct_size,
+            out_ref.struct_version,
+            std::mem::size_of::<DgTensorInfo>(),
+        )?;
         let backend = unsafe { &*backend };
         let info = if output {
             backend.backend.output_info(index)
@@ -1645,9 +1797,9 @@ pub unsafe extern "C" fn dg_tensor_create(
     length: usize,
     shape: *const usize,
     rank: usize,
-    dtype: DgDataType,
-    format: DgDataFormat,
-    device: DgDeviceKind,
+    dtype: i32,
+    format: i32,
+    device: i32,
     out: *mut *mut DgTensor,
 ) -> DgStatus {
     match ffi_result(|| {
@@ -1674,13 +1826,13 @@ pub unsafe extern "C" fn dg_tensor_create(
 pub unsafe extern "C" fn dg_tensor_create_external(
     fd: c_int,
     raw: u64,
-    domain: DgMemoryDomain,
+    domain: i32,
     size_bytes: usize,
     shape: *const usize,
     rank: usize,
-    dtype: DgDataType,
-    format: DgDataFormat,
-    device: DgDeviceKind,
+    dtype: i32,
+    format: i32,
+    device: i32,
     out: *mut *mut DgTensor,
 ) -> DgStatus {
     match ffi_result(|| {
@@ -1846,8 +1998,8 @@ pub unsafe extern "C" fn dg_engine_poll(
 pub unsafe extern "C" fn dg_buffer_import_external(
     fd: c_int,
     raw: u64,
-    domain: DgMemoryDomain,
-    device: DgDeviceKind,
+    domain: i32,
+    device: i32,
     size_bytes: usize,
     out: *mut *mut DgBuffer,
 ) -> DgStatus {
@@ -2035,7 +2187,7 @@ connections:
         assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
         let spec = graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, spec.as_ptr()) },
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
             DgStatus::Ok
         );
         assert_eq!(unsafe { dg_engine_build(engine) }, DgStatus::Ok);
@@ -2051,9 +2203,9 @@ connections:
                     input_bytes.len(),
                     shape.as_ptr(),
                     shape.len(),
-                    DgDataType::F32,
-                    DgDataFormat::Nc,
-                    DgDeviceKind::Cpu,
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
                     &mut tensor,
                 )
             },
@@ -2096,7 +2248,7 @@ connections:
         assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
         let spec = media_stream_graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, spec.as_ptr()) },
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
             DgStatus::Ok
         );
         unsafe { dg_engine_free(engine) };
@@ -2168,7 +2320,7 @@ connections:
         )
         .expect("spec");
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, spec.as_ptr()) },
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
             DgStatus::ParseError
         );
         let message = unsafe { CStr::from_ptr(dg_last_error()) }
@@ -2220,7 +2372,7 @@ connections: []
         let initial = graph_spec();
         let updated = updated_graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml, initial.as_ptr()) },
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, initial.as_ptr()) },
             DgStatus::Ok
         );
         assert_eq!(unsafe { dg_engine_build(engine) }, DgStatus::Ok);
@@ -2234,7 +2386,7 @@ connections: []
             unsafe {
                 dg_engine_diff_string(
                     engine,
-                    DgGraphFormat::Yaml,
+                    DgGraphFormat::Yaml as i32,
                     updated.as_ptr(),
                     &mut added_nodes,
                     &mut removed_nodes,
@@ -2253,12 +2405,16 @@ connections: []
 
         let invalid = CString::new("not a graph").expect("valid invalid spec bytes");
         assert_eq!(
-            unsafe { dg_engine_reload_string(engine, DgGraphFormat::Yaml, invalid.as_ptr()) },
+            unsafe {
+                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, invalid.as_ptr())
+            },
             DgStatus::ParseError
         );
         assert!(!dg_last_error().is_null());
         assert_eq!(
-            unsafe { dg_engine_reload_string(engine, DgGraphFormat::Yaml, updated.as_ptr()) },
+            unsafe {
+                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, updated.as_ptr())
+            },
             DgStatus::Ok
         );
         let input = [1.0_f32, 2.0, 3.0, 4.0];
@@ -2272,9 +2428,9 @@ connections: []
                     input_bytes.len(),
                     shape.as_ptr(),
                     shape.len(),
-                    DgDataType::F32,
-                    DgDataFormat::Nc,
-                    DgDeviceKind::Cpu,
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
                     &mut tensor,
                 )
             },
@@ -2282,7 +2438,9 @@ connections: []
         );
         assert_eq!(unsafe { dg_engine_push(engine, tensor) }, DgStatus::Ok);
         assert_eq!(
-            unsafe { dg_engine_reload_string(engine, DgGraphFormat::Yaml, initial.as_ptr()) },
+            unsafe {
+                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, initial.as_ptr())
+            },
             DgStatus::RuntimeError
         );
         assert!(!dg_last_error().is_null());
@@ -2304,8 +2462,8 @@ connections: []
                 dg_buffer_import_external(
                     -1,
                     0x1234,
-                    DgMemoryDomain::CudaDevice,
-                    DgDeviceKind::CudaGpu,
+                    DgMemoryDomain::CudaDevice as i32,
+                    DgDeviceKind::CudaGpu as i32,
                     16,
                     &mut buffer,
                 )
@@ -2325,7 +2483,7 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_backend_create(
-                    DgBackendKind::Mock,
+                    DgBackendKind::Mock as i32,
                     ptr::null(),
                     0,
                     options.as_ptr(),
@@ -2343,6 +2501,7 @@ connections: []
         assert_eq!((input_count, output_count), (1, 1));
         let mut capabilities = DgBackendCapabilities {
             struct_size: 0,
+            struct_version: 0,
             device_count: 0,
             devices: [DgDeviceKind::Cpu; 8],
             precision_count: 0,
@@ -2357,6 +2516,7 @@ connections: []
         assert!(capabilities.precision_count > 0);
         let mut info = DgTensorInfo {
             struct_size: 0,
+            struct_version: 0,
             dtype: DgDataType::U8,
             format: DgDataFormat::Auto,
             device: DgDeviceKind::Cpu,
@@ -2383,9 +2543,9 @@ connections: []
                     input_bytes.len(),
                     shape.as_ptr(),
                     shape.len(),
-                    DgDataType::F32,
-                    DgDataFormat::Nc,
-                    DgDeviceKind::Cpu,
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
                     &mut input,
                 )
             },
@@ -2436,7 +2596,7 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_backend_create(
-                    DgBackendKind::Mock,
+                    DgBackendKind::Mock as i32,
                     ptr::null(),
                     0,
                     options.as_ptr(),
@@ -2446,5 +2606,85 @@ connections: []
             DgStatus::InvalidArgument
         );
         assert!(backend.is_null());
+    }
+
+    #[test]
+    fn c_abi_v2_wire_types_reject_invalid_inputs() {
+        let abi = unsafe { CStr::from_ptr(dg_abi_version()) };
+        assert_eq!(abi.to_string_lossy(), "2.0");
+
+        let mut engine = ptr::null_mut();
+        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe { dg_engine_load_string(engine, 42, spec.as_ptr()) },
+            DgStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
+            DgStatus::Ok
+        );
+
+        let input = [1.0_f32];
+        let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
+        let shape = [1_usize];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    input_bytes.as_ptr(),
+                    input_bytes.len(),
+                    shape.as_ptr(),
+                    shape.len(),
+                    999,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+
+        let mut backend = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_backend_create(123, ptr::null(), 0, ptr::null(), &mut backend) },
+            DgStatus::InvalidArgument
+        );
+        assert!(backend.is_null());
+
+        let mut buffer = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_buffer_import_external(
+                    -1,
+                    0x1234,
+                    123,
+                    DgDeviceKind::Cpu as i32,
+                    16,
+                    &mut buffer,
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+
+        let bad_options = DgRuntimeInitOptions {
+            struct_size: 1,
+            struct_version: 0,
+        };
+        assert_eq!(
+            unsafe { dg_runtime_init(&bad_options) },
+            DgStatus::InvalidArgument
+        );
+
+        let bad_version = DgRuntimeInitOptions {
+            struct_size: std::mem::size_of::<DgRuntimeInitOptions>() as u32,
+            struct_version: 9,
+        };
+        assert_eq!(
+            unsafe { dg_runtime_init(&bad_version) },
+            DgStatus::InvalidArgument
+        );
+
+        assert_eq!(unsafe { dg_engine_free(engine) }, ());
     }
 }

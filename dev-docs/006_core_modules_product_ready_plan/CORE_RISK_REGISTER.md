@@ -24,9 +24,9 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-010 | P0 | `dg-core/src/tensor.rs`, `shape.rs` | physical stride bytes 未完整计算，stride 乘法 saturating | checked physical span + padded/packed tests | Closed | John Doe |
 | R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Open | John Doe |
 | R6-012 | P0 | `dg-capi/src/lib.rs` external imports | C 导入使用空 drop guard，可 UAF | v2 release callback exactly-once + ASan | Open | John Doe |
-| R6-013 | P0 | `dg-capi/src/lib.rs` enum parameters | C 未知判别值先形成 Rust enum，存在 UB | v2 `int32_t` 输入 + fuzz/ABI tests | Open | John Doe |
+| R6-013 | P0 | `dg-capi/src/lib.rs` enum parameters | C 未知判别值先形成 Rust enum，存在 UB | v2 `int32_t` 输入 + fuzz/ABI tests | Closed | John Doe |
 | R6-014 | P1 | `dg-capi` `LAST_DATA/LAST_ERROR` | pointer 被后续 ABI 调用覆盖 | owned bytes/error handle 跨调用稳定 | Open | John Doe |
-| R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Open | John Doe |
+| R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Closed | John Doe |
 | R6-016 | P1 | `dg-runtime::Runtime` | sync submit 可阻塞；cancel无失败报告 | capability诚实 + cancel report + pending shutdown | Closed | John Doe |
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
 | R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
@@ -243,5 +243,32 @@ Closed commit/date:
 - Tests: `dg-elements/src/math.rs` 与 `dg-elements/src/extras.rs` 单元测试、`dg-elements/tests/core6_elements.rs`（外部 tensor 拒绝、非有限输出拒绝、100 次 reload 稳定）、`dg-elements/tests/elements.rs`（schema/validator 一致性）、`dg-media/tests/media_pipeline.rs`（OSD 参数边界）。
 - Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`cargo test -p dg-media --locked --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
 - Residual risk: 帧级数据错误目前仍按 element error 返回并终止 graph，未实现 drop-frame-and-continue 与 `state_reset_total` 计数器；状态 element 的 reload reset 依赖 `Graph` 重新创建 element，待 CORE6-08/09 统一错误分类与 metrics 时补齐。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 9. CORE6-08 split 1/3：v2 wire 类型与枚举/struct 版本
+
+**R6-013**
+- Owner: John Doe
+- Branch/PR: PR #22 (`devin/1784471000-cabi-v2-wire-types`)
+- Reproduction: `dg-capi/src/lib.rs::tests::c_abi_v2_wire_types_reject_invalid_inputs`
+- Root cause: C ABI 函数直接把 `DgGraphFormat`/`DgDataType`/`DgDataFormat`/`DgDeviceKind`/`DgMemoryDomain`/`DgBackendKind` 等 `#[repr(C)]` 枚举作为参数，C 侧传入的未知判别值会在进入 Rust 函数体前被编译器当作对应枚举值，存在未定义行为。
+- Chosen fix: 所有 C 输入枚举参数改为 `int32_t`（Rust `i32`），在 Rust 侧通过 `format_from_c`/`data_type_from_c`/`format_from_c_enum`/`device_from_c`/`domain_from_c`/`backend_kind_from_c` 校验后再构造内部枚举；未知/越界值统一返回 `DgStatus::InvalidArgument`。
+- Public compatibility impact: C header 中 `dg_engine_load_string`/`dg_engine_reload_string`/`dg_engine_diff_string`/`dg_tensor_create`/`dg_tensor_create_external`/`dg_buffer_import_external`/`dg_backend_create` 的枚举参数变为 `int32_t format/kind/domain/device/dtype`；cbindgen 生成头文件已同步。
+- Tests: `dg-capi/src/lib.rs::c_abi_v2_wire_types_reject_invalid_inputs` 覆盖非法 format/dtype/backend/domain 与 `dg_abi_version` 2.0；fuzz target 已同步使用 `DgGraphFormat::Yaml as i32`。
+- Runtime evidence: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo test -p dg-media --locked --features avcodec-profile-native-free`、`cargo deny check`、`git diff --exit-code Cargo.lock` 全绿。
+- Residual risk: 当前仍使用 `*const c_char`/`*const u8` 传递字符串与字节，未全面切换到 `DgStringView`/`DgByteView`/`DgShapeView`；view 类型与 helper 已定义，将在 split 2/3 中替换为 view 入参并补齐 null/zero/overflow/UTF-8 边界测试。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+**R6-015**
+- Owner: John Doe
+- Branch/PR: PR #22 (`devin/1784471000-cabi-v2-wire-types`)
+- Reproduction: 直接对任意 `length`/`rank` 调用 `std::slice::from_raw_parts` 构造 view，缺少统一的 null/零长/溢出/硬上限校验。
+- Chosen fix: 新增 `DgStringView`/`DgByteView`/`DgShapeView` 三个 view 类型（`DgByteView`/`DgShapeView` 先验 `MAX_VIEW_LEN`/`MAX_SHAPE_RANK` 检查）与 `check_struct_version` 统一函数；现有 `bytes`/`dims` helper 也增加 `MAX_VIEW_LEN`/`MAX_SHAPE_RANK` 上限与 null 检查。
+- Public compatibility impact: header 中新增 `DgStringView`、`DgByteView`、`DgShapeView` struct 定义；`DgTensorInfo`/`DgBackendCapabilities`/`DgRuntimeInitOptions` 增加 `uint32_t struct_version` 字段，`struct_size` 改为 `uint32_t`。
+- Tests: `dg-capi/src/lib.rs::c_abi_v2_wire_types_reject_invalid_inputs` 覆盖 `DgRuntimeInitOptions` 错误 `struct_size`/`struct_version`；`DgBackendCapabilities`/`DgTensorInfo` 输出 struct 在 `dg_backend_capabilities`/`dg_backend_tensor_info` 中校验 version/size；非法枚举值测试顺带验证输入参数不形成 Rust 枚举。
+- Runtime evidence: 同上。
+- Residual risk: 当前函数签名仍未接收 view 类型，length/rank 校验通过旧 helper 完成；split 2/3 将统一把字符串、字节、shape 入参替换为 view 类型，并增加 null/zero/huge rank/huge length/UTF-8 专门回归。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)
