@@ -591,6 +591,26 @@ unsafe fn clone_backend_arc(ptr: *const DgBackend) -> Arc<DgBackend> {
     clone
 }
 
+/// Clones the `Arc` backing a `DgTensor` pointer without consuming the pointer.
+///
+/// SAFETY: `ptr` must have been returned by a tensor constructor and not yet freed.
+unsafe fn clone_tensor_arc(ptr: *const DgTensor) -> Arc<DgTensor> {
+    let arc = unsafe { Arc::from_raw(ptr) };
+    let clone = arc.clone();
+    std::mem::forget(arc);
+    clone
+}
+
+/// Clones the `Arc` backing a `DgBuffer` pointer without consuming the pointer.
+///
+/// SAFETY: `ptr` must have been returned by `dg_buffer_import_external` and not yet freed.
+unsafe fn clone_buffer_arc(ptr: *const DgBuffer) -> Arc<DgBuffer> {
+    let arc = unsafe { Arc::from_raw(ptr) };
+    let clone = arc.clone();
+    std::mem::forget(arc);
+    clone
+}
+
 struct Engine {
     spec: GraphSpec,
     graph: Option<Graph>,
@@ -2279,8 +2299,9 @@ pub unsafe extern "C" fn dg_backend_run(
             if handle.is_null() {
                 return Err((DgStatus::NullPointer, "input tensor is null".to_string()));
             }
-            // SAFETY: each pointer was checked non-null and must reference a live tensor.
-            tensors.push(unsafe { &**handle }.tensor.clone());
+            // SAFETY: `clone_tensor_arc` keeps the handle alive for the clone below.
+            let tensor_arc = unsafe { clone_tensor_arc(*handle) };
+            tensors.push(tensor_arc.tensor.clone());
         }
         let produced = backend
             .run(&tensors)
@@ -2293,11 +2314,9 @@ pub unsafe extern "C" fn dg_backend_run(
             ));
         }
         for (slot, tensor) in produced.into_iter().enumerate() {
-            unsafe {
-                outputs
-                    .add(slot)
-                    .write(Box::into_raw(Box::new(DgTensor { tensor })))
-            };
+            let dg_tensor = Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor;
+            // SAFETY: `outputs` was checked non-null and has capacity for all produced tensors.
+            unsafe { outputs.add(slot).write(dg_tensor) };
         }
         unsafe { out_count.write(produced_count) };
         Ok(())
@@ -2324,7 +2343,7 @@ pub unsafe extern "C" fn dg_tensor_create(
         let data = unsafe { bytes(data, length)? };
         let shape = unsafe { dims(shape, rank)? };
         let tensor = tensor_from_bytes(data, shape, dtype, format, device)?;
-        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
+        Ok(Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor)
     })
 }
 
@@ -2369,7 +2388,7 @@ pub unsafe extern "C" fn dg_tensor_create_external(
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         let tensor = Tensor::from_buffer(tensor_desc, buffer)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
+        Ok(Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor)
     })
 }
 
@@ -2379,7 +2398,7 @@ pub unsafe extern "C" fn dg_tensor_free(tensor: *mut DgTensor) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if !tensor.is_null() {
             // SAFETY: the pointer must have been returned by a tensor constructor exactly once.
-            unsafe { drop(Box::from_raw(tensor)) };
+            unsafe { drop(Arc::from_raw(tensor as *const DgTensor)) };
         }
     }));
 }
@@ -2395,8 +2414,8 @@ pub unsafe extern "C" fn dg_tensor_data(
         if tensor.is_null() {
             return Err((DgStatus::NullPointer, "tensor pointer is null".to_string()));
         }
-        let tensor = unsafe { &*tensor };
-        let snapshot = tensor
+        let tensor_arc = unsafe { clone_tensor_arc(tensor) };
+        let snapshot = tensor_arc
             .tensor
             .buffer()
             .try_read_bytes()
@@ -2420,10 +2439,10 @@ pub unsafe extern "C" fn dg_engine_push(
             ));
         }
         let engine_arc = unsafe { clone_engine_arc(engine) };
+        let tensor_arc = unsafe { clone_tensor_arc(tensor) };
         let mut engine = lock_engine_write(&engine_arc)?;
-        let tensor = unsafe { &*tensor };
         engine
-            .push(tensor.tensor.clone())
+            .push(tensor_arc.tensor.clone())
             .map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -2465,7 +2484,7 @@ pub unsafe extern "C" fn dg_engine_poll(
         let result = match lock_engine_write(&engine_arc) {
             Ok(mut engine) => match engine.poll_output() {
                 Ok(Some(tensor)) => {
-                    PollResult::Tensor(Box::into_raw(Box::new(DgTensor { tensor })) as usize)
+                    PollResult::Tensor(Arc::into_raw(Arc::new(DgTensor { tensor })) as usize)
                 }
                 Ok(None) => PollResult::Again,
                 Err(error) => {
@@ -2517,7 +2536,7 @@ pub unsafe extern "C" fn dg_buffer_import_external(
             guard,
         )
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        Ok(Box::into_raw(Box::new(DgBuffer { buffer })))
+        Ok(Arc::into_raw(Arc::new(DgBuffer { buffer })) as *mut DgBuffer)
     })
 }
 
@@ -2532,8 +2551,8 @@ pub unsafe extern "C" fn dg_buffer_size(
         if buffer.is_null() {
             return Err((DgStatus::NullPointer, "buffer pointer is null".to_string()));
         }
-        let buffer = unsafe { &*buffer };
-        Ok(buffer.buffer.len())
+        let buffer_arc = unsafe { clone_buffer_arc(buffer) };
+        Ok(buffer_arc.buffer.len())
     })
 }
 
@@ -2543,7 +2562,7 @@ pub unsafe extern "C" fn dg_buffer_free(buffer: *mut DgBuffer) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if !buffer.is_null() {
             // SAFETY: the pointer must have been returned by `dg_buffer_import_external`.
-            unsafe { drop(Box::from_raw(buffer)) };
+            unsafe { drop(Arc::from_raw(buffer as *const DgBuffer)) };
         }
     }));
 }
