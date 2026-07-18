@@ -24,8 +24,8 @@ pub use ids::{PublishLease, StreamId, StreamKey, SubscriberId};
 pub use mock::{MockPublisherSink, MockStreamManager, MockSubscriberSource};
 pub use stream::{
     BackpressurePolicy, BootstrapMode, BootstrapPolicy, CoreAdaptersApi, DispatchResult,
-    MediaFilter, PublisherApi, PublisherOptions, PublisherSink, StreamManagerApi, StreamSnapshot,
-    SubscriberApi, SubscriberOptions, SubscriberSource, SubscriberSourceSyncExt,
+    MediaFilter, PublisherApi, PublisherOptions, PublisherSink, ReceiveOutcome, StreamManagerApi,
+    StreamSnapshot, SubscriberApi, SubscriberOptions, SubscriberSource, SubscriberSourceSyncExt,
 };
 pub use track::{
     AacRtpPacketization, CodecConfigError, CodecConfigPayload, CodecConfigRequirement,

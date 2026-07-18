@@ -10,7 +10,7 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-04 PR #17 已创建并通过 CI（15/15），待合入 |
+| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 冲突已解决 |
 
 ## CORE6 状态
 
@@ -20,8 +20,8 @@
 | CORE6-02 | Done | PR #15 | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs`; CI 15/15 green | - |
 | CORE6-03 | Done | PR #16 | `crates/dg-core/src/buffer.rs`, `crates/dg-core/src/tensor.rs`, `crates/dg-core/src/shape.rs`, `crates/dg-core/src/memory.rs`, `crates/dg-core/src/device.rs`; 更新的跨 crate `read_bytes`/`allocate_host` 调用；`core6_baseline.rs` 回归通过 | - |
 | CORE6-04 | Done | PR #17 | `dg-runtime/src/metrics.rs`, `dg-runtime/src/runtime.rs`, `dg-runtime/src/backend.rs`, `dg-runtime/src/mock.rs`, `dg-scheduler/src/lib.rs`, `dg-graph/src/inference.rs`; 新增 `core6_runtime_scheduler.rs`; CI 15/15 green | - |
-| CORE6-05 | Done | branch `devin/1784350799-core6-05-graph-execution-lifecycle` | `crates/dg-core/src/resource.rs` buffer budgets, `crates/dg-graph/src/pipe.rs` depth accounting, `crates/dg-graph/src/element.rs` packet_starts/backpressure, `crates/dg-graph/src/engine.rs` shutdown/reload lifecycle; `crates/dg-graph/tests/core6_graph_execution.rs`; local gates green | - |
-| CORE6-06 | Not Started | - | - | Cheetah timeout 能力需审计 |
+| CORE6-05 | Done | PR #18 | `dg-graph` lifecycle/budget fixes, `core6_graph_execution.rs`; local gates green | - |
+| CORE6-06 | Done | PR #19 | `ReceiveOutcome`/`recv_timeout` in `dg-stream`, `StreamPullElement` 100ms poll, bridge `MediaInfo`/track-id propagation, `core6_stream_io.rs`, `core6_media_bridge.rs`; local gates green | - |
 | CORE6-07 | Not Started | - | - | 依赖 CORE6-02/03 |
 | CORE6-08 | Not Started | - | - | 破坏性 ABI v2，需原子切换 |
 | CORE6-09 | Not Started | - | - | 依赖 CORE6-04/05/06 |

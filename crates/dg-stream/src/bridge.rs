@@ -3,16 +3,20 @@ use std::sync::Arc;
 #[cfg(feature = "cheetah")]
 use bytes::Bytes;
 #[cfg(feature = "cheetah")]
+use futures::{channel::oneshot, future, pin_mut};
+#[cfg(feature = "cheetah")]
 use std::collections::HashMap;
 #[cfg(feature = "cheetah")]
 use std::sync::Mutex;
+#[cfg(feature = "cheetah")]
+use std::time::Duration;
 
 #[cfg(feature = "cheetah")]
 use crate::error::{EndpointClass, Error, Result};
 #[cfg(feature = "cheetah")]
 use crate::ids::SubscriberId;
 #[cfg(feature = "cheetah")]
-use crate::stream::{DispatchResult, PublisherSink, SubscriberSource};
+use crate::stream::{DispatchResult, PublisherSink, ReceiveOutcome, SubscriberSource};
 #[cfg(feature = "cheetah")]
 use crate::track::{
     AacRtpPacketization, CodecConfigPayload, CodecConfigRequirement, CodecExtradata, CodecId,
@@ -50,9 +54,17 @@ pub fn cheetah_track_info_to_media_frame(track: &dg_stream_cheetah::TrackInfo) -
 }
 
 #[cfg(feature = "cheetah")]
-pub fn media_frame_to_cheetah_track_info(track: &TrackInfo) -> dg_stream_cheetah::TrackInfo {
-    dg_stream_cheetah::TrackInfo {
-        track_id: dg_stream_cheetah::TrackId(u32::try_from(track.track_id).unwrap_or(u32::MAX)),
+pub fn media_frame_to_cheetah_track_info(
+    track: &TrackInfo,
+) -> Result<dg_stream_cheetah::TrackInfo> {
+    let track_id = u32::try_from(track.track_id).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "stream track id {} exceeds cheetah TrackId u32 range",
+            track.track_id
+        ))
+    })?;
+    Ok(dg_stream_cheetah::TrackInfo {
+        track_id: dg_stream_cheetah::TrackId(track_id),
         media_kind: track.media_kind.into(),
         codec: track.codec.into(),
         aac_rtp_packetization: track.aac_rtp_packetization.into(),
@@ -67,7 +79,7 @@ pub fn media_frame_to_cheetah_track_info(track: &TrackInfo) -> dg_stream_cheetah
         bitrate: track.bitrate,
         extradata: track.extradata.clone().into(),
         readiness: track.readiness.into(),
-    }
+    })
 }
 
 #[cfg(feature = "cheetah")]
@@ -93,6 +105,17 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
     frame: Arc<dg_stream_cheetah::AVFrame>,
 ) -> Result<dg_media::BridgedMediaFrame> {
     let frame = frame.as_ref();
+    if frame.timebase.den == 0 {
+        return Err(Error::InvalidArgument(
+            "stream frame has zero timebase denominator".to_string(),
+        ));
+    }
+    let track_id = u64::from(frame.track_id.0);
+    let _ = u32::try_from(track_id).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "stream frame track id {track_id} exceeds u32 range"
+        ))
+    })?;
     let bytes = frame.payload.clone().to_vec();
     // Compressed stream frames are Tensor payloads; Image is reserved for decoded pixels.
     let kind = MediaFrameKind::Tensor;
@@ -118,7 +141,7 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
             frame.timebase.den,
         )),
     };
-    if let Ok(info) = dg_core::MediaInfo::encoded(
+    let info = dg_core::MediaInfo::encoded(
         dg_core::EncodedMediaInfo {
             stream_index: frame.track_id.0,
             track_id: Some(u64::from(frame.track_id.0)),
@@ -167,10 +190,9 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
             codec_configs: Vec::new(),
         },
         timing,
-    ) {
-        media_frame.meta.media_info = Some(Box::new(info));
-    }
-    let _ = dg_media::normalize_media_frame_meta(&mut media_frame.meta);
+    )?;
+    media_frame.meta.media_info = Some(Box::new(info));
+    dg_media::normalize_media_frame_meta(&mut media_frame.meta)?;
     Ok(dg_media::BridgedMediaFrame {
         frame: media_frame,
         transfer: dg_media::TransferReport {
@@ -282,10 +304,10 @@ impl CheetahPublisherSinkAdapter {
 #[cfg(feature = "cheetah")]
 impl PublisherSink for CheetahPublisherSinkAdapter {
     fn update_tracks(&self, tracks: Vec<TrackInfo>) -> Result<()> {
-        let cheetah_tracks = tracks
+        let cheetah_tracks: Vec<_> = tracks
             .iter()
             .map(media_frame_to_cheetah_track_info)
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         self.inner
             .update_tracks(cheetah_tracks)
             .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Push, "negotiate"))?;
@@ -605,6 +627,59 @@ impl CheetahSubscriberSourceAdapter {
 #[async_trait::async_trait]
 impl SubscriberSource for CheetahSubscriberSourceAdapter {
     async fn recv(&mut self) -> Result<Option<Arc<MediaFrame>>> {
+        loop {
+            match self.recv_timeout(Duration::from_millis(100)).await? {
+                ReceiveOutcome::Frame(frame) => return Ok(Some(frame)),
+                ReceiveOutcome::EndOfStream => return Ok(None),
+                ReceiveOutcome::TimedOut => continue,
+            }
+        }
+    }
+
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            return match handle.block_on(tokio::time::timeout(timeout, self.recv_inner())) {
+                Ok(Some(frame)) => Ok(ReceiveOutcome::Frame(frame)),
+                Ok(None) => Ok(ReceiveOutcome::EndOfStream),
+                Err(_) => Ok(ReceiveOutcome::TimedOut),
+            };
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let _ = std::thread::Builder::new()
+            .name("dg-stream-cheetah-timeout".to_string())
+            .spawn(move || {
+                std::thread::sleep(timeout);
+                let _ = tx.send(());
+            });
+
+        let recv_fut = self.recv_inner();
+        pin_mut!(recv_fut);
+        let timeout_fut = rx;
+        pin_mut!(timeout_fut);
+
+        match future::select(recv_fut, timeout_fut).await {
+            future::Either::Left((result, _)) => match result {
+                Ok(Some(frame)) => Ok(ReceiveOutcome::Frame(frame)),
+                Ok(None) => Ok(ReceiveOutcome::EndOfStream),
+                Err(err) => Err(err),
+            },
+            future::Either::Right(_) => Ok(ReceiveOutcome::TimedOut),
+        }
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.inner
+            .close()
+            .await
+            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "close"))
+    }
+
+    fn id(&self) -> SubscriberId {
+        SubscriberId(self.inner.id().0)
+    }
+
+    async fn recv_inner(&mut self) -> Result<Option<Arc<MediaFrame>>> {
         let next = self
             .inner
             .recv()
@@ -617,17 +692,6 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
             }
             None => None,
         })
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.inner
-            .close()
-            .await
-            .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "close"))
-    }
-
-    fn id(&self) -> SubscriberId {
-        SubscriberId(self.inner.id().0)
     }
 }
 
