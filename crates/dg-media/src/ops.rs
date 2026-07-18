@@ -257,6 +257,10 @@ pub struct OsdBox {
     pub height: usize,
 }
 
+pub(crate) const MAX_OSD_BOXES: usize = 1_000;
+pub(crate) const MAX_OSD_COLOR_LEN: usize = 4;
+pub(crate) const MAX_OSD_THICKNESS: usize = 1_000;
+
 /// Sans-I/O on-screen-display core: draws rectangle borders on `u8` images.
 #[derive(Debug)]
 pub struct OsdCore {
@@ -268,14 +272,31 @@ pub struct OsdCore {
 }
 
 impl OsdCore {
-    pub fn new(boxes: Vec<OsdBox>, color: Vec<u8>, thickness: usize) -> Self {
-        Self {
+    pub fn try_new(boxes: Vec<OsdBox>, color: Vec<u8>, thickness: usize) -> Result<Self> {
+        if boxes.len() > MAX_OSD_BOXES {
+            return Err(Error::Media(format!(
+                "media_osd: boxes count {} exceeds limit {}",
+                boxes.len(),
+                MAX_OSD_BOXES
+            )));
+        }
+        if color.is_empty() || color.len() > MAX_OSD_COLOR_LEN {
+            return Err(Error::Media(format!(
+                "media_osd: color components must be between 1 and {MAX_OSD_COLOR_LEN}"
+            )));
+        }
+        if thickness == 0 || thickness > MAX_OSD_THICKNESS {
+            return Err(Error::Media(format!(
+                "media_osd: thickness must be between 1 and {MAX_OSD_THICKNESS}"
+            )));
+        }
+        Ok(Self {
             boxes,
             color,
-            thickness: thickness.max(1),
+            thickness,
             ready: VecDeque::new(),
             eos: false,
-        }
+        })
     }
 
     pub fn submit_image(&mut self, frame: MediaFrame) -> Result<()> {
@@ -294,6 +315,11 @@ impl OsdCore {
                 "media_osd: color has {} components, image has {channels} channels",
                 self.color.len()
             )));
+        }
+        if !frame.buffer.is_host_readable() {
+            return Err(Error::Unsupported(
+                "media_osd: frame buffer is not host-readable; staging required".to_string(),
+            ));
         }
         let expected = checked_pixel_count(height, width, channels, "media_osd")?;
         let mut bytes = frame.buffer.read_bytes()?;
@@ -456,7 +482,7 @@ mod tests {
 
     #[test]
     fn osd_draws_border_and_leaves_interior() {
-        let mut core = OsdCore::new(
+        let mut core = OsdCore::try_new(
             vec![OsdBox {
                 x: 0,
                 y: 0,
@@ -465,7 +491,8 @@ mod tests {
             }],
             vec![255],
             1,
-        );
+        )
+        .expect("valid osd core");
         core.submit_image(image_frame(4, 4, 1, 0)).expect("submit");
         let MediaPoll::Ready(drawn) = core.poll() else {
             panic!("expected osd output");
@@ -480,7 +507,7 @@ mod tests {
 
     #[test]
     fn osd_rejects_color_channel_mismatch() {
-        let mut core = OsdCore::new(
+        let mut core = OsdCore::try_new(
             vec![OsdBox {
                 x: 0,
                 y: 0,
@@ -489,7 +516,8 @@ mod tests {
             }],
             vec![255, 0],
             1,
-        );
+        )
+        .expect("valid osd core");
         let err = core
             .submit_image(image_frame(2, 2, 3, 0))
             .expect_err("expected channel mismatch");

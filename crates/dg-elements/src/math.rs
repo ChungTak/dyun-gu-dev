@@ -1,4 +1,14 @@
 use dg_core::{BBox, Detection};
+use dg_graph::{Error, Result};
+
+/// Maximum number of detection candidates that can be passed to NMS before the
+/// caller must explicitly pre-filter using a deterministic top-k.
+pub(crate) const MAX_NMS_CANDIDATES: usize = 100_000;
+
+/// Maximum number of values that can be ranked by `top_k` and the largest `k`
+/// that can be requested.
+pub(crate) const MAX_TOP_K_INPUT: usize = 100_000;
+pub(crate) const MAX_TOP_K: usize = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Letterbox {
@@ -17,9 +27,11 @@ impl Letterbox {
         source_height: usize,
         target_width: usize,
         target_height: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if source_width == 0 || source_height == 0 || target_width == 0 || target_height == 0 {
-            return Err("letterbox dimensions must be non-zero".to_string());
+            return Err(Error::Config(
+                "letterbox dimensions must be non-zero".to_string(),
+            ));
         }
         let source_width_f = usize_to_f32(source_width)?;
         let source_height_f = usize_to_f32(source_height)?;
@@ -58,16 +70,20 @@ pub fn resize_letterbox(
     target_width: usize,
     target_height: usize,
     padding: f32,
-) -> Result<(Vec<f32>, Letterbox), String> {
+) -> Result<(Vec<f32>, Letterbox)> {
     if channels == 0 {
-        return Err("resize channels must be non-zero".to_string());
+        return Err(Error::Config(
+            "resize channels must be non-zero".to_string(),
+        ));
     }
     let expected = source_width
         .checked_mul(source_height)
         .and_then(|size| size.checked_mul(channels))
-        .ok_or_else(|| "resize source size overflow".to_string())?;
+        .ok_or_else(|| Error::Config("resize source size overflow".to_string()))?;
     if source.len() != expected {
-        return Err("resize source length does not match dimensions".to_string());
+        return Err(Error::Config(
+            "resize source length does not match dimensions".to_string(),
+        ));
     }
     let letterbox = Letterbox::new(source_width, source_height, target_width, target_height)?;
     let resized_width = round_to_usize(
@@ -82,25 +98,26 @@ pub fn resize_letterbox(
     )?
     .max(1)
     .min(target_height);
-    let mut output = vec![
-        padding;
-        target_width
-            .checked_mul(target_height)
-            .and_then(|size| size.checked_mul(channels))
-            .ok_or_else(|| "resize target size overflow".to_string())?
-    ];
+    let mut output =
+        vec![
+            padding;
+            target_width
+                .checked_mul(target_height)
+                .and_then(|size| size.checked_mul(channels))
+                .ok_or_else(|| Error::Config("resize target size overflow".to_string()))?
+        ];
     let pad_x = (target_width - resized_width) / 2;
     let pad_y = (target_height - resized_height) / 2;
     for y in 0..resized_height {
         let source_y = y
             .saturating_mul(source_height)
             .checked_div(resized_height)
-            .ok_or_else(|| "resize source y overflow".to_string())?;
+            .ok_or_else(|| Error::Config("resize source y overflow".to_string()))?;
         for x in 0..resized_width {
             let source_x = x
                 .saturating_mul(source_width)
                 .checked_div(resized_width)
-                .ok_or_else(|| "resize source x overflow".to_string())?;
+                .ok_or_else(|| Error::Config("resize source x overflow".to_string()))?;
             let source_index = (source_y * source_width + source_x) * channels;
             let target_index = ((y + pad_y) * target_width + x + pad_x) * channels;
             output[target_index..target_index + channels]
@@ -119,24 +136,43 @@ pub fn sigmoid(value: f32) -> f32 {
     }
 }
 
-pub fn softmax(values: &[f32]) -> Vec<f32> {
+pub fn softmax(values: &[f32]) -> Result<Vec<f32>> {
+    if !values.iter().all(|v| v.is_finite()) {
+        return Err(Error::Config(
+            "softmax input contains non-finite values".to_string(),
+        ));
+    }
     if values.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exponents = values.iter().map(|value| (*value - max).exp());
     let sum: f32 = exponents.clone().sum();
     if sum == 0.0 || !sum.is_finite() {
-        return vec![0.0; values.len()];
+        return Ok(vec![0.0; values.len()]);
     }
-    exponents.map(|value| value / sum).collect()
+    Ok(exponents.map(|value| value / sum).collect())
 }
 
-pub fn top_k(values: &[f32], k: usize) -> Vec<(usize, f32)> {
+pub fn top_k(values: &[f32], k: usize) -> Result<Vec<(usize, f32)>> {
+    if values.len() > MAX_TOP_K_INPUT {
+        return Err(Error::ResourceLimit {
+            resource: "top_k input values".to_string(),
+            requested: values.len(),
+            limit: MAX_TOP_K_INPUT,
+        });
+    }
+    if k > MAX_TOP_K {
+        return Err(Error::ResourceLimit {
+            resource: "top_k k".to_string(),
+            requested: k,
+            limit: MAX_TOP_K,
+        });
+    }
     let mut indexed = values.iter().copied().enumerate().collect::<Vec<_>>();
     indexed.sort_by(|left, right| right.1.total_cmp(&left.1));
     indexed.truncate(k);
-    indexed
+    Ok(indexed)
 }
 
 pub fn iou(left: BBox, right: BBox) -> f32 {
@@ -155,7 +191,35 @@ pub fn iou(left: BBox, right: BBox) -> f32 {
     }
 }
 
-pub fn nms(detections: &[Detection], threshold: f32) -> Vec<Detection> {
+/// NMS with a hard candidate ceiling. Inputs larger than the ceiling must be
+/// pre-filtered with `nms_with_top_k` so the product contract is explicit.
+pub fn nms(detections: &[Detection], threshold: f32) -> Result<Vec<Detection>> {
+    if detections.len() > MAX_NMS_CANDIDATES {
+        return Err(Error::ResourceLimit {
+            resource: "nms candidates".to_string(),
+            requested: detections.len(),
+            limit: MAX_NMS_CANDIDATES,
+        });
+    }
+    Ok(nms_inner(detections, threshold))
+}
+
+/// NMS that deterministically keeps only the top `max_candidates` by score
+/// before applying the IoU threshold. This is the explicit top-k truncation
+/// path; the returned vector is still bounded by `MAX_NMS_CANDIDATES`.
+pub fn nms_with_top_k(
+    detections: &[Detection],
+    threshold: f32,
+    max_candidates: usize,
+) -> Result<Vec<Detection>> {
+    let max_candidates = max_candidates.min(MAX_NMS_CANDIDATES);
+    let mut ordered = detections.to_vec();
+    ordered.sort_by(|left, right| right.score.total_cmp(&left.score));
+    ordered.truncate(max_candidates);
+    Ok(nms_inner(&ordered, threshold))
+}
+
+fn nms_inner(detections: &[Detection], threshold: f32) -> Vec<Detection> {
     let mut ordered = detections.to_vec();
     ordered.sort_by(|left, right| right.score.total_cmp(&left.score));
     let mut selected = Vec::new();
@@ -171,26 +235,31 @@ pub fn nms(detections: &[Detection], threshold: f32) -> Vec<Detection> {
     selected
 }
 
-fn usize_to_f32(value: usize) -> Result<f32, String> {
+fn usize_to_f32(value: usize) -> Result<f32> {
     if value > 16_777_216 {
-        return Err("dimension cannot be represented exactly as f32".to_string());
+        return Err(Error::Config(
+            "dimension cannot be represented exactly as f32".to_string(),
+        ));
     }
-    let value = u32::try_from(value).map_err(|_| "dimension is out of range".to_string())?;
+    let value =
+        u32::try_from(value).map_err(|_| Error::Config("dimension is out of range".to_string()))?;
     value
         .to_string()
         .parse::<f32>()
-        .map_err(|_| "dimension cannot be represented as f32".to_string())
+        .map_err(|_| Error::Config("dimension cannot be represented as f32".to_string()))
 }
 
-fn round_to_usize(value: f32, field: &str) -> Result<usize, String> {
+fn round_to_usize(value: f32, field: &str) -> Result<usize> {
     if !value.is_finite() || value < 0.0 {
-        return Err(format!("{field} must be finite and non-negative"));
+        return Err(Error::Config(format!(
+            "{field} must be finite and non-negative"
+        )));
     }
     let rounded = value.round();
     rounded
         .to_string()
         .parse::<usize>()
-        .map_err(|_| format!("{field} is out of range"))
+        .map_err(|_| Error::Config(format!("{field} is out of range")))
 }
 
 fn dimension_as_f32(value: usize) -> f32 {
@@ -212,7 +281,31 @@ mod tests {
             Detection::new(BBox::new(1.0, 1.0, 10.0, 10.0), 0.8, 1),
             Detection::new(BBox::new(1.0, 1.0, 10.0, 10.0), 0.7, 2),
         ];
-        assert_eq!(nms(&detections, 0.5).len(), 2);
+        assert_eq!(nms(&detections, 0.5).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nms_rejects_excess_candidates() {
+        let detections = (0..MAX_NMS_CANDIDATES + 1)
+            .map(|index| Detection::new(BBox::new(index as f32, 0.0, 1.0, 1.0), 1.0, index as u32))
+            .collect::<Vec<_>>();
+        let err = nms(&detections, 0.5).expect_err("should exceed candidate limit");
+        assert!(err.to_string().contains("nms candidates"));
+    }
+
+    #[test]
+    fn nms_with_top_k_truncates_and_runs() {
+        let detections = (0..2000)
+            .map(|index| {
+                Detection::new(
+                    BBox::new(index as f32, 0.0, 1.0, 1.0),
+                    1.0 - index as f32 * 1e-9,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected = nms_with_top_k(&detections, 0.5, 100).expect("nms top-k");
+        assert!(selected.len() <= 100);
     }
 
     #[test]
@@ -222,10 +315,24 @@ mod tests {
         assert_eq!(mapped, BBox::new(50.0, 0.0, 100.0, 100.0));
     }
 
+    #[test]
+    fn top_k_rejects_oversized_input() {
+        let values = vec![0.0; MAX_TOP_K_INPUT + 1];
+        let err = top_k(&values, 1).expect_err("should exceed input limit");
+        assert!(err.to_string().contains("top_k input values"));
+    }
+
+    #[test]
+    fn top_k_rejects_oversized_k() {
+        let values = vec![0.0; 2];
+        let err = top_k(&values, MAX_TOP_K + 1).expect_err("should exceed k limit");
+        assert!(err.to_string().contains("top_k k"));
+    }
+
     proptest! {
         #[test]
         fn softmax_sums_to_one(values in proptest::collection::vec(-10.0_f32..10.0, 1..8)) {
-            let output = softmax(&values);
+            let output = softmax(&values).expect("softmax");
             let sum: f32 = output.iter().sum();
             prop_assert!((sum - 1.0).abs() < 0.0001);
         }
@@ -235,7 +342,8 @@ mod tests {
             values in proptest::collection::vec(-10.0_f32..10.0, 0..16),
             k in 0_usize..16,
         ) {
-            prop_assert!(top_k(&values, k).len() <= k.min(values.len()));
+            let result = top_k(&values, k).expect("top_k within bounds");
+            prop_assert!(result.len() <= k.min(values.len()));
         }
     }
 }

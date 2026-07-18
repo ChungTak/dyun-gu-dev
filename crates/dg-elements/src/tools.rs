@@ -24,6 +24,9 @@ const HTTP_PUSH_PARAMS: &[ParamField] = &[
     },
 ];
 
+const MAX_URL_LENGTH: usize = 4096;
+const MAX_METHOD_LENGTH: usize = 64;
+
 pub struct HttpPushRequest {
     pub url: String,
     pub method: String,
@@ -60,6 +63,7 @@ struct HttpPush {
 
 impl Element for HttpPush {
     fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
+        let redacted = redact_url(&self.url);
         loop {
             let packet = match io.recv("in")? {
                 Some(packet) => packet,
@@ -75,8 +79,8 @@ impl Element for HttpPush {
             }
             let driver = HTTP_PUSH_DRIVER.get().ok_or_else(|| {
                 Error::Runtime(format!(
-                    "http_push node {} has no installed driver for {}",
-                    io.name, self.url
+                    "http_push node {} has no installed driver for {redacted}",
+                    io.name
                 ))
             })?;
             driver
@@ -88,7 +92,7 @@ impl Element for HttpPush {
                 .map_err(|err| {
                     Error::Runtime(format!(
                         "http_push node {} failed posting to {}: {err}",
-                        io.name, self.url
+                        io.name, redacted
                     ))
                 })?;
         }
@@ -130,6 +134,13 @@ fn parse_http_push(node: &NodeSpec) -> Result<HttpPushConfig> {
         }
     }
     .to_string();
+    if url.len() > MAX_URL_LENGTH {
+        return Err(Error::ResourceLimit {
+            resource: "http_push url length".to_string(),
+            requested: url.len(),
+            limit: MAX_URL_LENGTH,
+        });
+    }
     validate_http_url(&url)?;
     let method = params
         .get("method")
@@ -144,6 +155,13 @@ fn parse_http_push(node: &NodeSpec) -> Result<HttpPushConfig> {
         return Err(Error::Config(
             "field method must be a non-empty HTTP method".to_string(),
         ));
+    }
+    if method.len() > MAX_METHOD_LENGTH {
+        return Err(Error::ResourceLimit {
+            resource: "http_push method length".to_string(),
+            requested: method.len(),
+            limit: MAX_METHOD_LENGTH,
+        });
     }
     Ok(HttpPushConfig {
         url,
@@ -168,6 +186,32 @@ fn validate_http_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Redact userinfo, query and fragment from a URL so that error logs reveal the
+/// scheme and host/path without leaking credentials or signed tokens.
+fn redact_url(url: &str) -> String {
+    let Some((scheme, after_scheme)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let (authority, path_and_rest) = match after_scheme.split_once('/') {
+        Some((authority, rest)) => (authority, format!("/{rest}")),
+        None => (after_scheme, String::new()),
+    };
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, host_port)| host_port)
+        .unwrap_or(authority);
+    let path = path_and_rest
+        .split_once('?')
+        .map(|(path, _)| path.to_string())
+        .or_else(|| {
+            path_and_rest
+                .split_once('#')
+                .map(|(path, _)| path.to_string())
+        })
+        .unwrap_or(path_and_rest);
+    format!("{scheme}://{authority}{path}")
+}
+
 fn params_object(node: &NodeSpec) -> Result<&serde_json::Map<String, serde_json::Value>> {
     node.params
         .as_object()
@@ -187,4 +231,25 @@ fn reject_unknown_fields(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_url_strips_userinfo_and_query() {
+        assert_eq!(
+            redact_url("https://user:pass@example.com/path?token=secret"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn redact_url_leaves_no_query_url_intact() {
+        assert_eq!(
+            redact_url("http://example.com/stream"),
+            "http://example.com/stream"
+        );
+    }
 }

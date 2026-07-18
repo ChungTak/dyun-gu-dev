@@ -1,15 +1,15 @@
 use std::collections::VecDeque;
 
 use dg_core::{
-    BBox, Classification, DataFormat, DataType, Detection, DeviceKind, FaceDetection, OcrText,
-    Point, Shape, Tensor, TensorDesc, Track, TrackState,
+    BBox, Classification, DataFormat, DataType, Detection, DeviceKind, Error as CoreError,
+    FaceDetection, OcrText, Point, Shape, Tensor, TensorDesc, Track, TrackState,
 };
 use dg_graph::{
     CreatedElement, Element, ElementHandle, ElementIo, Error, NodeSpec, Packet, ParamField,
     ParamType, PortSchema, Result,
 };
 
-use crate::math::{iou, resize_letterbox, softmax, top_k};
+use crate::math::{iou, resize_letterbox, softmax, top_k, MAX_NMS_CANDIDATES};
 
 const ANY_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
@@ -44,6 +44,7 @@ const RETINAFACE_FIELDS: &[&str] = &[
 const BYTETRACK_FIELDS: &[&str] = &["max_lost", "match_iou"];
 const PPOCR_DET_FIELDS: &[&str] = &["threshold"];
 const PPOCR_REC_FIELDS: &[&str] = &["alphabet", "blank_index"];
+
 const RESNET_PREPROCESS_PARAMS: &[ParamField] = &[
     ParamField {
         name: "input_width",
@@ -140,6 +141,18 @@ const PPOCR_REC_PARAMS: &[ParamField] = &[
     },
 ];
 
+const MAX_ANCHOR_SIZES: usize = 64;
+const MAX_ANCHORS: usize = 1_000_000;
+const MAX_LABELS: usize = 100_000;
+const MAX_ALPHABET_LEN: usize = 100_000;
+const MAX_MAX_LOST: u32 = 10_000;
+const MAX_TRACKS: usize = 10_000;
+const MAX_DETECTIONS_PER_FRAME: usize = 100_000;
+const MAX_OCR_PIXELS: usize = 10_000_000;
+const MAX_OCR_REGIONS: usize = 10_000;
+const MAX_OCR_REGION_PIXELS: usize = 1_000_000;
+const MAX_OCR_ROWS: usize = 100_000;
+
 inventory::submit! {
     dg_graph::ElementDescriptor {
         kind: "resnet_preprocess",
@@ -208,6 +221,7 @@ struct ResnetPreprocess {
     std: [f32; 3],
 }
 
+#[derive(Debug)]
 struct ResnetPostprocess {
     top_k: usize,
     labels: Vec<String>,
@@ -245,6 +259,13 @@ struct PpocrRec {
 
 impl Element for ResnetPreprocess {
     fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
+        let output_bytes = self
+            .width
+            .checked_mul(self.height)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| Error::Config("resnet preprocess output bytes overflow".to_string()))?;
+        io.policy().check_tensor_bytes(output_bytes)?;
         loop {
             let packet = next_packet(&io)?;
             if packet.is_eos() {
@@ -276,8 +297,8 @@ impl Element for ResnetPostprocess {
             let values = f32_values(packet.tensor_ref().ok_or_else(|| {
                 Error::Runtime("resnet postprocess expects a tensor".to_string())
             })?)?;
-            let probabilities = softmax(&values);
-            let results = top_k(&probabilities, self.top_k)
+            let probabilities = softmax(&values)?;
+            let results = top_k(&probabilities, self.top_k)?
                 .into_iter()
                 .map(|(index, score)| {
                     Ok(Classification {
@@ -333,7 +354,7 @@ impl Element for ByteTrack {
             let detections = packet.detections_ref().ok_or_else(|| {
                 Error::Runtime("bytetrack expects detections payload".to_string())
             })?;
-            let results = self.update(detections);
+            let results = self.update(detections)?;
             io.send("out", Packet::tracks(results).with_meta(packet.meta))?;
         }
     }
@@ -379,10 +400,15 @@ impl Element for PpocrRec {
                     "ocr logits do not match alphabet size".to_string(),
                 ));
             }
-            let rows = logits
-                .chunks_exact(class_count)
-                .map(|row| row.to_vec())
-                .collect::<Vec<_>>();
+            let rows = logits.len() / class_count;
+            if rows > MAX_OCR_ROWS {
+                return Err(Error::ResourceLimit {
+                    resource: "ppocr_rec rows".to_string(),
+                    requested: rows,
+                    limit: MAX_OCR_ROWS,
+                });
+            }
+            let rows: Vec<&[f32]> = logits.chunks_exact(class_count).collect();
             let text = ctc_greedy_decode(&rows, &self.alphabet, self.blank)?;
             io.send(
                 "out",
@@ -398,7 +424,14 @@ impl Element for PpocrRec {
 }
 
 impl ByteTrack {
-    fn update(&mut self, detections: &[Detection]) -> Vec<Track> {
+    fn update(&mut self, detections: &[Detection]) -> Result<Vec<Track>> {
+        if detections.len() > MAX_DETECTIONS_PER_FRAME {
+            return Err(Error::ResourceLimit {
+                resource: "bytetrack detections per frame".to_string(),
+                requested: detections.len(),
+                limit: MAX_DETECTIONS_PER_FRAME,
+            });
+        }
         for track in &mut self.tracks {
             track.lost = track.lost.saturating_add(1);
         }
@@ -443,15 +476,55 @@ impl ByteTrack {
             });
         }
         self.tracks.retain(|track| track.lost <= self.max_lost);
-        output
+        if self.tracks.len() > MAX_TRACKS {
+            self.tracks
+                .sort_by_key(|track| (track.lost, track.track_id));
+            self.tracks.truncate(MAX_TRACKS);
+        }
+        Ok(output)
     }
 }
 
-pub fn generate_anchors(width: usize, height: usize, stride: usize, sizes: &[f32]) -> Vec<BBox> {
+pub fn generate_anchors(
+    width: usize,
+    height: usize,
+    stride: usize,
+    sizes: &[f32],
+) -> Result<Vec<BBox>> {
     if stride == 0 {
-        return Vec::new();
+        return Err(Error::Config("anchor stride must be non-zero".to_string()));
     }
-    let mut anchors = Vec::new();
+    if sizes.is_empty() {
+        return Err(Error::Config("anchor sizes must not be empty".to_string()));
+    }
+    if sizes.len() > MAX_ANCHOR_SIZES {
+        return Err(Error::ResourceLimit {
+            resource: "anchor_sizes count".to_string(),
+            requested: sizes.len(),
+            limit: MAX_ANCHOR_SIZES,
+        });
+    }
+    if sizes.iter().any(|size| *size <= 0.0) {
+        return Err(Error::Config(
+            "anchor sizes must be greater than zero".to_string(),
+        ));
+    }
+    let cells_x = width.div_ceil(stride);
+    let cells_y = height.div_ceil(stride);
+    let cells = cells_x
+        .checked_mul(cells_y)
+        .ok_or_else(|| Error::Config("anchor cell count overflow".to_string()))?;
+    let anchor_count = cells
+        .checked_mul(sizes.len())
+        .ok_or_else(|| Error::Config("anchor count overflow".to_string()))?;
+    if anchor_count > MAX_ANCHORS {
+        return Err(Error::ResourceLimit {
+            resource: "anchor count".to_string(),
+            requested: anchor_count,
+            limit: MAX_ANCHORS,
+        });
+    }
+    let mut anchors = Vec::with_capacity(anchor_count);
     for y in (0..height).step_by(stride) {
         for x in (0..width).step_by(stride) {
             let center_x = dimension_or_zero(x) / dimension_or_one(width);
@@ -461,7 +534,7 @@ pub fn generate_anchors(width: usize, height: usize, stride: usize, sizes: &[f32
             }
         }
     }
-    anchors
+    Ok(anchors)
 }
 
 fn decode_retinaface(
@@ -482,9 +555,16 @@ fn decode_retinaface(
     let height_f = usize_f32(height)?;
     let mut candidates = Vec::new();
     for (index, row) in values.chunks_exact(ATTRIBUTES).enumerate() {
+        if !row.iter().all(|value| value.is_finite()) {
+            continue;
+        }
         let anchor = match anchors.get(index).copied() {
             Some(anchor) => anchor,
-            None => BBox::new(0.5, 0.5, 1.0 / width_f, 1.0 / height_f),
+            None => {
+                return Err(Error::Runtime(
+                    "retinaface values length does not match anchors".to_string(),
+                ))
+            }
         };
         let score = crate::math::sigmoid(row[4]);
         if score < score_threshold {
@@ -514,6 +594,9 @@ fn decode_retinaface(
         });
     }
     candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
+    if candidates.len() > MAX_NMS_CANDIDATES {
+        candidates.truncate(MAX_NMS_CANDIDATES);
+    }
     let mut selected = Vec::new();
     for candidate in candidates {
         if selected
@@ -526,10 +609,25 @@ fn decode_retinaface(
     Ok(selected)
 }
 
-pub fn ctc_greedy_decode(rows: &[Vec<f32>], alphabet: &[char], blank: usize) -> Result<String> {
+pub fn ctc_greedy_decode(
+    rows: &[impl AsRef<[f32]>],
+    alphabet: &[char],
+    blank: usize,
+) -> Result<String> {
+    if rows.len() > MAX_OCR_ROWS {
+        return Err(Error::ResourceLimit {
+            resource: "ctc rows".to_string(),
+            requested: rows.len(),
+            limit: MAX_OCR_ROWS,
+        });
+    }
     let mut output = String::new();
     let mut previous = None;
     for row in rows {
+        let row = row.as_ref();
+        if row.is_empty() {
+            continue;
+        }
         let index = row
             .iter()
             .enumerate()
@@ -559,9 +657,21 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
         }
     };
     let values = f32_values(tensor)?;
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(Error::Config(
+            "ppocr det threshold must be a probability".to_string(),
+        ));
+    }
     let expected = height
         .checked_mul(width)
         .ok_or_else(|| Error::Runtime("ocr map dimensions overflow".to_string()))?;
+    if expected > MAX_OCR_PIXELS {
+        return Err(Error::ResourceLimit {
+            resource: "ppocr_det input pixels".to_string(),
+            requested: expected,
+            limit: MAX_OCR_PIXELS,
+        });
+    }
     if values.len() != expected {
         return Err(Error::Runtime("ocr map size mismatch".to_string()));
     }
@@ -576,6 +686,13 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
         let mut points = Vec::new();
         while let Some(index) = queue.pop_front() {
             points.push(index);
+            if points.len() > MAX_OCR_REGION_PIXELS {
+                return Err(Error::ResourceLimit {
+                    resource: "ppocr_det connected component pixels".to_string(),
+                    requested: points.len(),
+                    limit: MAX_OCR_REGION_PIXELS,
+                });
+            }
             let y = index / width;
             let x = index % width;
             for (next_x, next_y) in [
@@ -619,6 +736,9 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
                 usize_f32(max_y.saturating_sub(min_y).saturating_add(1))? / height_f,
             )),
         });
+        if output.len() >= MAX_OCR_REGIONS {
+            break;
+        }
     }
     Ok(output)
 }
@@ -662,8 +782,7 @@ fn resnet_preprocess_tensor(
         width,
         height,
         0.0,
-    )
-    .map_err(Error::Config)?;
+    )?;
     let device = dg_core::CpuDevice::new();
     let output = Tensor::allocate(
         &device,
@@ -704,7 +823,7 @@ fn create_resnet_postprocess(node: &NodeSpec) -> Result<CreatedElement> {
 
 fn create_retinaface(node: &NodeSpec) -> Result<CreatedElement> {
     let config = parse_retinaface(node)?;
-    let anchors = generate_anchors(config.width, config.height, config.stride, &config.sizes);
+    let anchors = generate_anchors(config.width, config.height, config.stride, &config.sizes)?;
     Ok(CreatedElement {
         element: Box::new(Retinaface {
             width: config.width,
@@ -799,10 +918,25 @@ fn parse_resnet_postprocess(node: &NodeSpec) -> Result<ResnetPostprocess> {
     let params = params_object(node)?;
     reject_unknown_fields(params, RESNET_POSTPROCESS_FIELDS)?;
     let top_k = read_nonzero_usize(params, "top_k", 5)?;
+    if top_k > crate::math::MAX_TOP_K {
+        return Err(Error::ResourceLimit {
+            resource: "resnet_postprocess top_k".to_string(),
+            requested: top_k,
+            limit: crate::math::MAX_TOP_K,
+        });
+    }
     let labels = read_string_vec(params, "labels")?;
+    if labels.len() > MAX_LABELS {
+        return Err(Error::ResourceLimit {
+            resource: "resnet_postprocess labels".to_string(),
+            requested: labels.len(),
+            limit: MAX_LABELS,
+        });
+    }
     Ok(ResnetPostprocess { top_k, labels })
 }
 
+#[derive(Debug)]
 struct RetinafaceConfig {
     width: usize,
     height: usize,
@@ -826,16 +960,33 @@ fn parse_retinaface(node: &NodeSpec) -> Result<RetinafaceConfig> {
     } else {
         sizes
     };
+    if sizes.len() > MAX_ANCHOR_SIZES {
+        return Err(Error::ResourceLimit {
+            resource: "retinaface anchor_sizes".to_string(),
+            requested: sizes.len(),
+            limit: MAX_ANCHOR_SIZES,
+        });
+    }
     if sizes.iter().any(|size| *size <= 0.0) {
         return Err(Error::Config(
             "field anchor_sizes values must be greater than zero".to_string(),
         ));
     }
-    width
-        .div_ceil(stride)
-        .checked_mul(height.div_ceil(stride))
-        .and_then(|cells| cells.checked_mul(sizes.len()))
+    let cells_x = width.div_ceil(stride);
+    let cells_y = height.div_ceil(stride);
+    let cells = cells_x
+        .checked_mul(cells_y)
+        .ok_or_else(|| Error::Config("retinaface anchor cell count overflow".to_string()))?;
+    let anchor_count = cells
+        .checked_mul(sizes.len())
         .ok_or_else(|| Error::Config("retinaface anchor count overflow".to_string()))?;
+    if anchor_count > MAX_ANCHORS {
+        return Err(Error::ResourceLimit {
+            resource: "retinaface anchor count".to_string(),
+            requested: anchor_count,
+            limit: MAX_ANCHORS,
+        });
+    }
     Ok(RetinafaceConfig {
         width,
         height,
@@ -852,6 +1003,13 @@ fn parse_bytetrack(node: &NodeSpec) -> Result<(u32, f32)> {
     let max_lost = read_usize(params, "max_lost", 2)?
         .try_into()
         .map_err(|_| Error::Config("max_lost is out of range".to_string()))?;
+    if max_lost > MAX_MAX_LOST {
+        return Err(Error::ResourceLimit {
+            resource: "bytetrack max_lost".to_string(),
+            requested: max_lost as usize,
+            limit: MAX_MAX_LOST as usize,
+        });
+    }
     let match_threshold = read_probability(params, "match_iou", 0.3)?;
     Ok((max_lost, match_threshold))
 }
@@ -878,6 +1036,13 @@ fn parse_ppocr_rec(node: &NodeSpec) -> Result<(Vec<char>, usize)> {
             "field alphabet must not be empty".to_string(),
         ));
     }
+    if alphabet.len() > MAX_ALPHABET_LEN {
+        return Err(Error::ResourceLimit {
+            resource: "ppocr_rec alphabet length".to_string(),
+            requested: alphabet.len(),
+            limit: MAX_ALPHABET_LEN,
+        });
+    }
     let blank = read_usize(params, "blank_index", alphabet.len())?;
     if blank > alphabet.len() {
         return Err(Error::Config(format!(
@@ -900,6 +1065,11 @@ fn next_packet(io: &ElementIo) -> Result<Packet> {
 }
 
 fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
+    if !tensor.buffer().is_host_readable() {
+        return Err(Error::Core(CoreError::Unsupported(
+            "tensor buffer is not host-readable; staging required".to_string(),
+        )));
+    }
     match tensor.desc().dtype() {
         DataType::U8 => Ok(tensor
             .buffer()
@@ -915,19 +1085,30 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
 }
 
 fn f32_values(tensor: &Tensor) -> Result<Vec<f32>> {
+    if !tensor.buffer().is_host_readable() {
+        return Err(Error::Core(CoreError::Unsupported(
+            "tensor buffer is not host-readable; staging required".to_string(),
+        )));
+    }
     let bytes = tensor.buffer().read_bytes()?;
     let chunks = bytes.chunks_exact(std::mem::size_of::<f32>());
     if !chunks.remainder().is_empty() {
         return Err(Error::Runtime("f32 tensor has partial element".to_string()));
     }
-    chunks
+    let values: Vec<f32> = chunks
         .map(|chunk| {
             let bytes: [u8; 4] = chunk
                 .try_into()
                 .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
             Ok(f32::from_ne_bytes(bytes))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if !values.iter().all(|value| value.is_finite()) {
+        return Err(Error::Config(
+            "tensor contains non-finite floating point values".to_string(),
+        ));
+    }
+    Ok(values)
 }
 
 fn params_object(node: &NodeSpec) -> Result<&serde_json::Map<String, serde_json::Value>> {
@@ -1138,9 +1319,18 @@ mod tests {
 
     #[test]
     fn anchor_generation_and_retina_decode_are_bounded() {
-        let anchors = vec![BBox::new(0.5, 0.5, 0.25, 0.25)];
+        let anchors = generate_anchors(32, 32, 16, &[0.25]).expect("anchors");
+        assert_eq!(anchors.len(), 4);
         let values = vec![0.0; 15];
-        let faces = decode_retinaface(&values, &anchors, 32, 32, 0.4, 0.5).expect("decode");
+        let faces = decode_retinaface(
+            &values,
+            &[BBox::new(0.5, 0.5, 0.25, 0.25)],
+            32,
+            32,
+            0.4,
+            0.5,
+        )
+        .expect("decode");
         assert_eq!(faces.len(), 1);
         assert!((faces[0].bbox.x - 12.0).abs() < f32::EPSILON);
         assert!((faces[0].bbox.y - 12.0).abs() < f32::EPSILON);
@@ -1155,6 +1345,13 @@ mod tests {
     }
 
     #[test]
+    fn anchor_generation_rejects_excess() {
+        let sizes = (0..MAX_ANCHOR_SIZES + 1).map(|_| 0.1).collect::<Vec<_>>();
+        let err = generate_anchors(32, 32, 16, &sizes).expect_err("should exceed anchor sizes");
+        assert!(err.to_string().contains("anchor_sizes"));
+    }
+
+    #[test]
     fn bytetrack_keeps_ids_and_reclaims_expired_tracks() {
         let detection = Detection::new(BBox::new(0.0, 0.0, 10.0, 10.0), 0.9, 0);
         let mut tracker = ByteTrack {
@@ -1163,13 +1360,95 @@ mod tests {
             match_threshold: 0.3,
             tracks: Vec::new(),
         };
-        let first = tracker.update(std::slice::from_ref(&detection));
-        let second = tracker.update(std::slice::from_ref(&detection));
+        let first = tracker
+            .update(std::slice::from_ref(&detection))
+            .expect("update");
+        let second = tracker
+            .update(std::slice::from_ref(&detection))
+            .expect("update");
         assert_eq!(first[0].track_id, second[0].track_id);
         assert_eq!(second[0].state, TrackState::Tracked);
-        assert!(tracker.update(&[]).is_empty());
-        assert!(tracker.update(&[]).is_empty());
-        let replacement = tracker.update(std::slice::from_ref(&detection));
+        assert!(tracker.update(&[]).expect("empty").is_empty());
+        assert!(tracker.update(&[]).expect("empty").is_empty());
+        let replacement = tracker
+            .update(std::slice::from_ref(&detection))
+            .expect("update");
         assert_ne!(replacement[0].track_id, first[0].track_id);
+    }
+
+    #[test]
+    fn bytetrack_rejects_excess_detections() {
+        let detections = (0..MAX_DETECTIONS_PER_FRAME + 1)
+            .map(|index| Detection::new(BBox::new(index as f32, 0.0, 1.0, 1.0), 0.5, 0))
+            .collect::<Vec<_>>();
+        let mut tracker = ByteTrack {
+            next_id: 1,
+            max_lost: 100,
+            match_threshold: 0.0,
+            tracks: Vec::new(),
+        };
+        let err = tracker
+            .update(&detections)
+            .expect_err("should exceed detection limit");
+        assert!(err.to_string().contains("bytetrack detections"));
+    }
+
+    #[test]
+    fn bytetrack_caps_active_tracks() {
+        let mut tracker = ByteTrack {
+            next_id: 1,
+            max_lost: 100,
+            match_threshold: 1.1, // no matches possible
+            tracks: Vec::new(),
+        };
+        for index in 0..MAX_TRACKS + 5 {
+            let _ = tracker
+                .update(&[Detection::new(
+                    BBox::new(index as f32, 0.0, 1.0, 1.0),
+                    0.5,
+                    0,
+                )])
+                .expect("update");
+        }
+        assert!(tracker.tracks.len() <= MAX_TRACKS);
+    }
+
+    #[test]
+    fn ppocr_rec_rejects_oversized_alphabet() {
+        let alphabet = (0..MAX_ALPHABET_LEN + 1).map(|_| 'a').collect::<String>();
+        let node = NodeSpec {
+            name: "ppocr_rec".to_string(),
+            params: serde_json::json!({"alphabet": alphabet}),
+            ..Default::default()
+        };
+        let err = parse_ppocr_rec(&node).expect_err("should exceed alphabet limit");
+        assert!(err.to_string().contains("alphabet"));
+    }
+
+    #[test]
+    fn retinaface_rejects_oversized_anchors() {
+        let node = NodeSpec {
+            name: "retinaface".to_string(),
+            params: serde_json::json!({
+                "image_width": 64000,
+                "image_height": 64000,
+                "stride": 1,
+                "anchor_sizes": [0.1],
+            }),
+            ..Default::default()
+        };
+        let err = parse_retinaface(&node).expect_err("should exceed anchor limit");
+        assert!(err.to_string().contains("anchor count"));
+    }
+
+    #[test]
+    fn resnet_postprocess_rejects_oversized_top_k() {
+        let node = NodeSpec {
+            name: "resnet_postprocess".to_string(),
+            params: serde_json::json!({"top_k": crate::math::MAX_TOP_K + 1}),
+            ..Default::default()
+        };
+        let err = parse_resnet_postprocess(&node).expect_err("should exceed top_k limit");
+        assert!(err.to_string().contains("top_k"));
     }
 }

@@ -1,10 +1,10 @@
-use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
+use dg_core::{DataFormat, DataType, DeviceKind, Error as CoreError, Shape, Tensor, TensorDesc};
 use dg_graph::{
     CreatedElement, Element, ElementHandle, ElementIo, Error, NodeSpec, Packet, ParamField,
     ParamType, PortSchema, Result,
 };
 
-use crate::math::{nms, resize_letterbox, sigmoid, Letterbox};
+use crate::math::{nms_with_top_k, resize_letterbox, sigmoid, Letterbox, MAX_NMS_CANDIDATES};
 
 const PRE_INPUT: [PortSchema; 1] = [PortSchema {
     name: "in",
@@ -74,6 +74,8 @@ const POSTPROCESS_PARAMS: &[ParamField] = &[
     },
 ];
 
+const MAX_CLASS_COUNT: usize = 100_000;
+
 inventory::submit! {
     dg_graph::ElementDescriptor {
         kind: "yolo_preprocess",
@@ -101,6 +103,7 @@ struct Preprocess {
     target_height: usize,
 }
 
+#[derive(Debug)]
 struct Postprocess {
     target_width: f32,
     target_height: f32,
@@ -111,6 +114,13 @@ struct Postprocess {
 
 impl Element for Preprocess {
     fn run(self: Box<Self>, io: ElementIo) -> Result<()> {
+        let output_bytes = self
+            .target_width
+            .checked_mul(self.target_height)
+            .and_then(|pixels| pixels.checked_mul(3))
+            .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| Error::Config("yolo preprocess output bytes overflow".to_string()))?;
+        io.policy().check_tensor_bytes(output_bytes)?;
         loop {
             let packet = match io.recv("in")? {
                 Some(packet) => packet,
@@ -225,6 +235,13 @@ fn parse_postprocess(node: &NodeSpec) -> Result<Postprocess> {
     ensure_nonzero(input_width, "input_width")?;
     ensure_nonzero(input_height, "input_height")?;
     let class_count = read_nonzero_usize(params, "class_count", 1)?;
+    if class_count > MAX_CLASS_COUNT {
+        return Err(Error::ResourceLimit {
+            resource: "yolo class_count".to_string(),
+            requested: class_count,
+            limit: MAX_CLASS_COUNT,
+        });
+    }
     class_count
         .checked_add(5)
         .ok_or_else(|| Error::Config("class_count is too large".to_string()))?;
@@ -294,8 +311,7 @@ fn preprocess_tensor(
         target_width,
         target_height,
         0.0,
-    )
-    .map_err(Error::Config)?;
+    )?;
     let device = dg_core::CpuDevice::new();
     let output_desc = TensorDesc::new(
         Shape::new([1, channels, target_height, target_width]),
@@ -355,6 +371,9 @@ fn decode_detections(
     };
     let mut detections = Vec::new();
     for row in values.chunks_exact(attributes) {
+        if !row.iter().all(|value| value.is_finite()) {
+            continue;
+        }
         let objectness = sigmoid(row[4]);
         let (class_id, class_logit) = row[5..]
             .iter()
@@ -363,7 +382,7 @@ fn decode_detections(
             .max_by(|left, right| left.1.total_cmp(&right.1))
             .ok_or_else(|| Error::Runtime("yolo class scores are empty".to_string()))?;
         let score = objectness * sigmoid(class_logit);
-        if score < confidence_threshold {
+        if score < confidence_threshold || !score.is_finite() {
             continue;
         }
         let width = row[2].exp().clamp(0.0, 2.0) * target_width;
@@ -382,10 +401,15 @@ fn decode_detections(
             class_id,
         ));
     }
-    Ok(nms(&detections, nms_threshold))
+    nms_with_top_k(&detections, nms_threshold, MAX_NMS_CANDIDATES)
 }
 
 fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
+    if !tensor.buffer().is_host_readable() {
+        return Err(Error::Core(CoreError::Unsupported(
+            "tensor buffer is not host-readable; staging required".to_string(),
+        )));
+    }
     let bytes = tensor.buffer().read_bytes()?;
     match tensor.desc().dtype() {
         DataType::U8 => Ok(bytes.into_iter().map(f32::from).collect()),
@@ -396,14 +420,20 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
                     "f32 tensor contains a partial element".to_string(),
                 ));
             }
-            chunks
+            let values: Vec<f32> = chunks
                 .map(|chunk| {
                     let array: [u8; 4] = chunk
                         .try_into()
                         .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
                     Ok(f32::from_ne_bytes(array))
                 })
-                .collect()
+                .collect::<Result<Vec<_>>>()?;
+            if !values.iter().all(|value| value.is_finite()) {
+                return Err(Error::Config(
+                    "tensor contains non-finite floating point values".to_string(),
+                ));
+            }
+            Ok(values)
         }
         dtype => Err(Error::Config(format!(
             "yolo elements support only u8/f32 tensors, got {dtype:?}"
@@ -529,4 +559,55 @@ fn f32_to_usize(value: f32) -> Result<usize> {
         .to_string()
         .parse::<usize>()
         .map_err(|_| Error::Runtime("yolo dimension metadata is out of range".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use serde_json::{Map, Value};
+
+    fn node_with_params(params: Map<String, Value>) -> NodeSpec {
+        NodeSpec {
+            name: "yolo".to_string(),
+            params: Value::Object(params),
+            ..Default::default()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn parse_postprocess_respects_class_count_and_threshold_bounds(
+            width in 1usize..1024,
+            height in 1usize..1024,
+            class_count in 1usize..120_000,
+            confidence in prop_oneof![
+                -1.0f64..1.0,
+                0.0f64..=1.0,
+                1.0f64..2.0,
+            ],
+            nms in prop_oneof![
+                -1.0f64..1.0,
+                0.0f64..=1.0,
+                1.0f64..2.0,
+            ],
+        ) {
+            let mut params = Map::new();
+            params.insert("input_width".to_string(), Value::from(width));
+            params.insert("input_height".to_string(), Value::from(height));
+            params.insert("class_count".to_string(), Value::from(class_count));
+            params.insert("confidence_threshold".to_string(), Value::from(confidence));
+            params.insert("nms_threshold".to_string(), Value::from(nms));
+            let result = parse_postprocess(&node_with_params(params));
+            if class_count > MAX_CLASS_COUNT {
+                prop_assert!(result.is_err());
+                prop_assert!(result.unwrap_err().to_string().contains("class_count"));
+            } else if !(0.0..=1.0).contains(&confidence) || !(0.0..=1.0).contains(&nms) {
+                prop_assert!(result.is_err());
+                prop_assert!(result.unwrap_err().to_string().contains("between 0 and 1"));
+            } else {
+                prop_assert!(result.is_ok());
+            }
+        }
+    }
 }
