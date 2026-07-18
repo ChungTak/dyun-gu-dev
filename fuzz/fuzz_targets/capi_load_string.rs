@@ -24,9 +24,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     for format in [
-        DgGraphFormat::Yaml,
-        DgGraphFormat::Json,
-        DgGraphFormat::Toml,
+        DgGraphFormat::Yaml as i32,
+        DgGraphFormat::Json as i32,
+        DgGraphFormat::Toml as i32,
     ] {
         // SAFETY: `engine` is a handle returned by `dg_engine_create`, and
         // `content` is a valid NUL-terminated C string.
