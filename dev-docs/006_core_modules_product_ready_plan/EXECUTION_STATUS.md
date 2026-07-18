@@ -17,7 +17,7 @@
 | ID | 状态 | PR/Commit | Evidence | Blocker |
 |---|---|---|---|---|
 | CORE6-01 | Done | PR #14 | `ADMISSION_BASELINE.md`, `CORE_RISK_REGISTER.md`, `crates/dg-core/tests/core6_baseline.rs`, `crates/dg-graph/tests/core6_baseline.rs`; CI 15/15 green | - |
-| CORE6-02 | In Progress | `devin/1784344499-core6-02-resource-policy` | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs` | 待 PR 创建/CI 通过后 Done |
+| CORE6-02 | Done | PR #15 | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs`; CI 15/15 green | - |
 | CORE6-03 | Not Started | - | - | 依赖 CORE6-02 |
 | CORE6-04 | Not Started | - | - | 依赖 policy/metrics snapshot 设计 |
 | CORE6-05 | Not Started | - | - | 依赖 CORE6-02/04 |
