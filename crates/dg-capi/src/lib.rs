@@ -1450,6 +1450,12 @@ pub unsafe extern "C" fn dg_engine_load_string(
         spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before loading a new spec".to_string(),
+            ));
+        }
         engine.spec = spec;
         engine.invalidate();
         Ok(())
@@ -1477,6 +1483,12 @@ pub unsafe extern "C" fn dg_engine_load_file(
         spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before loading a new spec".to_string(),
+            ));
+        }
         engine.spec = spec;
         engine.invalidate();
         Ok(())
@@ -1700,6 +1712,12 @@ pub unsafe extern "C" fn dg_engine_remove_node(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before removing nodes".to_string(),
+            ));
+        }
         engine.spec.nodes.retain(|node| node.name != name);
         engine.spec.connections.retain(|connection| {
             dg_graph::ConnectionSpec::parse(connection)
@@ -1730,6 +1748,12 @@ pub unsafe extern "C" fn dg_engine_connect(
         dg_graph::ConnectionSpec::parse(connection).map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before modifying connections".to_string(),
+            ));
+        }
         engine.spec.connections.push(connection.to_string());
         engine.invalidate();
         Ok(())
@@ -1755,6 +1779,12 @@ pub unsafe extern "C" fn dg_engine_disconnect(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before modifying connections".to_string(),
+            ));
+        }
         engine.spec.connections.retain(|item| item != connection);
         engine.invalidate();
         Ok(())
@@ -1776,6 +1806,12 @@ pub unsafe extern "C" fn dg_engine_build(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before building".to_string(),
+            ));
+        }
         engine.spec.validate().map_err(map_graph_error)?;
         engine.graph = Some(Graph::new(engine.spec.clone()).map_err(map_graph_error)?);
         engine.outputs.clear();
@@ -2842,6 +2878,71 @@ connections:
             DgStatus::Again
         );
         assert!(output.is_null());
+
+        unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn graph_modifications_while_running_are_rejected() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let new_spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    new_spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::RuntimeError
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::RuntimeError
+        );
+
+        let connection = CString::new("input.out -> sink.in").expect("valid connection");
+        assert_eq!(
+            unsafe { dg_engine_connect(engine, connection.as_ptr(), ptr::null_mut()) },
+            DgStatus::RuntimeError
+        );
+        assert_eq!(
+            unsafe { dg_engine_disconnect(engine, connection.as_ptr(), ptr::null_mut()) },
+            DgStatus::RuntimeError
+        );
+
+        let sink = CString::new("sink").expect("valid name");
+        assert_eq!(
+            unsafe { dg_engine_remove_node(engine, sink.as_ptr(), ptr::null_mut()) },
+            DgStatus::RuntimeError
+        );
 
         unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) };
         unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
