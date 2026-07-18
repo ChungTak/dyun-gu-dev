@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
-use std::sync::{Mutex, Once, RwLock};
+use std::sync::{Arc, Mutex, Once, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
@@ -293,6 +293,16 @@ pub struct DgEngine {
     /// Shared lock: writers for load/build/reload/run/shutdown; readers for
     /// stop/status/metrics (INT5-09 concurrent observability).
     inner: RwLock<Engine>,
+}
+
+/// Clones the `Arc` backing a `DgEngine` pointer without consuming the pointer.
+///
+/// SAFETY: `ptr` must have been returned by `dg_engine_create` and not yet freed.
+unsafe fn clone_engine_arc(ptr: *const DgEngine) -> Arc<DgEngine> {
+    let arc = unsafe { Arc::from_raw(ptr) };
+    let clone = arc.clone();
+    std::mem::forget(arc);
+    clone
 }
 
 /// Runtime bootstrap options for [`dg_runtime_init`].
@@ -1422,10 +1432,9 @@ pub unsafe extern "C" fn dg_engine_create(
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     ffi_result_with_out(out, out_error, || {
-        let handle = Box::new(DgEngine {
+        Ok(Arc::into_raw(Arc::new(DgEngine {
             inner: RwLock::new(Engine::new()),
-        });
-        Ok(Box::into_raw(handle))
+        })) as *mut DgEngine)
     })
 }
 
@@ -1451,8 +1460,8 @@ pub unsafe extern "C" fn dg_engine_destroy(
             return DgStatus::Ok;
         }
         // SAFETY: `engine` is a valid handle returned by `dg_engine_create`.
-        let engine_ref = unsafe { &*engine };
-        let mut guard = match lock_engine_write(engine_ref) {
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut guard = match lock_engine_write(&engine_arc) {
             Ok(guard) => guard,
             Err((status, message)) => {
                 write_error(out_error, status, message);
@@ -1462,8 +1471,9 @@ pub unsafe extern "C" fn dg_engine_destroy(
         match guard.shutdown(timeout_ms) {
             Ok(()) => {
                 drop(guard);
-                // SAFETY: no outstanding borrows; the handle was created by `dg_engine_create`.
-                unsafe { drop(Box::from_raw(engine)) };
+                // Reclaim the handle's owning `Arc` reference. Concurrent calls that
+                // cloned the `Arc` keep the engine alive until they finish.
+                unsafe { drop(Arc::from_raw(engine as *const DgEngine)) };
                 DgStatus::Ok
             }
             Err(dg_graph::Error::Timeout(_)) => {
@@ -1479,8 +1489,8 @@ pub unsafe extern "C" fn dg_engine_destroy(
                 let (status, message) = map_graph_error(error);
                 drop(guard);
                 write_error(out_error, status, message);
-                // SAFETY: the running graph has already stopped; the handle can be freed.
-                unsafe { drop(Box::from_raw(engine)) };
+                // The running graph has already stopped; reclaim the owning reference.
+                unsafe { drop(Arc::from_raw(engine as *const DgEngine)) };
                 status
             }
         }
@@ -1515,8 +1525,8 @@ pub unsafe extern "C" fn dg_engine_load_string(
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1548,8 +1558,8 @@ pub unsafe extern "C" fn dg_engine_load_file(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1586,8 +1596,8 @@ pub unsafe extern "C" fn dg_engine_reload_string(
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         engine.reload(spec).map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -1615,8 +1625,8 @@ pub unsafe extern "C" fn dg_engine_reload_file(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         engine.reload(spec).map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -1655,8 +1665,8 @@ pub unsafe extern "C" fn dg_engine_diff_string(
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let engine = lock_engine_write(&engine_arc)?;
         let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
@@ -1699,8 +1709,8 @@ pub unsafe extern "C" fn dg_engine_diff_file(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let engine = lock_engine_write(&engine_arc)?;
         let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
@@ -1746,8 +1756,8 @@ pub unsafe extern "C" fn dg_engine_add_node(
             serde_json::from_str(params)
                 .map_err(|error| (DgStatus::ParseError, error.to_string()))?
         };
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1783,8 +1793,8 @@ pub unsafe extern "C" fn dg_engine_remove_node(
         let name = unsafe { c_string(name)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1819,8 +1829,8 @@ pub unsafe extern "C" fn dg_engine_connect(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         dg_graph::ConnectionSpec::parse(connection).map_err(map_graph_error)?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1850,8 +1860,8 @@ pub unsafe extern "C" fn dg_engine_disconnect(
         let connection = unsafe { c_string(connection)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1877,8 +1887,8 @@ pub unsafe extern "C" fn dg_engine_build(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
             return Err((
                 DgStatus::RuntimeError,
@@ -1905,8 +1915,8 @@ pub unsafe extern "C" fn dg_engine_run(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         engine.run().map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -1925,8 +1935,8 @@ pub unsafe extern "C" fn dg_engine_init(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         engine.init().map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -1945,8 +1955,8 @@ pub unsafe extern "C" fn dg_engine_stop(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let engine = lock_engine_read(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let engine = lock_engine_read(&engine_arc)?;
         engine.stop().map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -1966,8 +1976,8 @@ pub unsafe extern "C" fn dg_engine_shutdown(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         engine.shutdown(timeout_ms).map_err(map_graph_error)?;
         Ok(())
     }) {
@@ -2007,8 +2017,8 @@ pub unsafe extern "C" fn dg_engine_status(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let engine = lock_engine_read(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let engine = lock_engine_read(&engine_arc)?;
         Ok(engine.status())
     })) {
         Ok(Ok((status, cause))) => {
@@ -2052,8 +2062,8 @@ pub unsafe extern "C" fn dg_engine_metrics(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let engine_handle = unsafe { &*engine };
-        let engine = lock_engine_read(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let engine = lock_engine_read(&engine_arc)?;
         let json = engine.metrics_json().map_err(map_graph_error)?;
         Ok(Box::into_raw(Box::new(DgOwnedBytes::new(
             json.into_bytes(),
@@ -2397,8 +2407,8 @@ pub unsafe extern "C" fn dg_engine_push(
                 "engine or tensor pointer is null".to_string(),
             ));
         }
-        let engine_handle = unsafe { &*engine };
-        let mut engine = lock_engine_write(engine_handle)?;
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let mut engine = lock_engine_write(&engine_arc)?;
         let tensor = unsafe { &*tensor };
         engine
             .push(tensor.tensor.clone())
@@ -2439,8 +2449,8 @@ pub unsafe extern "C" fn dg_engine_poll(
         if engine.is_null() {
             return PollResult::Error(DgStatus::NullPointer, "engine pointer is null".to_string());
         }
-        let engine_handle = unsafe { &*engine };
-        match lock_engine_write(engine_handle) {
+        let engine_arc = unsafe { clone_engine_arc(engine) };
+        let result = match lock_engine_write(&engine_arc) {
             Ok(mut engine) => match engine.poll_output() {
                 Ok(Some(tensor)) => {
                     PollResult::Tensor(Box::into_raw(Box::new(DgTensor { tensor })) as usize)
@@ -2452,7 +2462,11 @@ pub unsafe extern "C" fn dg_engine_poll(
                 }
             },
             Err((status, message)) => PollResult::Error(status, message),
-        }
+        };
+        // Drop `engine_arc` before returning so the `RwLockWriteGuard` inside the
+        // match arms does not outlive the cloned `Arc` reference.
+        drop(engine_arc);
+        result
     })) {
         Ok(PollResult::Tensor(tensor)) => {
             // SAFETY: `out` was checked non-null above and `tensor` came from `Box::into_raw`.
