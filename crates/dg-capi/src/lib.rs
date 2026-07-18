@@ -896,14 +896,14 @@ fn write_diff_counts(
     out_added_connections: *mut usize,
     out_removed_connections: *mut usize,
 ) -> Result<(), (DgStatus, String)> {
-    validate_diff_outputs(
+    prepare_diff_outputs(
         out_added_nodes,
         out_removed_nodes,
         out_updated_nodes,
         out_added_connections,
         out_removed_connections,
     )?;
-    // SAFETY: all output pointers were checked non-null by `validate_diff_outputs`.
+    // SAFETY: all output pointers were checked non-null and zeroed by `prepare_diff_outputs`.
     unsafe {
         out_added_nodes.write(diff.added_nodes.len());
         out_removed_nodes.write(diff.removed_nodes.len());
@@ -914,7 +914,7 @@ fn write_diff_counts(
     Ok(())
 }
 
-fn validate_diff_outputs(
+fn prepare_diff_outputs(
     out_added_nodes: *mut usize,
     out_removed_nodes: *mut usize,
     out_updated_nodes: *mut usize,
@@ -931,6 +931,14 @@ fn validate_diff_outputs(
             DgStatus::NullPointer,
             "diff output pointer is null".to_string(),
         ));
+    }
+    // SAFETY: all pointers were just checked non-null.
+    unsafe {
+        out_added_nodes.write(0);
+        out_removed_nodes.write(0);
+        out_updated_nodes.write(0);
+        out_added_connections.write(0);
+        out_removed_connections.write(0);
     }
     Ok(())
 }
@@ -1554,7 +1562,7 @@ pub unsafe extern "C" fn dg_engine_diff_string(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        validate_diff_outputs(
+        prepare_diff_outputs(
             out_added_nodes,
             out_removed_nodes,
             out_updated_nodes,
@@ -1600,7 +1608,7 @@ pub unsafe extern "C" fn dg_engine_diff_file(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        validate_diff_outputs(
+        prepare_diff_outputs(
             out_added_nodes,
             out_removed_nodes,
             out_updated_nodes,
