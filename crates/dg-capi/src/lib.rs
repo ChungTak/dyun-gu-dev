@@ -576,7 +576,7 @@ impl Engine {
 
     fn reload(&mut self, spec: GraphSpec) -> dg_graph::Result<GraphDiff> {
         if !self.pending_inputs.is_empty() {
-            return Err(dg_graph::Error::Runtime(
+            return Err(dg_graph::Error::InvalidState(
                 "cannot reload while inputs are pending; run them before reloading".to_string(),
             ));
         }
@@ -607,7 +607,7 @@ impl Engine {
         Ok(diff)
     }
 
-    fn input_node_name(&self) -> Result<String, String> {
+    fn input_node_name(&self) -> dg_graph::Result<String> {
         let mut names = self
             .spec
             .nodes
@@ -616,19 +616,23 @@ impl Engine {
             .map(|node| node.name.clone());
         match (names.next(), names.next()) {
             (Some(name), None) => Ok(name),
-            _ => Err("graph must contain exactly one input node".to_string()),
+            _ => Err(dg_graph::Error::InvalidState(
+                "graph must contain exactly one input node".to_string(),
+            )),
         }
     }
 
-    fn push(&mut self, tensor: Tensor) -> Result<(), String> {
+    fn push(&mut self, tensor: Tensor) -> dg_graph::Result<()> {
         if self.running.is_some() {
-            return Err(
+            return Err(dg_graph::Error::InvalidState(
                 "cannot push inputs while graph is running; use run for one-shot execution"
                     .to_string(),
-            );
+            ));
         }
         if self.graph.is_none() {
-            return Err("engine must be built before pushing input".to_string());
+            return Err(dg_graph::Error::NotBuilt(
+                "engine must be built before pushing input".to_string(),
+            ));
         }
         let input_name = self.input_node_name()?;
         self.pending_inputs
@@ -638,24 +642,22 @@ impl Engine {
         Ok(())
     }
 
-    fn run(&mut self) -> Result<(), String> {
+    fn run(&mut self) -> dg_graph::Result<()> {
         if self.running.is_some() {
-            return Err(
+            return Err(dg_graph::Error::InvalidState(
                 "cannot run one-shot execution while graph is running; shutdown first".to_string(),
-            );
+            ));
         }
         let graph = self
             .graph
             .as_ref()
-            .ok_or_else(|| "engine must be built first".to_string())?;
+            .ok_or_else(|| dg_graph::Error::NotBuilt("engine must be built first".to_string()))?;
         let inputs: HashMap<String, Vec<Tensor>> = self
             .pending_inputs
             .iter()
             .map(|(name, tensors)| (name.clone(), tensors.clone()))
             .collect();
-        let report = graph
-            .run_with_inputs(inputs)
-            .map_err(|error| error.to_string())?;
+        let report = graph.run_with_inputs(inputs)?;
         self.pending_inputs.clear();
         for tensors in report.sinks.into_values() {
             self.outputs.extend(tensors);
@@ -663,42 +665,37 @@ impl Engine {
         Ok(())
     }
 
-    fn init(&mut self) -> Result<(), String> {
+    fn init(&mut self) -> dg_graph::Result<()> {
         if self.running.is_some() {
-            return Err("engine is already running".to_string());
+            return Err(dg_graph::Error::InvalidState(
+                "engine is already running".to_string(),
+            ));
         }
         if self.graph.is_none() {
-            self.spec.validate().map_err(|error| error.to_string())?;
-            self.graph = Some(Graph::new(self.spec.clone()).map_err(|error| error.to_string())?);
+            self.spec.validate()?;
+            self.graph = Some(Graph::new(self.spec.clone())?);
         }
         let graph = self
             .graph
             .as_ref()
-            .ok_or_else(|| "engine must be built first".to_string())?;
-        self.running = Some(
-            graph
-                .start(HashMap::new())
-                .map_err(|error| error.to_string())?,
-        );
+            .ok_or_else(|| dg_graph::Error::NotBuilt("engine must be built first".to_string()))?;
+        self.running = Some(graph.start(HashMap::new())?);
         Ok(())
     }
 
-    fn stop(&self) -> Result<(), String> {
-        let running = self
-            .running
-            .as_ref()
-            .ok_or_else(|| "engine is not running".to_string())?;
+    fn stop(&self) -> dg_graph::Result<()> {
+        let running = self.running.as_ref().ok_or(dg_graph::Error::NotRunning)?;
         running.request_stop();
         Ok(())
     }
 
-    fn shutdown(&mut self, timeout_ms: u64) -> Result<(), String> {
+    fn shutdown(&mut self, timeout_ms: u64) -> dg_graph::Result<()> {
         let timeout = std::time::Duration::from_millis(timeout_ms);
         if let Some(mut running) = self.running.take() {
             if let Err(error) = running.shutdown(timeout) {
                 // Timeout keeps the running graph valid so the caller can retry.
                 self.running = Some(running);
-                return Err(error.to_string());
+                return Err(error);
             }
         }
         // No running graph or shutdown completed; the built graph is kept so
@@ -716,20 +713,23 @@ impl Engine {
         }
     }
 
-    fn metrics_json(&self) -> Result<String, String> {
-        let running = self
-            .running
-            .as_ref()
-            .ok_or_else(|| "engine is not running".to_string())?;
+    fn metrics_json(&self) -> dg_graph::Result<String> {
+        let running = self.running.as_ref().ok_or(dg_graph::Error::NotRunning)?;
         let metrics = running.metrics_snapshot();
-        serde_json::to_string(&MetricsPayload { metrics }).map_err(|error| error.to_string())
+        Ok(serde_json::to_string(&MetricsPayload {
+            schema_version: METRICS_SCHEMA_VERSION,
+            metrics,
+        })?)
     }
 }
 
 #[derive(serde::Serialize)]
 struct MetricsPayload {
+    schema_version: u32,
     metrics: BTreeMap<String, ElementMetricsSnapshot>,
 }
+
+const METRICS_SCHEMA_VERSION: u32 = 1;
 
 fn graph_status_to_c(status: GraphStatus) -> DgGraphStatus {
     match status {
@@ -822,14 +822,55 @@ fn ffi_result_with_out<T: Copy>(
     }
 }
 
-fn graph_error(error: impl std::fmt::Display) -> (DgStatus, String) {
-    (DgStatus::ParseError, error.to_string())
+fn map_core_error(error: &dg_core::Error) -> DgStatus {
+    use dg_core::Error as E;
+    match error {
+        E::InvalidArgument(_) | E::Config(_) => DgStatus::InvalidArgument,
+        E::Unsupported(_) | E::UnsupportedDevice(_) => DgStatus::Unsupported,
+        E::Timeout(_) | E::Busy(_) => DgStatus::Busy,
+        E::OutOfMemory
+        | E::Io(_)
+        | E::Device(_)
+        | E::Backend(_)
+        | E::Media(_)
+        | E::Shape(_)
+        | E::Quantization(_)
+        | E::Tensor(_)
+        | E::Buffer(_)
+        | E::Stream(_)
+        | E::Event(_) => DgStatus::RuntimeError,
+        E::Cancelled => DgStatus::RuntimeError,
+        E::Closed => DgStatus::InvalidHandle,
+        E::Protocol(_) | E::Auth(_) | E::RemoteClosed(_) => DgStatus::RuntimeError,
+        E::Invariant(_) | E::Internal(_) => DgStatus::InternalError,
+    }
 }
 
-fn reload_error(error: dg_graph::Error) -> (DgStatus, String) {
-    let status = match error {
-        dg_graph::Error::Runtime(_) | dg_graph::Error::NotRunning => DgStatus::RuntimeError,
-        _ => DgStatus::ParseError,
+fn map_graph_error(error: dg_graph::Error) -> (DgStatus, String) {
+    use dg_graph::Error as E;
+    let status = match &error {
+        E::Config(_)
+        | E::Validation { .. }
+        | E::UnknownFormat(_)
+        | E::UnknownNodeKind(_)
+        | E::UnknownPort { .. }
+        | E::PortTypeMismatch { .. }
+        | E::DuplicateNode(_)
+        | E::CycleDetected
+        | E::Json(_)
+        | E::Yaml(_)
+        | E::TomlDe(_)
+        | E::TomlSer(_) => DgStatus::ParseError,
+        E::Element { .. } | E::Runtime(_) | E::Io(_) | E::RuntimeBackend(_) => {
+            DgStatus::RuntimeError
+        }
+        E::NotRunning | E::InvalidState(_) => DgStatus::RuntimeError,
+        E::NotBuilt(_) => DgStatus::NotBuilt,
+        E::ResourceLimit { .. } => DgStatus::RuntimeError,
+        E::Timeout(_) | E::Busy(_) => DgStatus::Busy,
+        E::Cancelled => DgStatus::RuntimeError,
+        E::Invariant(_) => DgStatus::InternalError,
+        E::Core(core) => map_core_error(core),
     };
     (status, error.to_string())
 }
@@ -1355,13 +1396,7 @@ pub unsafe extern "C" fn dg_engine_destroy(
             // SAFETY: `engine` is a valid handle returned by `dg_engine_create`.
             let engine_ref = unsafe { &*engine };
             let mut guard = lock_engine_write(engine_ref)?;
-            guard.shutdown(timeout_ms).map_err(|message| {
-                if message.contains("timed out") {
-                    (DgStatus::Busy, message)
-                } else {
-                    (DgStatus::RuntimeError, message)
-                }
-            })?;
+            guard.shutdown(timeout_ms).map_err(map_graph_error)?;
             drop(guard);
         }
         // SAFETY: no outstanding borrows; the handle was created by `dg_engine_create`.
@@ -1389,8 +1424,8 @@ pub unsafe extern "C" fn dg_engine_load_string(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
-            .map_err(graph_error)?;
-        spec.validate().map_err(graph_error)?;
+            .map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
         engine.spec = spec;
@@ -1416,8 +1451,8 @@ pub unsafe extern "C" fn dg_engine_load_file(
         let path = unsafe { c_string(path)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
-        spec.validate().map_err(graph_error)?;
+        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
         engine.spec = spec;
@@ -1448,11 +1483,11 @@ pub unsafe extern "C" fn dg_engine_reload_string(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
-            .map_err(graph_error)?;
-        spec.validate().map_err(graph_error)?;
+            .map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine.reload(spec).map_err(reload_error)?;
+        engine.reload(spec).map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1477,11 +1512,11 @@ pub unsafe extern "C" fn dg_engine_reload_file(
         let path = unsafe { c_string(path)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
-        spec.validate().map_err(graph_error)?;
+        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine.reload(spec).map_err(reload_error)?;
+        engine.reload(spec).map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1517,8 +1552,8 @@ pub unsafe extern "C" fn dg_engine_diff_string(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
-            .map_err(graph_error)?;
-        spec.validate().map_err(graph_error)?;
+            .map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_write(engine_handle)?;
         let diff = Graph::diff(&engine.spec, &spec);
@@ -1562,7 +1597,7 @@ pub unsafe extern "C" fn dg_engine_diff_file(
         let path = unsafe { c_string(path)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(graph_error)?;
+        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_write(engine_handle)?;
         let diff = Graph::diff(&engine.spec, &spec);
@@ -1670,7 +1705,7 @@ pub unsafe extern "C" fn dg_engine_connect(
         let connection = unsafe { c_string(connection)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        dg_graph::ConnectionSpec::parse(connection).map_err(graph_error)?;
+        dg_graph::ConnectionSpec::parse(connection).map_err(map_graph_error)?;
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
         engine.spec.connections.push(connection.to_string());
@@ -1719,8 +1754,8 @@ pub unsafe extern "C" fn dg_engine_build(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine.spec.validate().map_err(graph_error)?;
-        engine.graph = Some(Graph::new(engine.spec.clone()).map_err(graph_error)?);
+        engine.spec.validate().map_err(map_graph_error)?;
+        engine.graph = Some(Graph::new(engine.spec.clone()).map_err(map_graph_error)?);
         engine.outputs.clear();
         Ok(())
     }) {
@@ -1741,13 +1776,7 @@ pub unsafe extern "C" fn dg_engine_run(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine.run().map_err(|message| {
-            if message.contains("built") {
-                (DgStatus::NotBuilt, message)
-            } else {
-                (DgStatus::RuntimeError, message)
-            }
-        })?;
+        engine.run().map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1767,9 +1796,7 @@ pub unsafe extern "C" fn dg_engine_init(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine
-            .init()
-            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        engine.init().map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1789,9 +1816,7 @@ pub unsafe extern "C" fn dg_engine_stop(
         }
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_read(engine_handle)?;
-        engine
-            .stop()
-            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        engine.stop().map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1812,13 +1837,7 @@ pub unsafe extern "C" fn dg_engine_shutdown(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine.shutdown(timeout_ms).map_err(|message| {
-            if message.contains("timed out") {
-                (DgStatus::Busy, message)
-            } else {
-                (DgStatus::RuntimeError, message)
-            }
-        })?;
+        engine.shutdown(timeout_ms).map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1874,9 +1893,7 @@ pub unsafe extern "C" fn dg_engine_metrics(
         }
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_read(engine_handle)?;
-        let json = engine
-            .metrics_json()
-            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        let json = engine.metrics_json().map_err(map_graph_error)?;
         Ok(Box::into_raw(Box::new(DgOwnedBytes::new(
             json.into_bytes(),
         ))))
@@ -2250,15 +2267,9 @@ pub unsafe extern "C" fn dg_engine_push(
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
         let tensor = unsafe { &*tensor };
-        engine.push(tensor.tensor.clone()).map_err(|message| {
-            if message.contains("input node") {
-                (DgStatus::Unsupported, message)
-            } else if message.contains("built") {
-                (DgStatus::NotBuilt, message)
-            } else {
-                (DgStatus::RuntimeError, message)
-            }
-        })?;
+        engine
+            .push(tensor.tensor.clone())
+            .map_err(map_graph_error)?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -3148,6 +3159,103 @@ connections: []
 
         assert_eq!(
             unsafe { dg_engine_destroy(engine, 0, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+    }
+
+    #[test]
+    fn engine_run_and_status_without_build_returns_not_built() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let mut status = DgGraphStatus::NotRunning;
+        let mut cause: *mut DgOwnedBytes = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_status(engine, &mut status, &mut cause, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(status, DgGraphStatus::NotRunning);
+        assert!(cause.is_null());
+
+        assert_eq!(
+            unsafe { dg_engine_run(engine, ptr::null_mut()) },
+            DgStatus::NotBuilt
+        );
+
+        assert_eq!(
+            unsafe { dg_engine_destroy(engine, 0, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+    }
+
+    #[test]
+    fn engine_shutdown_timeout_returns_busy_when_graph_cannot_stop() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let spec = CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 1000000
+      shape: [1, 4]
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#,
+        )
+        .expect("valid graph spec");
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        // A zero-millisecond timeout should not be enough for a long-running graph.
+        let mut error = ptr::null_mut();
+        let status = unsafe { dg_engine_shutdown(engine, 0, &mut error) };
+        assert_eq!(status, DgStatus::Busy, "zero timeout should be busy");
+        assert!(!error.is_null());
+        unsafe { dg_error_free(error) };
+
+        // Retrying with a generous timeout should eventually succeed.
+        assert_eq!(
+            unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        assert_eq!(
+            unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) },
             DgStatus::Ok
         );
     }

@@ -303,6 +303,7 @@ fn run_graph_with_watch(
         reload_attempts_total: 0,
         reload_success_total: 0,
         reload_rejected_total: 0,
+        supervisor_healthy: true,
     }));
     let mut ops_handle: Option<ops::OpsHandle> = ops_bind
         .as_deref()

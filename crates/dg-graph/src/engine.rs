@@ -571,14 +571,14 @@ impl RunningGraph {
         self.request_stop();
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| Error::Runtime("shutdown timeout overflowed".to_string()))?;
+            .ok_or_else(|| Error::Timeout("shutdown timeout overflowed".to_string()))?;
         let mut first_error = None;
         for (name, node) in self.workers.iter_mut() {
             while let Some(worker) = node.workers.pop() {
                 while !worker.is_finished() {
                     if Instant::now() >= deadline {
                         node.workers.push(worker);
-                        return Err(Error::Runtime("shutdown timed out".to_string()));
+                        return Err(Error::Timeout("shutdown timed out".to_string()));
                     }
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -1082,19 +1082,19 @@ impl RunningGraph {
     ) -> Result<()> {
         let deadline = Instant::now()
             .checked_add(timeout)
-            .ok_or_else(|| Error::Runtime("drain deadline overflowed".to_string()))?;
+            .ok_or_else(|| Error::Timeout("drain deadline overflowed".to_string()))?;
         for (old_receiver, sender, upstream_stays_live) in drain_routes {
             loop {
                 if self.stop.load(Ordering::Relaxed) {
                     return Err(Error::NotRunning);
                 }
                 if Instant::now() >= deadline {
-                    return Err(Error::Runtime("drain route timed out".to_string()));
+                    return Err(Error::Timeout("drain route timed out".to_string()));
                 }
                 let packet = {
                     let receiver = old_receiver
                         .lock()
-                        .map_err(|_| Error::Runtime("drain route lock poisoned".to_string()))?;
+                        .map_err(|_| Error::Invariant("drain route lock poisoned".to_string()))?;
                     if upstream_stays_live {
                         receiver.recv_timeout(Duration::from_millis(1))
                     } else {
@@ -1122,7 +1122,7 @@ impl RunningGraph {
                                         return Err(Error::NotRunning);
                                     }
                                     if Instant::now() >= deadline {
-                                        return Err(Error::Runtime(
+                                        return Err(Error::Timeout(
                                             "drain route timed out".to_string(),
                                         ));
                                     }
@@ -1146,7 +1146,7 @@ impl RunningGraph {
                             return Err(Error::NotRunning);
                         }
                         if Instant::now() >= deadline {
-                            return Err(Error::Runtime("drain route timed out".to_string()));
+                            return Err(Error::Timeout("drain route timed out".to_string()));
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,

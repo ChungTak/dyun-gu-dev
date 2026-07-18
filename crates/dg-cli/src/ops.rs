@@ -9,6 +9,10 @@ use dg_graph::{ElementMetricsSnapshot, GraphStatus};
 use tiny_http::{Method, Request, Response, Server, StatusCode};
 use tracing::{info, warn};
 
+/// Prometheus/OpenMetrics exposition schema version. Bumped when field names,
+/// types, or label sets change.
+const METRICS_SCHEMA_VERSION: u32 = 1;
+
 /// Shared snapshot of graph state exposed by the ops server.
 #[derive(Clone, Debug)]
 pub struct OpsState {
@@ -21,18 +25,25 @@ pub struct OpsState {
     pub reload_attempts_total: u64,
     pub reload_success_total: u64,
     pub reload_rejected_total: u64,
+    /// Set to false when the ops server is asked to stop or has exited its
+    /// request loop. `/livez` fails while this is false.
+    pub supervisor_healthy: bool,
 }
 
 /// Handle to the ops server thread.
 pub struct OpsHandle {
     stop: Arc<AtomicBool>,
     server: Arc<Server>,
+    state: Arc<RwLock<OpsState>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl OpsHandle {
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Ok(mut state) = self.state.write() {
+            state.supervisor_healthy = false;
+        }
         self.server.unblock();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -44,6 +55,9 @@ impl Drop for OpsHandle {
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
             self.stop.store(true, Ordering::SeqCst);
+            if let Ok(mut state) = self.state.write() {
+                state.supervisor_healthy = false;
+            }
             self.server.unblock();
             let _ = thread.join();
         }
@@ -72,12 +86,18 @@ pub fn start(state: Arc<RwLock<OpsState>>, bind: &str) -> Result<OpsHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let server_clone: Arc<Server> = Arc::clone(&server);
     let stop_clone = Arc::clone(&stop);
+    let state_clone = Arc::clone(&state);
 
     let thread = thread::spawn(move || {
         while !stop_clone.load(Ordering::SeqCst) {
             match server_clone.recv() {
-                Ok(request) => handle_request(&state, request),
-                Err(_) => break,
+                Ok(request) => handle_request(&state_clone, request),
+                Err(_) => {
+                    if let Ok(mut state) = state_clone.write() {
+                        state.supervisor_healthy = false;
+                    }
+                    break;
+                }
             }
         }
     });
@@ -85,6 +105,7 @@ pub fn start(state: Arc<RwLock<OpsState>>, bind: &str) -> Result<OpsHandle> {
     Ok(OpsHandle {
         stop,
         server,
+        state,
         thread: Some(thread),
     })
 }
@@ -111,18 +132,26 @@ fn is_loopback(bind: &str) -> bool {
 
 fn handle_request(state: &Arc<RwLock<OpsState>>, request: Request) {
     let response = match (request.method(), request.url()) {
-        (&Method::Get, "/livez") => livez_response(),
+        (&Method::Get, "/livez") => livez_response(state),
         (&Method::Get, "/readyz") => readyz_response(state),
         (&Method::Get, "/metrics") => metrics_response(state),
         (&Method::Head, path) => {
             let status = match path {
-                "/livez" | "/readyz" | "/metrics" => {
-                    if path == "/readyz" && !is_ready(state) {
-                        StatusCode(503)
-                    } else {
+                "/livez" => {
+                    if is_live(state) {
                         StatusCode(200)
+                    } else {
+                        StatusCode(503)
                     }
                 }
+                "/readyz" => {
+                    if is_ready(state) {
+                        StatusCode(200)
+                    } else {
+                        StatusCode(503)
+                    }
+                }
+                "/metrics" => StatusCode(200),
                 _ => StatusCode(404),
             };
             Response::from_string("").with_status_code(status)
@@ -135,8 +164,16 @@ fn handle_request(state: &Arc<RwLock<OpsState>>, request: Request) {
     }
 }
 
-fn livez_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string("ok\n")
+fn livez_response(state: &Arc<RwLock<OpsState>>) -> Response<std::io::Cursor<Vec<u8>>> {
+    if is_live(state) {
+        Response::from_string("ok\n")
+    } else {
+        Response::from_string("not live\n").with_status_code(StatusCode(503))
+    }
+}
+
+fn is_live(state: &Arc<RwLock<OpsState>>) -> bool {
+    state.read().map(|s| s.supervisor_healthy).unwrap_or(false)
 }
 
 fn readyz_response(state: &Arc<RwLock<OpsState>>) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -165,7 +202,13 @@ fn read_ready_reason(state: &Arc<RwLock<OpsState>>) -> String {
 }
 
 fn metrics_response(state: &Arc<RwLock<OpsState>>) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = match render_metrics(state) {
+    let snapshot = match state.read() {
+        Ok(guard) => guard.clone(),
+        Err(_) => {
+            return Response::from_string("ops state poisoned").with_status_code(StatusCode(500))
+        }
+    };
+    let body = match render_metrics(&snapshot) {
         Ok(text) => text,
         Err(err) => {
             return Response::from_string(format!("failed to render metrics: {err}"))
@@ -175,12 +218,19 @@ fn metrics_response(state: &Arc<RwLock<OpsState>>) -> Response<std::io::Cursor<V
     Response::from_string(body)
 }
 
-fn render_metrics(state: &Arc<RwLock<OpsState>>) -> Result<String> {
-    let snapshot = state
-        .read()
-        .map_err(|_| anyhow::anyhow!("ops state poisoned"))?;
-
+fn render_metrics(snapshot: &OpsState) -> Result<String> {
     let mut out = String::new();
+    writeln!(
+        out,
+        "# HELP dg_cli_metrics_schema_version Metric exposition schema version"
+    )?;
+    writeln!(out, "# TYPE dg_cli_metrics_schema_version gauge")?;
+    writeln!(
+        out,
+        "dg_cli_metrics_schema_version {}",
+        METRICS_SCHEMA_VERSION
+    )?;
+    writeln!(out)?;
     writeln!(
         out,
         "# HELP dg_graph_status 1 if the graph is running, 0 otherwise"
@@ -266,6 +316,12 @@ fn render_metrics(state: &Arc<RwLock<OpsState>>) -> Result<String> {
             "dg_element_state_resets_total",
             &node_label,
             metrics.state_reset_total,
+        )?;
+        render_counter(
+            &mut out,
+            "dg_element_overflow_count_total",
+            &node_label,
+            metrics.overflow_count,
         )?;
         render_counter(
             &mut out,
@@ -462,4 +518,83 @@ fn sanitize_label(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read as _;
+
+    fn sample_state() -> Arc<RwLock<OpsState>> {
+        Arc::new(RwLock::new(OpsState {
+            status: GraphStatus::Running,
+            root_cause: None,
+            element_metrics: BTreeMap::new(),
+            ready: true,
+            ready_reason: None,
+            reload_attempts_total: 1,
+            reload_success_total: 1,
+            reload_rejected_total: 0,
+            supervisor_healthy: true,
+        }))
+    }
+
+    #[test]
+    fn livez_returns_200_while_supervisor_healthy() {
+        let state = sample_state();
+        let response = livez_response(&state);
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn livez_returns_503_when_supervisor_unhealthy() {
+        let state = sample_state();
+        state.write().unwrap().supervisor_healthy = false;
+        let response = livez_response(&state);
+        assert_eq!(response.status_code(), StatusCode(503));
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body).unwrap();
+        assert!(body.contains("not live"));
+    }
+
+    #[test]
+    fn readyz_returns_200_when_graph_ready() {
+        let state = sample_state();
+        let response = readyz_response(&state);
+        assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn readyz_returns_503_with_reason_when_not_ready() {
+        let state = sample_state();
+        {
+            let mut s = state.write().unwrap();
+            s.ready = false;
+            s.ready_reason = Some("stream element reconnecting".to_string());
+        }
+        let response = readyz_response(&state);
+        assert_eq!(response.status_code(), StatusCode(503));
+        let mut body = String::new();
+        response.into_reader().read_to_string(&mut body).unwrap();
+        assert!(body.contains("stream element reconnecting"));
+    }
+
+    #[test]
+    fn metrics_expose_schema_version_and_bounded_labels() {
+        let snapshot = OpsState {
+            status: GraphStatus::Running,
+            root_cause: None,
+            element_metrics: BTreeMap::new(),
+            ready: true,
+            ready_reason: None,
+            reload_attempts_total: 0,
+            reload_success_total: 0,
+            reload_rejected_total: 0,
+            supervisor_healthy: true,
+        };
+        let text = render_metrics(&snapshot).expect("render_metrics succeeds");
+        assert!(text.contains("dg_cli_metrics_schema_version 1"));
+        // No raw user-provided strings (e.g. a URL) should appear as metric names.
+        assert!(!text.contains("http://"));
+    }
 }
