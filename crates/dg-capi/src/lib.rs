@@ -1310,10 +1310,7 @@ pub unsafe extern "C" fn dg_build_capabilities_json(
     out: *mut *mut DgOwnedBytes,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    if out.is_null() {
-        return DgStatus::NullPointer;
-    }
-    match ffi_result(out_error, || {
+    ffi_result_with_out(out, out_error, || {
         let payload = serde_json::json!({
             "abi_version": "2.0",
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -1334,17 +1331,10 @@ pub unsafe extern "C" fn dg_build_capabilities_json(
         });
         let text = serde_json::to_string(&payload)
             .map_err(|error| (DgStatus::InternalError, error.to_string()))?;
-        Ok(DgOwnedBytes::new(text.into_bytes()))
-    }) {
-        Ok(owned) => {
-            unsafe { out.write(Box::into_raw(Box::new(owned))) };
-            DgStatus::Ok
-        }
-        Err(status) => {
-            unsafe { out.write(ptr::null_mut()) };
-            status
-        }
-    }
+        Ok(Box::into_raw(Box::new(DgOwnedBytes::new(
+            text.into_bytes(),
+        ))))
+    })
 }
 
 /// Idempotent process-level runtime bootstrap (INT5-09).
