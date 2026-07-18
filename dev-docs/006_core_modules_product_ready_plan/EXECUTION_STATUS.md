@@ -20,7 +20,7 @@
 | CORE6-02 | Done | PR #15 | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs`; CI 15/15 green | - |
 | CORE6-03 | Done | PR #16 | `crates/dg-core/src/buffer.rs`, `crates/dg-core/src/tensor.rs`, `crates/dg-core/src/shape.rs`, `crates/dg-core/src/memory.rs`, `crates/dg-core/src/device.rs`; 更新的跨 crate `read_bytes`/`allocate_host` 调用；`core6_baseline.rs` 回归通过 | - |
 | CORE6-04 | Done | PR #17 | `dg-runtime/src/metrics.rs`, `dg-runtime/src/runtime.rs`, `dg-runtime/src/backend.rs`, `dg-runtime/src/mock.rs`, `dg-scheduler/src/lib.rs`, `dg-graph/src/inference.rs`; 新增 `core6_runtime_scheduler.rs`; CI 15/15 green | - |
-| CORE6-05 | Done | PR #18 | `crates/dg-core/src/resource.rs` buffer budgets, `crates/dg-graph/src/pipe.rs` depth accounting, `crates/dg-graph/src/element.rs` packet_starts/backpressure, `crates/dg-graph/src/engine.rs` shutdown/reload lifecycle; `crates/dg-graph/tests/core6_graph_execution.rs`; local gates green | - |
+| CORE6-05 | Done | PR #18 | `dg-graph` lifecycle/budget fixes, `core6_graph_execution.rs`; local gates green | - |
 | CORE6-06 | Done | PR #19 | `ReceiveOutcome`/`recv_timeout` in `dg-stream`, `StreamPullElement` 100ms poll, bridge `MediaInfo`/track-id propagation, `core6_stream_io.rs`, `core6_media_bridge.rs`; local gates green | - |
 | CORE6-07 | Not Started | - | - | 依赖 CORE6-02/03 |
 | CORE6-08 | Not Started | - | - | 破坏性 ABI v2，需原子切换 |
