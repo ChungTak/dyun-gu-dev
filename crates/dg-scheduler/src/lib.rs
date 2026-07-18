@@ -802,7 +802,7 @@ impl SchedulerState {
             candidates
                 .into_iter()
                 .min_by_key(|(_, _, load, device_id, core_id)| (*load, *device_id, *core_id))
-                .expect("candidates not empty")
+                .ok_or(Error::NoAvailableCore)?
         };
         let allocation = Allocation {
             device_index: selected.0,
