@@ -159,6 +159,10 @@ jobs:
       - run: cargo +nightly fuzz check graph-spec
       - run: cargo +nightly fuzz check capi-load-string
       - run: cargo +nightly fuzz check runtime-backend-options
+      - run: cargo +nightly fuzz check capi-external-descriptor
+      - run: cargo +nightly fuzz check tensor-shape-stride
+      - run: cargo +nightly fuzz check media-metadata
+      - run: cargo +nightly fuzz check reload-transitions
 
   check:
     runs-on: ubuntu-latest

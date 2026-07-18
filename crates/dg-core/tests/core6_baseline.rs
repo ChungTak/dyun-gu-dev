@@ -31,7 +31,7 @@ fn external_only_buffer_read_bytes_is_not_silent_empty() {
 fn tensor_from_buffer_accepts_physical_stride_span() {
     // Shape [2, 1000] with row-major contiguous strides uses 2000 f32 elements
     // (8000 bytes). With strides [2000, 1] the physical span is
-    // max((2-1)*2000, (1000-1)*1) + 1 = 2001 elements, i.e. 8004 bytes.
+    // (2-1)*2000 + (1000-1)*1 + 1 = 3000 elements, i.e. 12000 bytes.
     let desc = TensorDesc::new(
         Shape::new([2, 1000]),
         DataType::F32,
@@ -40,7 +40,7 @@ fn tensor_from_buffer_accepts_physical_stride_span() {
     )
     .with_strides(Strides::new([2000, 1]));
 
-    let buffer = Buffer::allocate_host(DeviceKind::Cpu, 8004).expect("allocate 8004 bytes");
+    let buffer = Buffer::allocate_host(DeviceKind::Cpu, 12000).expect("allocate 12000 bytes");
     Tensor::from_buffer(desc, buffer)
-        .expect("physical stride span (8004 bytes) must be accepted over logical bytes (8000)");
+        .expect("physical stride span (12000 bytes) must be accepted over logical bytes (8000)");
 }

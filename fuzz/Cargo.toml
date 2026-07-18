@@ -11,7 +11,9 @@ cargo-fuzz = true
 
 [dependencies]
 dg-capi = { path = "../crates/dg-capi" }
+dg-core = { path = "../crates/dg-core" }
 dg-graph = { path = "../crates/dg-graph" }
+dg-media = { path = "../crates/dg-media" }
 dg-runtime = { path = "../crates/dg-runtime" }
 libfuzzer-sys = "0.4"
 serde_json = "1"
@@ -31,5 +33,29 @@ doc = false
 [[bin]]
 name = "runtime-backend-options"
 path = "fuzz_targets/runtime_backend_options.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "capi-external-descriptor"
+path = "fuzz_targets/capi_external_descriptor.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "tensor-shape-stride"
+path = "fuzz_targets/tensor_shape_stride.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "media-metadata"
+path = "fuzz_targets/media_metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "reload-transitions"
+path = "fuzz_targets/reload_transitions.rs"
 test = false
 doc = false

@@ -73,8 +73,8 @@ impl Strides {
     }
 
     /// Computes the number of logical elements required to store a tensor
-    /// with these strides, i.e. the maximum `1 + (dim - 1) * stride` across
-    /// all dimensions. All arithmetic is checked.
+    /// with these strides, i.e. `1 + sum((dim - 1) * stride)` across all
+    /// dimensions. All arithmetic is checked.
     pub fn physical_element_count(&self, shape: &Shape) -> Result<usize> {
         if self.values.len() != shape.dims.len() {
             return Err(Error::Shape(
@@ -97,7 +97,9 @@ impl Strides {
                 .checked_sub(1)
                 .and_then(|d| d.checked_mul(stride))
                 .ok_or_else(|| Error::Shape("stride physical offset overflow".to_string()))?;
-            max_index = max_index.max(offset);
+            max_index = max_index
+                .checked_add(offset)
+                .ok_or_else(|| Error::Shape("physical element count overflow".to_string()))?;
         }
         max_index
             .checked_add(1)
