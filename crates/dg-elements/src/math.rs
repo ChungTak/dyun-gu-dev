@@ -194,6 +194,11 @@ pub fn iou(left: BBox, right: BBox) -> f32 {
 /// NMS with a hard candidate ceiling. Inputs larger than the ceiling must be
 /// pre-filtered with `nms_with_top_k` so the product contract is explicit.
 pub fn nms(detections: &[Detection], threshold: f32) -> Result<Vec<Detection>> {
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(Error::Config(
+            "nms iou threshold must be in [0.0, 1.0]".to_string(),
+        ));
+    }
     if detections.len() > MAX_NMS_CANDIDATES {
         return Err(Error::ResourceLimit {
             resource: "nms candidates".to_string(),
@@ -212,6 +217,11 @@ pub fn nms_with_top_k(
     threshold: f32,
     max_candidates: usize,
 ) -> Result<Vec<Detection>> {
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(Error::Config(
+            "nms iou threshold must be in [0.0, 1.0]".to_string(),
+        ));
+    }
     let max_candidates = max_candidates.min(MAX_NMS_CANDIDATES);
     let mut ordered = detections.to_vec();
     ordered.sort_by(|left, right| right.score.total_cmp(&left.score));
@@ -282,6 +292,17 @@ mod tests {
             Detection::new(BBox::new(1.0, 1.0, 10.0, 10.0), 0.7, 2),
         ];
         assert_eq!(nms(&detections, 0.5).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nms_rejects_invalid_thresholds() {
+        let detections = [Detection::new(BBox::new(0.0, 0.0, 1.0, 1.0), 1.0, 0)];
+        assert!(nms(&detections, -0.1).is_err());
+        assert!(nms(&detections, 1.1).is_err());
+        assert!(nms(&detections, f32::NAN).is_err());
+        assert!(nms_with_top_k(&detections, -0.1, 10).is_err());
+        assert!(nms_with_top_k(&detections, 1.1, 10).is_err());
+        assert!(nms_with_top_k(&detections, f32::NAN, 10).is_err());
     }
 
     #[test]
