@@ -731,7 +731,7 @@ fn create_osd(node: &NodeSpec) -> Result<CreatedElement> {
     let (boxes, color, thickness) = parse_osd(node)?;
     Ok(CreatedElement {
         element: Box::new(MediaElement {
-            core: OsdCore::new(boxes, color, thickness),
+            core: OsdCore::try_new(boxes, color, thickness).map_err(Error::Core)?,
             drain_timeout: Duration::from_millis(DEFAULT_DRAIN_TIMEOUT_MS),
             sequence: 0,
         }),
@@ -1214,12 +1214,42 @@ fn parse_osd(node: &NodeSpec) -> Result<(Vec<OsdBox>, Vec<u8>, usize)> {
     let params = params_object(node)?;
     reject_unknown_fields(params, OSD_PARAM_FIELDS)?;
     let boxes = read_boxes(params, &node.name)?;
+    if boxes.len() > crate::ops::MAX_OSD_BOXES {
+        return Err(Error::Config(format!(
+            "node {}: boxes count {} exceeds limit {}",
+            node.name,
+            boxes.len(),
+            crate::ops::MAX_OSD_BOXES
+        )));
+    }
     let color = read_u8_array(params, "color")?.unwrap_or_else(|| vec![255, 0, 0]);
     if color.is_empty() {
-        return Err(Error::Config("field color must not be empty".to_string()));
+        return Err(Error::Config(format!(
+            "node {}: field color must not be empty",
+            node.name,
+        )));
+    }
+    if color.len() > crate::ops::MAX_OSD_COLOR_LEN {
+        return Err(Error::Config(format!(
+            "node {}: field color must have at most {} components",
+            node.name,
+            crate::ops::MAX_OSD_COLOR_LEN
+        )));
     }
     let thickness = read_usize(params, "thickness")?.unwrap_or(1);
-    ensure_nonzero(thickness, "thickness")?;
+    if thickness == 0 {
+        return Err(Error::Config(format!(
+            "node {}: field thickness must be non-zero",
+            node.name
+        )));
+    }
+    if thickness > crate::ops::MAX_OSD_THICKNESS {
+        return Err(Error::Config(format!(
+            "node {}: field thickness exceeds {}",
+            node.name,
+            crate::ops::MAX_OSD_THICKNESS
+        )));
+    }
     Ok((boxes, color, thickness))
 }
 

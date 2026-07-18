@@ -13,7 +13,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 |---|---|---|---|---|---|---|
 | R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Closed | John Doe |
 | R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | In Progress | John Doe
-| | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；graph source/sink/input 队列 packets/bytes 预算已生效；device/policy 计数仍需 05/11 | | |
+| | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；graph source/sink/input 队列 packets/bytes 预算已生效；`dg-elements` 预处理/后处理/NMS/PPOCR/ByteTrack/OSD 已加 tensor/output 字节与候选上限；device/policy 计数与 `MemoryPool` cache eviction 仍需 09/11 | | |
 | R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Mitigated | John Doe |
 | R6-004 | P1 | `dg-graph/src/inference.rs` | pool 只 attach 首 Runtime metrics | 全 pool 共享 metrics，2/4/8 实例对账 | Closed | John Doe |
 | R6-005 | P1 | `dg-runtime/src/metrics.rs` | latency 保存到无界 `Vec<u64>` | 固定 buckets，百万观测常量内存 | Closed | John Doe |
@@ -31,7 +31,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
 | R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
 | R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Mitigated | John Doe |
-| R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Open | John Doe |
+| R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Closed | John Doe |
 | R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Open | John Doe |
 | R6-022 | P2 | 横向 error paths | timeout/retry等部分路径依赖字符串判断 | typed taxonomy matrix | Open | John Doe |
 
@@ -227,6 +227,21 @@ Closed commit/date:
 - Public compatibility impact: `media_frame_to_cheetah_track_info` 签名改为 `Result<dg_stream_cheetah::TrackInfo>`；`graph_packet_to_media_frame` 不再生成默认 EOS，调用者需显式发送 EOS packet。
 - Tests: `crates/dg-media/tests/core6_media_bridge.rs`（非 tensor 拒绝、EOS 保留、共享 tensor roundtrip），`dg-stream/tests/core6_stream_io.rs`。
 - Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`dg-media --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
-- Residual risk: 仍缺少 frame bytes / codec config count / metadata tags 到 `ResourcePolicy` 的动态预算绑定；待 CORE6-07/09 结合 policy 计数继续收敛。
+- Residual risk: 仍缺少 frame bytes / codec config count / metadata tags 到 `ResourcePolicy` 的动态预算绑定；待 CORE6-09 结合 policy 计数继续收敛。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 8. CORE6-07 关闭记录
+
+**R6-020**
+- Owner: John Doe
+- Branch/PR: PR #20 (`devin/1784464000-core6-07-elements-correctness`)
+- Reproduction: `dg-elements/src/math.rs::nms_rejects_excess_candidates`、`dg-elements/src/extras.rs::{anchor_generation_rejects_excess,bytetrack_caps_active_tracks,ppocr_rec_rejects_oversized_alphabet,retinaface_rejects_oversized_anchors,resnet_postprocess_rejects_oversized_top_k}`、`dg-elements/tests/core6_elements.rs::preprocess_rejects_external_only_tensor`
+- Root cause: `dg-elements` 中 YOLO/RetinaFace 预处理、NMS/top-k、PPOCR 连通域/字母表/行、ByteTrack 活跃轨迹、`media_osd` box/color/thickness、HTTP push URL 等均缺少统一资源/复杂度/失败合同；算法 element 可能直接调用 `read_bytes()` 消费外部不可读 buffer，或把空 `Vec` 当作空检测结果。
+- Chosen fix: 为 `dg-elements` 增加 `MAX_NMS_CANDIDATES`/`MAX_TOP_K`/`MAX_CLASS_COUNT`/`MAX_ANCHORS`/`MAX_TRACKS`/`MAX_OCR_*`/`MAX_URL_LENGTH` 等 crate 级硬上限；`nms` 返回 `Result` 并在超限时报错，`nms_with_top_k` 在 NMS 前做确定性 top-k 截断；`softmax`/`top_k`/`generate_anchors`/`ctc_greedy_decode`/`decode_retinaface`/`ByteTrack::update`/`detect_text_regions` 全部返回 `Result`；`f32_values`/`tensor_values` 先检查 `is_host_readable()`，外部不可读 buffer 返回 `Error::Unsupported`；`OsdCore::try_new` 校验 box 数量、颜色分量、线宽，`dg-media/elements.rs` 在 graph 加载期调用；`http_push` 运行时错误日志对 URL 做 userinfo/query/fragment 脱敏。
+- Public compatibility impact: `dg_elements::{nms, top_k, softmax, resize_letterbox, generate_anchors, ctc_greedy_decode}` 现在返回 `Result`；`OsdCore::new` 改为 `OsdCore::try_new`；`dg-graph` 调用者已统一处理返回类型。
+- Tests: `dg-elements/src/math.rs` 与 `dg-elements/src/extras.rs` 单元测试、`dg-elements/tests/core6_elements.rs`（外部 tensor 拒绝、非有限输出拒绝、100 次 reload 稳定）、`dg-elements/tests/elements.rs`（schema/validator 一致性）、`dg-media/tests/media_pipeline.rs`（OSD 参数边界）。
+- Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`cargo test -p dg-media --locked --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
+- Residual risk: 帧级数据错误目前仍按 element error 返回并终止 graph，未实现 drop-frame-and-continue 与 `state_reset_total` 计数器；状态 element 的 reload reset 依赖 `Graph` 重新创建 element，待 CORE6-08/09 统一错误分类与 metrics 时补齐。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)

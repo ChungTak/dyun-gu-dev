@@ -11,7 +11,7 @@ fn benchmark_resize(c: &mut Criterion) {
     c.bench_function("letterbox_resize", |bench| {
         bench.iter(|| {
             let result = resize_letterbox(black_box(&source), 3, 640, 480, 640, 640, 0.0);
-            let _ = black_box(result);
+            let _ = black_box(result.unwrap());
         });
     });
 }
@@ -21,10 +21,10 @@ fn benchmark_softmax_and_top_k(c: &mut Criterion) {
         .map(|value| index_f32(value) * 0.001)
         .collect::<Vec<_>>();
     c.bench_function("softmax_1000", |bench| {
-        bench.iter(|| black_box(softmax(black_box(&values))));
+        bench.iter(|| black_box(softmax(black_box(&values)).unwrap()));
     });
     c.bench_function("top_k_1000", |bench| {
-        bench.iter(|| black_box(top_k(black_box(&values), 10)));
+        bench.iter(|| black_box(top_k(black_box(&values), 10).unwrap()));
     });
 }
 
@@ -44,7 +44,7 @@ fn benchmark_nms(c: &mut Criterion) {
         })
         .collect::<Vec<_>>();
     c.bench_function("nms_100", |bench| {
-        bench.iter(|| black_box(nms(black_box(&detections), 0.5)));
+        bench.iter(|| black_box(nms(black_box(&detections), 0.5).unwrap()));
     });
 }
 
