@@ -330,3 +330,19 @@ Closed commit/date:
 - Residual risk: 新 taxonomy 需在所有后端/桥接代码中逐步替换剩余的 `Error::Runtime` 字符串；`dg-capi` 外部仍通过 `DgStatus` 粗粒度区分，C caller 无法看到具体 typed error variant。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)
+
+## 13. CORE6-10：CI、Fuzz、并发测试与长稳
+
+**R6-010 追加验证与修正**
+- Owner: John Doe
+- Branch/PR: `devin/1784370059-core6-10-verification-fuzz-concurrency` (PR #26)
+- Reproduction: `crates/dg-core/tests/core6_properties.rs::contiguous_strides_round_trip_and_storage` 暴露 `Strides::physical_element_count` 对多维 shape 的物理元素数低估。
+- Root cause: `Strides::physical_element_count` 原实现取各维度 `(dim - 1) * stride` 的 `max` 再加 1，而非求和；对于 rank > 1 的显式 contiguous stride，最大线性索引应是各维度最大偏移之和。
+- Chosen fix: 改为 `checked_add` 累加各维度偏移，再 `checked_add(1)` 得到物理元素数；同步更新 doc/comment 与 `crates/dg-core/tests/core6_baseline.rs::tensor_from_buffer_accepts_physical_stride_span` 的期望字节数（`[2, 1000]` f32 + strides `[2000, 1]` 为 3000 元素 / 12000 字节）。
+- Tests: `crates/dg-core/tests/core6_properties.rs`（`contiguous_strides_round_trip_and_storage`、`scaled_strides_increase_physical_elements`）；`crates/dg-graph/tests/core6_properties.rs`（`graph_spec_round_trips_through_all_formats`、`node_count_limit_is_enforced`、`connection_count_limit_is_enforced`）；`crates/dg-capi/tests/concurrency.rs`（`concurrent_create_and_destroy_isolated`、`concurrent_status_and_metrics_do_not_deadlock`）。
+- Fuzz targets: `fuzz/fuzz_targets/capi_external_descriptor.rs`、`tensor_shape_stride.rs`、`media_metadata.rs`、`reload_transitions.rs`；`fuzz/Cargo.toml` 与 `.github/workflows/ci.yml` 的 `fuzz` job 同步增加四个目标。
+- Long-run infrastructure: `.github/workflows/nightly.yml` 为每个 fuzz target 运行 15 分钟并上传 artifact；`tools/soak.sh` 支持 `--duration`/`--release`，用于 2h/24h 重复回归 soak。
+- Runtime evidence: HEAD `05734fa7640fc096964f8c70942f1f45295cd8fc`；`Cargo.lock` sha256 `a8e90170594e0ae54295eb6fbf45433fc255e65bed57c5ffa07b29c7b890bb87`；`rustc 1.94.1 (e408947bf 2026-03-25)`；`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo test -p dg-media --locked --features avcodec-profile-native-free`、`cargo deny check`、`git diff --exit-code Cargo.lock`、`cargo check --manifest-path fuzz/Cargo.toml` 全绿。
+- Residual risk: 真实 ASan/LSan/TSan/Miri 与 2h/24h 硬件 soak 证据仍待目标 runner；nightly workflow 已提供可追踪入口。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)

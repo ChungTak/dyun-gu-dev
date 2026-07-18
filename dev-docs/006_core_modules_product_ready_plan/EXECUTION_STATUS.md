@@ -10,7 +10,7 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 merged, CORE6-07 PR #20 merged, CORE6-08 PR #22-24 merged, CORE6-09 PR #25 已创建 |
+| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 merged, CORE6-07 PR #20 merged, CORE6-08 PR #22-24 merged, CORE6-09 PR #25 merged, CORE6-10 PR #26 已创建 |
 
 ## CORE6 状态
 
@@ -25,7 +25,7 @@
 | CORE6-07 | Done | PR #20 | `dg-elements` 算法边界/NMS/top-k/PPOCR/ByteTrack/OSD/distributor-converger 预算，`dg-media` OSD 硬上限与外部 buffer 检查，`core6_elements.rs` 外部 tensor/非有限/100 reload 测试；local gates green |
 | CORE6-08 | Done | PR #22 (split 1/3), PR #23 (split 2/3), PR #24 (split 3/3) | v2 `DgExternalMemoryV2` 与 `DgReleaseCallback`；FD 导入自动 dup 并由库 close；raw 导入要求非空 release callback 且只调用一次；`dg_engine_destroy(timeout_ms, out_error)` 替代 `dg_engine_free`，超时返回 `Busy` 并可重试；cbindgen header、ABI snapshot、C examples、`docs/user-guide.md` 已同步；本地 fmt/clippy/test/deny 全绿 | - |
 | CORE6-09 | Done | PR #25 | typed error taxonomy in `dg-core`/`dg-graph`/`dg-capi`; `dg-cli` ops health/metrics boundedness; local fmt/clippy/test/deny 全绿 | - |
-| CORE6-10 | Not Started | - | - | 依赖前述实现 |
+| CORE6-10 | Done | PR #26 | fuzz 目标、property/concurrency 测试、`Strides::physical_element_count` 物理跨度修正、`.github/workflows/nightly.yml` + `tools/soak.sh` 长稳基础设施；本地 fmt/clippy/test/deny/Cargo.lock 全绿；fuzz workspace 编译通过 | - |
 | CORE6-11 | Not Started | - | - | 所有 gate 完成后执行 |
 
 ## 风险摘要

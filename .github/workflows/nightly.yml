@@ -1,0 +1,51 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - graph-spec
+          - capi-load-string
+          - runtime-backend-options
+          - capi-external-descriptor
+          - tensor-shape-stride
+          - media-metadata
+          - reload-transitions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }} for 15 minutes
+        run: |
+          mkdir -p fuzz/artifacts/${{ matrix.target }}
+          cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=900 -artifact_prefix=./fuzz/artifacts/${{ matrix.target }}/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 7
+
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - run: ./tools/soak.sh --duration 7200 --release
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-logs
+          path: soak-logs/
+          retention-days: 7
