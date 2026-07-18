@@ -1876,6 +1876,7 @@ pub unsafe extern "C" fn dg_engine_shutdown(
 /// Returns the current lifecycle status of the engine. On success `out_status`
 /// is written; if the status is `Failed` and `out_cause` is non-null, an owned
 /// byte handle containing the root cause is written to `out_cause`.
+/// On any error `out_status` is set to `DgGraphStatus::NotRunning`.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_status(
     engine: *const DgEngine,
@@ -1883,15 +1884,34 @@ pub unsafe extern "C" fn dg_engine_status(
     out_cause: *mut *mut DgOwnedBytes,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    ffi_result_with_out(out_status, out_error, || {
+    if out_status.is_null() {
+        write_error(
+            out_error,
+            DgStatus::NullPointer,
+            "out_status pointer is null",
+        );
+        return DgStatus::NullPointer;
+    }
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid pointer; we own writing the initial null.
+        unsafe { out_error.write(ptr::null_mut()) };
+    }
+    if !out_cause.is_null() {
+        // SAFETY: `out_cause` is a valid pointer; we own writing the initial null.
+        unsafe { out_cause.write(ptr::null_mut()) };
+    }
+    match catch_unwind(AssertUnwindSafe(|| {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_read(engine_handle)?;
-        let (status, cause) = engine.status();
-        if status == DgGraphStatus::Failed {
-            if !out_cause.is_null() {
+        Ok(engine.status())
+    })) {
+        Ok(Ok((status, cause))) => {
+            // SAFETY: `out_status` was checked non-null above.
+            unsafe { out_status.write(status) };
+            if status == DgGraphStatus::Failed && !out_cause.is_null() {
                 let cause = cause.unwrap_or_else(|| "unknown failure".to_string());
                 // SAFETY: `out_cause` is non-null and points to writable storage.
                 unsafe {
@@ -1900,12 +1920,22 @@ pub unsafe extern "C" fn dg_engine_status(
                     ))))
                 };
             }
-        } else if !out_cause.is_null() {
-            // SAFETY: `out_cause` is non-null and points to writable storage.
-            unsafe { out_cause.write(ptr::null_mut()) };
+            DgStatus::Ok
         }
-        Ok(status)
-    })
+        Ok(Err((status, message))) => {
+            write_error(out_error, status, message);
+            // SAFETY: `out_status` was checked non-null above.
+            unsafe { out_status.write(DgGraphStatus::NotRunning) };
+            status
+        }
+        Err(_) => {
+            let status = DgStatus::Panic;
+            write_error(out_error, status, "panic crossed C ABI boundary");
+            // SAFETY: `out_status` was checked non-null above.
+            unsafe { out_status.write(DgGraphStatus::NotRunning) };
+            status
+        }
+    }
 }
 
 /// Returns a JSON snapshot of per-element metrics as an owned byte handle.
@@ -3231,5 +3261,21 @@ connections:
             unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) },
             DgStatus::Ok
         );
+    }
+
+    #[test]
+    fn engine_status_error_leaves_not_running_sentinel() {
+        let mut status = DgGraphStatus::Starting;
+        let mut cause: *mut DgOwnedBytes = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_status(ptr::null(), &mut status, &mut cause, ptr::null_mut()) },
+            DgStatus::NullPointer
+        );
+        assert_eq!(
+            status,
+            DgGraphStatus::NotRunning,
+            "error must leave NotRunning"
+        );
+        assert!(cause.is_null());
     }
 }
