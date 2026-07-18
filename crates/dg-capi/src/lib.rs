@@ -741,6 +741,22 @@ impl Engine {
         Ok(())
     }
 
+    fn poll_output(&mut self) -> dg_graph::Result<Option<Tensor>> {
+        if let Some(running) = self.running.as_mut() {
+            running.poll()?;
+        }
+        if let Some(tensor) = self.outputs.pop_front() {
+            return Ok(Some(tensor));
+        }
+        if let Some(running) = self.running.as_ref() {
+            let (status, cause) = running.status();
+            if status == GraphStatus::Failed {
+                return Err(dg_graph::Error::Runtime(cause.unwrap_or_default()));
+            }
+        }
+        Ok(None)
+    }
+
     fn status(&self) -> (DgGraphStatus, Option<String>) {
         match self.running.as_ref() {
             Some(running) => {
@@ -2425,11 +2441,15 @@ pub unsafe extern "C" fn dg_engine_poll(
         }
         let engine_handle = unsafe { &*engine };
         match lock_engine_write(engine_handle) {
-            Ok(mut engine) => match engine.outputs.pop_front() {
-                Some(tensor) => {
+            Ok(mut engine) => match engine.poll_output() {
+                Ok(Some(tensor)) => {
                     PollResult::Tensor(Box::into_raw(Box::new(DgTensor { tensor })) as usize)
                 }
-                None => PollResult::Again,
+                Ok(None) => PollResult::Again,
+                Err(error) => {
+                    let (status, message) = map_graph_error(error);
+                    PollResult::Error(status, message)
+                }
             },
             Err((status, message)) => PollResult::Error(status, message),
         }
@@ -2513,7 +2533,8 @@ mod tests {
     use std::ffi::CString;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use dg_graph::{
         inventory, CreatedElement, Element, ElementDescriptor, ElementHandle, ElementIo,
@@ -3884,5 +3905,96 @@ connections:
             dg_tensor_free(tensor);
             dg_engine_destroy(engine, 5000, ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn engine_poll_detects_worker_failure_without_shutdown() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let spec = CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 1
+      shape: [1, 4]
+      start: 1.0
+  - name: panic
+    kind: capi_test_panic
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> panic.in
+  - panic.out -> sink.in
+"#,
+        )
+        .expect("valid graph spec");
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        // Polling should observe the worker failure instead of returning Again forever.
+        let mut error = ptr::null_mut();
+        let mut output = ptr::null_mut();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last_status = DgStatus::Again;
+        while std::time::Instant::now() < deadline {
+            last_status = unsafe { dg_engine_poll(engine, &mut output, &mut error) };
+            if last_status == DgStatus::RuntimeError {
+                break;
+            }
+            if last_status == DgStatus::Ok {
+                assert!(!output.is_null());
+                unsafe { dg_tensor_free(output) };
+                output = ptr::null_mut();
+            }
+            assert!(error.is_null(), "Again/Ok must not allocate a DgError");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            last_status,
+            DgStatus::RuntimeError,
+            "dg_engine_poll must report a worker failure, not spin on Again"
+        );
+        assert!(output.is_null());
+        if !error.is_null() {
+            unsafe { dg_error_free(error) };
+        }
+
+        // Workers have already been joined by poll, so shutdown cleanly completes
+        // and consumes the failed running graph.
+        assert_eq!(
+            unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        assert_eq!(
+            unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) },
+            DgStatus::Ok
+        );
     }
 }
