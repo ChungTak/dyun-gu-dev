@@ -154,8 +154,7 @@ fn invalid_external_fd_is_rejected_safely() {
 fn tensor_create_invalid_dtype_zeroes_output_pointer() {
     let data = [1u8];
     let shape = [1usize];
-    let out_ptr: *mut *mut DgTensor =
-        Box::into_raw(Box::new(std::ptr::dangling_mut::<DgTensor>()));
+    let out_ptr: *mut *mut DgTensor = Box::into_raw(Box::new(std::ptr::dangling_mut::<DgTensor>()));
     unsafe {
         assert_eq!(
             dg_tensor_create(
