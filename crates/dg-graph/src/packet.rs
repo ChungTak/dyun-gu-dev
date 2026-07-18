@@ -321,7 +321,8 @@ mod tests {
                 .into_tensor()
                 .expect("shared tensor payload")
                 .buffer()
-                .read_bytes(),
+                .read_bytes()
+                .unwrap(),
             vec![1, 2, 3, 4]
         );
     }

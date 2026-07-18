@@ -704,7 +704,7 @@ impl InferBackend for TensorRtBackend {
         for (tensor, binding) in inputs.iter().zip(&self.inputs) {
             let dims = shape_to_dims(tensor.desc().shape(), &binding.name)?;
             context.set_input_shape(&binding.name, &dims)?;
-            let bytes = tensor.buffer().read_bytes();
+            let bytes = tensor.buffer().read_bytes()?;
             let mut buffer = DeviceBuffer::alloc(bytes.len())?;
             buffer.copy_from_host(&bytes)?;
             context.set_tensor_address(&binding.name, &mut buffer)?;
@@ -891,7 +891,7 @@ mod tests {
         let output = &outputs[0];
         assert_eq!(output.desc().shape().dims(), &[1, 4]);
         assert_eq!(output.desc().dtype(), DataType::F32);
-        let bytes = output.buffer().read_bytes();
+        let bytes = output.buffer().read_bytes().unwrap();
         let values: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))

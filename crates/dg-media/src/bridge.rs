@@ -70,7 +70,7 @@ pub fn graph_packet_to_media_frame(packet: Packet) -> Result<MediaFrame> {
             Vec::new(),
             DeviceKind::Cpu,
             MemoryDomain::Host,
-            Buffer::allocate_host(DeviceKind::Cpu, 0),
+            Buffer::allocate_host(DeviceKind::Cpu, 0)?,
         )),
     }
 }
@@ -1017,7 +1017,7 @@ mod tests {
                 .expect("import host handle");
             assert!(imported.zero_copy);
             assert_eq!(imported.path.copy_count, 0);
-            assert_eq!(imported.buffer.read_bytes(), vec![1, 2, 3, 4]);
+            assert_eq!(imported.buffer.read_bytes().unwrap(), vec![1, 2, 3, 4]);
         }
 
         #[test]
@@ -1070,7 +1070,7 @@ mod tests {
 
             let image = import_host_image_gray8(2, 2, 2, vec![10, 20, 30, 40]).expect("image");
             let frame = avcodec_image_to_media_frame(&image).expect("to media frame");
-            assert_eq!(frame.buffer.read_bytes()[..4], [10, 20, 30, 40]);
+            assert_eq!(frame.buffer.read_bytes().unwrap()[..4], [10, 20, 30, 40]);
         }
 
         #[test]
@@ -1170,7 +1170,7 @@ mod tests {
         let frame = graph_packet_to_media_frame(cloned_packet).expect("bridge");
 
         assert!(!frame.is_end_of_stream());
-        assert_eq!(frame.buffer.read_bytes(), vec![4, 3, 2, 1]);
+        assert_eq!(frame.buffer.read_bytes().unwrap(), vec![4, 3, 2, 1]);
         assert_eq!(frame.meta.pts, Some(17));
         assert_eq!(
             frame

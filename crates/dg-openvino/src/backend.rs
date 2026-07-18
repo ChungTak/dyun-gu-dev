@@ -383,7 +383,7 @@ impl OpenVINOBackend {
             let raw = ov_tensor
                 .get_raw_data_mut()
                 .map_err(|err| Error::Backend(err.to_string()))?;
-            let bytes = input.buffer().read_bytes();
+            let bytes = input.buffer().read_bytes()?;
             if bytes.len() != raw.len() {
                 return Err(Error::Backend(format!(
                     "OpenVINO input size mismatch: expected {}, got {}",

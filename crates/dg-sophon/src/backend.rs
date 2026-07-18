@@ -387,7 +387,7 @@ impl InferBackend for SophonBackend {
             let dtype = SophonDataType::from_data_type(info.dtype)?;
             let shape = tensor.desc().shape().clone();
             let expected = convert::byte_size(dtype, &shape)?;
-            let host = tensor.buffer().read_bytes();
+            let host = tensor.buffer().read_bytes()?;
             if host.len() != expected {
                 return Err(Error::InvalidOption(format!(
                     "Sophon input {index} byte size mismatch: expected {expected}, got {}",
@@ -613,8 +613,8 @@ mod tests {
             .expect("input bytes");
         let outputs = backend.run(std::slice::from_ref(&input)).expect("run");
         assert_eq!(
-            outputs[0].buffer().read_bytes(),
-            input.buffer().read_bytes()
+            outputs[0].buffer().read_bytes().unwrap(),
+            input.buffer().read_bytes().unwrap()
         );
         assert!(matches!(backend.run(&[]), Err(Error::InvalidOption(_))));
     }

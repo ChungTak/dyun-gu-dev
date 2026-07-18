@@ -101,7 +101,7 @@ impl Allocator for CpuAllocator {
                 "buffer alignment must be non-zero".to_string(),
             ));
         }
-        Ok(Buffer::new_host(DeviceKind::Cpu, desc))
+        Buffer::try_new_host(DeviceKind::Cpu, desc)
     }
 
     fn deallocate(&self, _buffer: Buffer) -> Result<()> {

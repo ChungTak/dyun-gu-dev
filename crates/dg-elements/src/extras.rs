@@ -903,7 +903,7 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
     match tensor.desc().dtype() {
         DataType::U8 => Ok(tensor
             .buffer()
-            .read_bytes()
+            .read_bytes()?
             .into_iter()
             .map(f32::from)
             .collect()),
@@ -915,7 +915,7 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
 }
 
 fn f32_values(tensor: &Tensor) -> Result<Vec<f32>> {
-    let bytes = tensor.buffer().read_bytes();
+    let bytes = tensor.buffer().read_bytes()?;
     let chunks = bytes.chunks_exact(std::mem::size_of::<f32>());
     if !chunks.remainder().is_empty() {
         return Err(Error::Runtime("f32 tensor has partial element".to_string()));

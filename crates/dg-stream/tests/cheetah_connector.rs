@@ -82,7 +82,7 @@ fn media_frame(payload: &[u8]) -> MediaFrame {
 #[test]
 fn cheetah_bridge_preserves_frame_metadata() {
     let source = metadata_frame();
-    let converted = cheetah_avframe_to_media_frame(Arc::new(source.clone()));
+    let converted = cheetah_avframe_to_media_frame(Arc::new(source.clone())).expect("convert");
     assert_eq!(converted.meta.pts, Some(1234));
     assert_eq!(converted.meta.dts, Some(1200));
     assert_eq!(

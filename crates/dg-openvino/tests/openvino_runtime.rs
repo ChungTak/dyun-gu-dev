@@ -162,7 +162,10 @@ fn run_openvino_identity_model(model_path: PathBuf) {
 
     let outputs = runtime.run(&[input]).expect("run OpenVINO backend");
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].buffer().read_bytes(), f32_bytes(&input_values));
+    assert_eq!(
+        outputs[0].buffer().read_bytes().unwrap(),
+        f32_bytes(&input_values)
+    );
 }
 
 fn run_openvino_dynamic_batch_model(model_path: PathBuf) {
@@ -198,7 +201,10 @@ fn run_openvino_dynamic_batch_model(model_path: PathBuf) {
 
     let outputs = runtime.run(&[input]).expect("run OpenVINO backend");
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].buffer().read_bytes(), f32_bytes(&input_values));
+    assert_eq!(
+        outputs[0].buffer().read_bytes().unwrap(),
+        f32_bytes(&input_values)
+    );
 }
 
 fn run_openvino_regression_model(model_path: PathBuf) {
@@ -260,7 +266,7 @@ fn run_openvino_cpu_async_inflight(model_path: &Path, max_in_flight: usize) {
                 .position(|s| *s == sequence)
                 .expect("unknown sequence");
             assert_eq!(
-                outputs[0].buffer().read_bytes(),
+                outputs[0].buffer().read_bytes().unwrap(),
                 f32_bytes(&input_values[index])
             );
             *received += 1;

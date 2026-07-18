@@ -82,14 +82,16 @@ impl From<dg_stream_cheetah::DispatchResult> for DispatchResult {
 }
 
 #[cfg(feature = "cheetah")]
-pub fn cheetah_avframe_to_media_frame(frame: Arc<dg_stream_cheetah::AVFrame>) -> MediaFrame {
-    cheetah_avframe_to_media_frame_with_transfer(frame).frame
+pub fn cheetah_avframe_to_media_frame(
+    frame: Arc<dg_stream_cheetah::AVFrame>,
+) -> Result<MediaFrame> {
+    Ok(cheetah_avframe_to_media_frame_with_transfer(frame)?.frame)
 }
 
 #[cfg(feature = "cheetah")]
 pub fn cheetah_avframe_to_media_frame_with_transfer(
     frame: Arc<dg_stream_cheetah::AVFrame>,
-) -> dg_media::BridgedMediaFrame {
+) -> Result<dg_media::BridgedMediaFrame> {
     let frame = frame.as_ref();
     let bytes = frame.payload.clone().to_vec();
     // Compressed stream frames are Tensor payloads; Image is reserved for decoded pixels.
@@ -100,21 +102,8 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
         dg_core::DataFormat::Auto,
         Vec::new(),
         dg_core::DeviceKind::Cpu,
-        bytes.clone(),
-    )
-    .unwrap_or_else(|_| {
-        let buffer = dg_core::Buffer::allocate_host(dg_core::DeviceKind::Cpu, bytes.len());
-        let _ = buffer.write_from_slice(&bytes);
-        MediaFrame::new(
-            kind,
-            dg_core::DataType::U8,
-            dg_core::DataFormat::Auto,
-            Vec::new(),
-            dg_core::DeviceKind::Cpu,
-            dg_core::MemoryDomain::Host,
-            buffer,
-        )
-    });
+        bytes,
+    )?;
     let legacy = cheetah_frame_metadata(frame);
     media_frame.meta.pts = Some(frame.pts);
     media_frame.meta.dts = Some(frame.dts);
@@ -182,7 +171,7 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
         media_frame.meta.media_info = Some(Box::new(info));
     }
     let _ = dg_media::normalize_media_frame_meta(&mut media_frame.meta);
-    dg_media::BridgedMediaFrame {
+    Ok(dg_media::BridgedMediaFrame {
         frame: media_frame,
         transfer: dg_media::TransferReport {
             source_domain: dg_core::MemoryDomain::Opaque,
@@ -196,7 +185,7 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
             path_kind: dg_media::TransferPathKind::DomainStaging,
             reason: None,
         },
-    }
+    })
 }
 
 #[cfg(feature = "cheetah")]
@@ -621,10 +610,13 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
             .recv()
             .await
             .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "read"))?;
-        Ok(next.map(|frame| {
-            let bridged = cheetah_avframe_to_media_frame_with_transfer(frame);
-            Arc::new(bridged.frame)
-        }))
+        Ok(match next {
+            Some(frame) => {
+                let bridged = cheetah_avframe_to_media_frame_with_transfer(frame)?;
+                Some(Arc::new(bridged.frame))
+            }
+            None => None,
+        })
     }
 
     async fn close(&mut self) -> Result<()> {
