@@ -220,10 +220,12 @@ impl DgOwnedBytes {
         Self { bytes }
     }
 
+    /// Returns a non-null, aligned pointer to the byte buffer.
+    ///
+    /// When `len()` is zero the pointer is a dangling alignment pointer; callers
+    /// must not dereference it and should use `dg_owned_bytes_len` to determine
+    /// the number of valid bytes.
     fn data(&self) -> *const u8 {
-        if self.bytes.is_empty() {
-            return ptr::null();
-        }
         self.bytes.as_ptr()
     }
 
@@ -1327,6 +1329,10 @@ pub unsafe extern "C" fn dg_error_free(error: *mut DgError) {
 }
 
 /// Returns a pointer to the owned byte buffer's contents.
+///
+/// The returned pointer is always non-null and aligned, even when the buffer
+/// is empty. Callers must use `dg_owned_bytes_len` to determine the number of
+/// valid bytes and must not dereference the pointer when the length is zero.
 #[no_mangle]
 pub unsafe extern "C" fn dg_owned_bytes_data(owned: *const DgOwnedBytes) -> *const u8 {
     if owned.is_null() {
@@ -4022,5 +4028,49 @@ connections:
             unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) },
             DgStatus::Ok
         );
+    }
+
+    #[test]
+    fn empty_tensor_data_returns_non_null_aligned_pointer() {
+        let shape = [0usize];
+        let mut tensor = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                dg_tensor_create(
+                    ptr::null(),
+                    0,
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                ),
+                DgStatus::Ok
+            );
+        }
+        assert!(!tensor.is_null());
+
+        let mut owned = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                dg_tensor_data(tensor, &mut owned, ptr::null_mut()),
+                DgStatus::Ok
+            );
+        }
+        assert!(!owned.is_null());
+
+        let data = unsafe { dg_owned_bytes_data(owned) };
+        let len = unsafe { dg_owned_bytes_len(owned) };
+        assert_eq!(len, 0);
+        assert!(!data.is_null());
+        // SAFETY: `data` is non-null and aligned; length is zero, so no bytes are read.
+        let _empty = unsafe { std::slice::from_raw_parts(data, len) };
+
+        unsafe {
+            dg_owned_bytes_free(owned);
+            dg_tensor_free(tensor);
+        }
     }
 }

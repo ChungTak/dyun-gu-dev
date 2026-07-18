@@ -300,6 +300,10 @@ void dg_error_free(struct DgError *error);
 
 /**
  * Returns a pointer to the owned byte buffer's contents.
+ *
+ * The returned pointer is always non-null and aligned, even when the buffer
+ * is empty. Callers must use `dg_owned_bytes_len` to determine the number of
+ * valid bytes and must not dereference the pointer when the length is zero.
  */
 const uint8_t *dg_owned_bytes_data(const struct DgOwnedBytes *owned);
 
