@@ -38,6 +38,24 @@ pub enum Error {
     Unsupported(String),
     #[error("unsupported device: {0:?}")]
     UnsupportedDevice(DeviceKind),
+    #[error("timeout: {0}")]
+    Timeout(String),
+    #[error("busy: {0}")]
+    Busy(String),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("closed")]
+    Closed,
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("auth error: {0}")]
+    Auth(String),
+    #[error("remote closed: {0}")]
+    RemoteClosed(String),
+    #[error("invariant violation: {0}")]
+    Invariant(String),
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl From<std::io::Error> for Error {

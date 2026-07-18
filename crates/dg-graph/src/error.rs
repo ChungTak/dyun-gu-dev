@@ -33,12 +33,24 @@ pub enum Error {
     Runtime(String),
     #[error("graph is not running")]
     NotRunning,
+    #[error("graph is not built: {0}")]
+    NotBuilt(String),
     #[error("resource limit exceeded for {resource}: requested {requested}, limit {limit}")]
     ResourceLimit {
         resource: String,
         requested: usize,
         limit: usize,
     },
+    #[error("timeout: {0}")]
+    Timeout(String),
+    #[error("busy: {0}")]
+    Busy(String),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+    #[error("invariant violation: {0}")]
+    Invariant(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

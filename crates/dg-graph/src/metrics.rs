@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use dg_runtime::{BackendMetrics, BackendMetricsSnapshot};
 
+/// Additive counters use saturating arithmetic and report wrap events through
+/// `overflow_count` so scrapers can detect loss of precision.
 #[derive(Debug, Default)]
 pub(crate) struct ElementMetrics {
     packets_processed: AtomicU64,
@@ -22,27 +24,27 @@ pub(crate) struct ElementMetrics {
     reconnecting: AtomicBool,
     /// Successful or attempted reconnects after the initial open.
     reconnect_total: AtomicU64,
+    overflow_count: AtomicU64,
     backend_metrics: Mutex<Option<Arc<BackendMetrics>>>,
 }
 
 impl ElementMetrics {
     pub(crate) fn record_received(&self) {
-        self.packets_received.fetch_add(1, Ordering::Relaxed);
-        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.packets_received, 1);
+        self.saturating_add(&self.packets_processed, 1);
     }
 
     pub(crate) fn record_source_packet(&self) {
-        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.packets_processed, 1);
     }
 
     pub(crate) fn record_sent(&self) {
-        self.packets_sent.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.packets_sent, 1);
     }
 
     pub(crate) fn record_latency(&self, duration: Duration) {
         let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-        self.processing_latency_ns
-            .fetch_add(nanos, Ordering::Relaxed);
+        self.saturating_add(&self.processing_latency_ns, nanos);
         self.processing_latency_max_ns
             .fetch_max(nanos, Ordering::Relaxed);
     }
@@ -53,15 +55,15 @@ impl ElementMetrics {
     }
 
     pub(crate) fn record_drop(&self) {
-        self.drop_count.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.drop_count, 1);
     }
 
     pub(crate) fn record_backpressure(&self) {
-        self.backpressure_count.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.backpressure_count, 1);
     }
 
     pub(crate) fn record_state_reset(&self) {
-        self.state_reset_total.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.state_reset_total, 1);
     }
 
     pub(crate) fn set_reconnecting(&self, value: bool) {
@@ -74,7 +76,7 @@ impl ElementMetrics {
     }
 
     pub(crate) fn record_reconnect(&self) {
-        self.reconnect_total.fetch_add(1, Ordering::Relaxed);
+        self.saturating_add(&self.reconnect_total, 1);
         self.reconnecting.store(false, Ordering::Relaxed);
     }
 
@@ -103,11 +105,34 @@ impl ElementMetrics {
             state_reset_total: self.state_reset_total.load(Ordering::Relaxed),
             reconnecting: self.reconnecting.load(Ordering::Relaxed),
             reconnect_total: self.reconnect_total.load(Ordering::Relaxed),
+            overflow_count: self.overflow_count.load(Ordering::Relaxed),
             backend_metrics: self
                 .backend_metrics
                 .lock()
                 .ok()
                 .and_then(|guard| guard.as_ref().map(|m| m.snapshot())),
+        }
+    }
+
+    fn saturating_add(&self, counter: &AtomicU64, value: u64) {
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            let (new, overflow) = current.overflowing_add(value);
+            let target = if overflow { u64::MAX } else { new };
+            match counter.compare_exchange_weak(
+                current,
+                target,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    if overflow {
+                        self.overflow_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    break;
+                }
+                Err(actual) => current = actual,
+            }
         }
     }
 }
@@ -130,6 +155,8 @@ pub struct ElementMetricsSnapshot {
     pub reconnecting: bool,
     /// Reconnect attempts/completions recorded by stream elements.
     pub reconnect_total: u64,
+    /// Number of additive counter wrap events detected for this element.
+    pub overflow_count: u64,
     pub backend_metrics: Option<BackendMetricsSnapshot>,
 }
 
