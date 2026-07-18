@@ -10,14 +10,14 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-01 基线审计与失败测试已提交 PR |
+| 状态 | CORE6-01 基线审计已合入；CORE6-02 ResourcePolicy 实现中 |
 
 ## CORE6 状态
 
 | ID | 状态 | PR/Commit | Evidence | Blocker |
 |---|---|---|---|---|
-| CORE6-01 | In Progress | `devin/1784344499-core6-01-baseline` | `ADMISSION_BASELINE.md`, `CORE_RISK_REGISTER.md`, `crates/dg-core/tests/core6_baseline.rs`, `crates/dg-graph/tests/core6_baseline.rs` | 需合入后进入 CORE6-02 |
-| CORE6-02 | Not Started | - | - | 需先冻结 ResourcePolicy 接口 |
+| CORE6-01 | Done | PR #14 | `ADMISSION_BASELINE.md`, `CORE_RISK_REGISTER.md`, `crates/dg-core/tests/core6_baseline.rs`, `crates/dg-graph/tests/core6_baseline.rs`; CI 15/15 green | - |
+| CORE6-02 | Done | PR #15 | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs`; CI 15/15 green | - |
 | CORE6-03 | Not Started | - | - | 依赖 CORE6-02 |
 | CORE6-04 | Not Started | - | - | 依赖 policy/metrics snapshot 设计 |
 | CORE6-05 | Not Started | - | - | 依赖 CORE6-02/04 |
@@ -32,8 +32,8 @@
 
 | 等级 | Open | Reproduced | In Progress | Closed | Exception |
 |---|---:|---:|---:|---:|---:|
-| P0 | 5 | 1 | 0 | 0 | 0 |
-| P1 | 11 | 2 | 0 | 0 | 0 |
+| P0 | 5 | 0 | 0 | 1 | 0 |
+| P1 | 10 | 1 | 0 | 1 | 0 |
 | P2 | 3 | 0 | 0 | 0 | 0 |
 
 统计必须与 `CORE_RISK_REGISTER.md` 同步更新。

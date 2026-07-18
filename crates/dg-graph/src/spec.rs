@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dg_core::ResourcePolicy;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -14,9 +15,6 @@ use crate::registry::{element_ports, find_element, validate_element};
 
 const DEFAULT_API_VERSION: &str = "dg/v1";
 const DEFAULT_KIND: &str = "Graph";
-
-const DEFAULT_MAX_INCLUDE_DEPTH: usize = 16;
-const DEFAULT_MAX_INCLUDE_COUNT: usize = 64;
 
 /// How graph elements are scheduled onto threads (from nndeploy).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -114,15 +112,36 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_config_bytes: 8 * 1024 * 1024,
-            max_include_depth: DEFAULT_MAX_INCLUDE_DEPTH,
-            max_include_count: DEFAULT_MAX_INCLUDE_COUNT,
-            max_nodes: 1024,
-            max_connections: 8192,
-            max_tensor_bytes: 512 * 1024 * 1024,
-            max_frame_bytes: 512 * 1024 * 1024,
-            max_model_bytes: 2 * 1024 * 1024 * 1024,
+            max_config_bytes: ResourcePolicy::DEFAULT_MAX_CONFIG_BYTES,
+            max_include_depth: ResourcePolicy::DEFAULT_MAX_INCLUDE_DEPTH,
+            max_include_count: ResourcePolicy::DEFAULT_MAX_INCLUDE_COUNT,
+            max_nodes: ResourcePolicy::DEFAULT_MAX_NODES,
+            max_connections: ResourcePolicy::DEFAULT_MAX_CONNECTIONS,
+            max_tensor_bytes: ResourcePolicy::DEFAULT_MAX_TENSOR_BYTES,
+            max_frame_bytes: ResourcePolicy::DEFAULT_MAX_FRAME_BYTES,
+            max_model_bytes: ResourcePolicy::DEFAULT_MAX_MODEL_BYTES,
         }
+    }
+}
+
+impl From<&ResourceLimits> for ResourcePolicy {
+    fn from(limits: &ResourceLimits) -> Self {
+        Self {
+            max_config_bytes: limits.max_config_bytes,
+            max_include_depth: limits.max_include_depth,
+            max_include_count: limits.max_include_count,
+            max_nodes: limits.max_nodes,
+            max_connections: limits.max_connections,
+            max_tensor_bytes: limits.max_tensor_bytes,
+            max_frame_bytes: limits.max_frame_bytes,
+            max_model_bytes: limits.max_model_bytes,
+        }
+    }
+}
+
+impl From<ResourceLimits> for ResourcePolicy {
+    fn from(limits: ResourceLimits) -> Self {
+        Self::from(&limits)
     }
 }
 
@@ -273,11 +292,36 @@ impl GraphSpec {
     }
 
     pub fn from_str_with_format(input: &str, format: GraphFormat) -> Result<Self> {
-        let spec = match format {
+        Self::from_str_with_policy(input, format, &ResourcePolicy::default())
+    }
+
+    pub fn from_str_with_policy(
+        input: &str,
+        format: GraphFormat,
+        policy: &ResourcePolicy,
+    ) -> Result<Self> {
+        let spec: GraphSpec = match format {
             GraphFormat::Yaml => serde_yaml_ng::from_str(input)?,
             GraphFormat::Json => serde_json::from_str(input)?,
             GraphFormat::Toml => toml::from_str(input)?,
         };
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective = policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        if input.len() > effective.max_config_bytes {
+            return Err(Error::Validation {
+                path: "limits.max_config_bytes".to_string(),
+                message: format!(
+                    "config string size {} exceeds effective maximum {}",
+                    input.len(),
+                    effective.max_config_bytes
+                ),
+            });
+        }
         Ok(spec)
     }
 
@@ -290,22 +334,59 @@ impl GraphSpec {
     }
 
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
-        Self::load_from_path_with_includes(path).map(|(spec, _)| spec)
+        Self::load_from_path_with_policy(path, ResourcePolicy::default())
+    }
+
+    pub fn load_from_path_with_policy(
+        path: impl AsRef<Path>,
+        policy: ResourcePolicy,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        let canonical = fs::canonicalize(path)?;
+        let mut resolving = BTreeSet::new();
+        let mut included = vec![canonical];
+        let mut total_config_bytes = 0usize;
+        let spec = Self::load_from_path_tracked(
+            path,
+            &policy,
+            &mut resolving,
+            &mut included,
+            &mut total_config_bytes,
+        )?;
+        Ok(spec)
     }
 
     pub(crate) fn load_from_path_with_includes(
         path: impl AsRef<Path>,
     ) -> Result<(Self, Vec<PathBuf>)> {
+        Self::load_from_path_with_includes_and_policy(path, ResourcePolicy::default())
+    }
+
+    pub(crate) fn load_from_path_with_includes_and_policy(
+        path: impl AsRef<Path>,
+        policy: ResourcePolicy,
+    ) -> Result<(Self, Vec<PathBuf>)> {
+        let path = path.as_ref();
+        let canonical = fs::canonicalize(path)?;
         let mut resolving = BTreeSet::new();
-        let mut included = vec![fs::canonicalize(path.as_ref())?];
-        let spec = Self::load_from_path_tracked(path.as_ref(), &mut resolving, &mut included)?;
+        let mut included = vec![canonical];
+        let mut total_config_bytes = 0usize;
+        let spec = Self::load_from_path_tracked(
+            path,
+            &policy,
+            &mut resolving,
+            &mut included,
+            &mut total_config_bytes,
+        )?;
         Ok((spec, included))
     }
 
     fn load_from_path_tracked(
         path: &Path,
+        policy: &ResourcePolicy,
         resolving: &mut BTreeSet<PathBuf>,
         included: &mut Vec<PathBuf>,
+        total_config_bytes: &mut usize,
     ) -> Result<Self> {
         let canonical_path = fs::canonicalize(path)?;
         if !resolving.insert(canonical_path.clone()) {
@@ -314,62 +395,92 @@ impl GraphSpec {
                 message: format!("include cycle detected at {}", path.display()),
             });
         }
-        if resolving.len() > DEFAULT_MAX_INCLUDE_DEPTH.saturating_add(1) {
-            return Err(Error::Validation {
-                path: "includes".to_string(),
-                message: format!(
-                    "include depth exceeds maximum {}",
-                    DEFAULT_MAX_INCLUDE_DEPTH
-                ),
-            });
-        }
-        let result = Self::load_from_path_tracked_inner(path, resolving, included);
+        let result = Self::load_from_path_tracked_inner(
+            path,
+            policy,
+            resolving,
+            included,
+            total_config_bytes,
+        );
         resolving.remove(&canonical_path);
         result
     }
 
     fn load_from_path_tracked_inner(
         path: &Path,
+        policy: &ResourcePolicy,
         resolving: &mut BTreeSet<PathBuf>,
         included: &mut Vec<PathBuf>,
+        total_config_bytes: &mut usize,
     ) -> Result<Self> {
         let format = GraphFormat::from_path(path)?;
-        let content = fs::read_to_string(path)?;
-        if content.len() > ResourceLimits::default().max_config_bytes {
+        let content = read_limited(path, policy.max_config_bytes.saturating_add(1))?;
+        if content.len() > policy.max_config_bytes {
             return Err(Error::Validation {
                 path: path.display().to_string(),
                 message: format!(
-                    "config file size {} exceeds default maximum {}",
+                    "config file size {} exceeds effective maximum {}",
                     content.len(),
-                    ResourceLimits::default().max_config_bytes
+                    policy.max_config_bytes
                 ),
             });
         }
-        let spec = Self::from_str_with_format(&content, format)?;
-        if content.len() > spec.limits.max_config_bytes {
+        *total_config_bytes = total_config_bytes.saturating_add(content.len());
+        if *total_config_bytes > policy.max_config_bytes {
             return Err(Error::Validation {
                 path: path.display().to_string(),
                 message: format!(
-                    "config file size {} exceeds configured maximum {}",
-                    content.len(),
-                    spec.limits.max_config_bytes
+                    "cumulative config bytes {} exceeds effective maximum {}",
+                    total_config_bytes, policy.max_config_bytes
                 ),
             });
         }
-        spec.normalize_with_base_dir_tracked(path.parent(), resolving, included)
+        let spec = Self::from_str_with_policy(&content, format, policy)?;
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective = policy
+            .effective_for(&requested)
+            .map_err(|err| Error::Validation {
+                path: "limits".to_string(),
+                message: err.to_string(),
+            })?;
+        if resolving.len() > effective.max_include_depth.saturating_add(1) {
+            return Err(Error::Validation {
+                path: "includes".to_string(),
+                message: format!(
+                    "include depth exceeds maximum {}",
+                    effective.max_include_depth
+                ),
+            });
+        }
+        spec.normalize_with_base_dir_tracked(
+            path.parent(),
+            &effective,
+            resolving,
+            included,
+            total_config_bytes,
+        )
     }
 
     pub fn normalize_with_base_dir(self, base_dir: Option<&Path>) -> Result<Self> {
         let mut resolving = BTreeSet::new();
         let mut included = Vec::new();
-        self.normalize_with_base_dir_tracked(base_dir, &mut resolving, &mut included)
+        let mut total_config_bytes = 0usize;
+        self.normalize_with_base_dir_tracked(
+            base_dir,
+            &ResourcePolicy::default(),
+            &mut resolving,
+            &mut included,
+            &mut total_config_bytes,
+        )
     }
 
     fn normalize_with_base_dir_tracked(
         self,
         base_dir: Option<&Path>,
+        policy: &ResourcePolicy,
         resolving: &mut BTreeSet<PathBuf>,
         included: &mut Vec<PathBuf>,
+        total_config_bytes: &mut usize,
     ) -> Result<Self> {
         if !(self.api_version == "dg/v1" || self.api_version == "v1") {
             return Err(Error::Validation {
@@ -400,17 +511,22 @@ impl GraphSpec {
                 if main_path.as_ref() != Some(&canonical_included) {
                     included.push(canonical_included);
                 }
-                if included.len() > self.limits.max_include_count.saturating_add(1) {
+                if included.len() > policy.max_include_count.saturating_add(1) {
                     return Err(Error::Validation {
                         path: "includes".to_string(),
                         message: format!(
                             "include count exceeds maximum {}",
-                            self.limits.max_include_count
+                            policy.max_include_count
                         ),
                     });
                 }
-                let included =
-                    GraphSpec::load_from_path_tracked(&included_path, resolving, included)?;
+                let included = GraphSpec::load_from_path_tracked(
+                    &included_path,
+                    policy,
+                    resolving,
+                    included,
+                    total_config_bytes,
+                )?;
                 merged.merge_included(included);
             }
         }
@@ -430,7 +546,7 @@ impl GraphSpec {
         merged.apply_defaults();
         merged.apply_variables();
         merged.validate_references()?;
-        merged.validate()?;
+        merged.validate_with_policy(policy)?;
         Ok(merged)
     }
 
@@ -575,23 +691,41 @@ impl GraphSpec {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.nodes.len() > self.limits.max_nodes {
+        self.validate_with_policy(&ResourcePolicy::default())
+    }
+
+    pub fn validate_with_policy(&self, policy: &ResourcePolicy) -> Result<()> {
+        if self.nodes.len() > policy.max_nodes {
             return Err(Error::Validation {
                 path: "nodes".to_string(),
                 message: format!(
                     "node count {} exceeds limit {}",
                     self.nodes.len(),
-                    self.limits.max_nodes
+                    policy.max_nodes
                 ),
             });
         }
-        if self.connections.len() > self.limits.max_connections {
+        if self.connections.len() > policy.max_connections {
             return Err(Error::Validation {
                 path: "connections".to_string(),
                 message: format!(
                     "connection count {} exceeds limit {}",
                     self.connections.len(),
-                    self.limits.max_connections
+                    policy.max_connections
+                ),
+            });
+        }
+        let total_workers: usize = self
+            .nodes
+            .iter()
+            .map(|node| node.threads.unwrap_or(1))
+            .sum();
+        if total_workers > policy.max_nodes {
+            return Err(Error::Validation {
+                path: "nodes".to_string(),
+                message: format!(
+                    "total worker threads {} exceeds node limit {}",
+                    total_workers, policy.max_nodes
                 ),
             });
         }
@@ -599,6 +733,15 @@ impl GraphSpec {
             return Err(Error::Validation {
                 path: "execution.queue_capacity".to_string(),
                 message: "queue_capacity must be at least 1".to_string(),
+            });
+        }
+        if self.execution.queue_capacity > policy.max_connections {
+            return Err(Error::Validation {
+                path: "execution.queue_capacity".to_string(),
+                message: format!(
+                    "queue_capacity {} exceeds connection limit {}",
+                    self.execution.queue_capacity, policy.max_connections
+                ),
             });
         }
         match (self.execution.parallel, self.execution.workers) {
@@ -748,6 +891,19 @@ impl GraphSpec {
         }
         Ok(())
     }
+}
+
+/// Reads at most `limit` bytes from `path` into a string.
+///
+/// `limit` is expected to be `max_config_bytes + 1` so that a file which
+/// exceeds the budget can be detected without reading it completely.
+fn read_limited(path: &Path, limit: usize) -> Result<String> {
+    use std::io::Read;
+    let file = fs::File::open(path)?;
+    let mut reader = file.take(limit as u64);
+    let mut content = String::new();
+    reader.read_to_string(&mut content)?;
+    Ok(content)
 }
 
 fn find_port<'a>(ports: &'a [PortSchema], name: &str) -> Option<&'a PortSchema> {

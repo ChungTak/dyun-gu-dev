@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dg_core::{Classification, DataType, Detection, FaceDetection, OcrText, Tensor, Track};
+use dg_core::{
+    Classification, DataType, Detection, FaceDetection, OcrText, ResourcePolicy, Tensor, Track,
+};
 
 use crate::error::{Error, Result};
 use crate::metrics::ElementMetrics;
@@ -61,9 +63,14 @@ pub struct ElementIo {
     pub(crate) eos: Arc<Mutex<EosState>>,
     pub(crate) metrics: Arc<ElementMetrics>,
     pub(crate) packet_starts: RefCell<VecDeque<Instant>>,
+    pub(crate) policy: Arc<ResourcePolicy>,
 }
 
 impl ElementIo {
+    pub fn policy(&self) -> &ResourcePolicy {
+        &self.policy
+    }
+
     pub fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || self.control.stop.load(Ordering::Relaxed)
     }
