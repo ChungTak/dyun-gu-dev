@@ -3,7 +3,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::os::fd::AsRawFd;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
@@ -168,6 +169,28 @@ pub struct DgShapeView {
     pub rank: usize,
 }
 
+/// Release callback for imported raw external memory. It is invoked exactly once
+/// when the library no longer references the external handle.
+pub type DgReleaseCallback = Option<unsafe extern "C" fn(*mut c_void)>;
+
+/// External memory descriptor for v2 ABI imports.
+///
+/// Exactly one of `fd` or `raw` must be valid. FD imports are duplicated; the
+/// library closes the duplicate. Raw imports require a non-null release callback.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DgExternalMemoryV2 {
+    pub struct_size: u32,
+    pub struct_version: u32,
+    pub fd: c_int,
+    pub raw: u64,
+    pub domain: i32,
+    pub device: i32,
+    pub size_bytes: usize,
+    pub release: DgReleaseCallback,
+    pub user_data: *mut c_void,
+}
+
 /// Owned byte buffer returned by v2 ABI calls. The library allocates and frees
 /// it; callers must use `dg_owned_bytes_free`.
 pub struct DgOwnedBytes {
@@ -274,23 +297,27 @@ pub struct DgRuntimeInitOptions {
 fn lock_engine_write(
     engine: &DgEngine,
 ) -> Result<std::sync::RwLockWriteGuard<'_, Engine>, (DgStatus, String)> {
-    engine.inner.try_write().map_err(|_| {
-        (
+    match engine.inner.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err((
             DgStatus::Busy,
             "engine handle is busy; concurrent mutation is not allowed".to_string(),
-        )
-    })
+        )),
+    }
 }
 
 fn lock_engine_read(
     engine: &DgEngine,
 ) -> Result<std::sync::RwLockReadGuard<'_, Engine>, (DgStatus, String)> {
-    engine.inner.try_read().map_err(|_| {
-        (
+    match engine.inner.try_read() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => Err((
             DgStatus::Busy,
             "engine handle is busy; concurrent write holds the engine".to_string(),
-        )
-    })
+        )),
+    }
 }
 
 #[allow(dead_code)]
@@ -318,6 +345,123 @@ fn check_struct_version(
         ));
     }
     Ok(())
+}
+
+/// Parses and validates an external memory descriptor without taking ownership
+/// of the underlying handle.
+#[allow(clippy::type_complexity)]
+fn parse_external_memory_descriptor(
+    desc: *const DgExternalMemoryV2,
+) -> Result<
+    (
+        DeviceKind,
+        MemoryDomain,
+        usize,
+        i32,
+        u64,
+        DgReleaseCallback,
+        *mut c_void,
+    ),
+    (DgStatus, String),
+> {
+    if desc.is_null() {
+        return Err((
+            DgStatus::NullPointer,
+            "external memory descriptor is null".to_string(),
+        ));
+    }
+    // SAFETY: `desc` is a valid pointer to a `DgExternalMemoryV2`.
+    let desc = unsafe { &*desc };
+    check_struct_version(
+        "DgExternalMemoryV2",
+        desc.struct_size,
+        desc.struct_version,
+        std::mem::size_of::<DgExternalMemoryV2>(),
+    )?;
+    let fd_valid = desc.fd >= 0;
+    let raw_valid = desc.raw != 0;
+    if fd_valid && raw_valid {
+        return Err((
+            DgStatus::InvalidArgument,
+            "external memory descriptor has both fd and raw set; exactly one must be valid"
+                .to_string(),
+        ));
+    }
+    if !fd_valid && !raw_valid {
+        return Err((
+            DgStatus::InvalidArgument,
+            "external memory descriptor has neither fd nor raw set".to_string(),
+        ));
+    }
+    let domain = domain_from_c(desc.domain)?;
+    let device = device_from_c(desc.device)?;
+    if desc.size_bytes == 0 {
+        return Err((
+            DgStatus::InvalidArgument,
+            "external memory size must be non-zero".to_string(),
+        ));
+    }
+    Ok((
+        device,
+        domain,
+        desc.size_bytes,
+        desc.fd,
+        desc.raw,
+        desc.release,
+        desc.user_data,
+    ))
+}
+
+/// Takes ownership of an already validated external memory handle and builds the
+/// guard that releases it exactly once.
+fn build_external_handle(
+    fd: i32,
+    raw: u64,
+    release: DgReleaseCallback,
+    user_data: *mut c_void,
+) -> Result<(ExternalHandle, ExternalDropGuard), (DgStatus, String)> {
+    let fd_valid = fd >= 0;
+    let raw_valid = raw != 0;
+    if fd_valid && raw_valid || !fd_valid && !raw_valid {
+        return Err((
+            DgStatus::InvalidArgument,
+            "external memory descriptor has invalid fd/raw combination".to_string(),
+        ));
+    }
+
+    if fd_valid {
+        // SAFETY: `BorrowedFd::borrow_raw` requires the fd to be valid. We only
+        // call `try_clone_to_owned`, which duplicates it; the original remains
+        // owned by the caller.
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let owned = borrowed.try_clone_to_owned().map_err(|error| {
+            (
+                DgStatus::RuntimeError,
+                format!("failed to duplicate external fd: {error}"),
+            )
+        })?;
+        let dup_fd = owned.as_raw_fd();
+        let guard = ExternalDropGuard::new(move || {
+            // `owned` closes the duplicated fd when the last reference drops.
+            drop(owned);
+        });
+        Ok((ExternalHandle::from_fd(dup_fd), guard))
+    } else {
+        let release = release.ok_or_else(|| {
+            (
+                DgStatus::InvalidArgument,
+                "raw external memory requires a release callback".to_string(),
+            )
+        })?;
+        // Cast the opaque pointer to usize so the closure is Send + 'static.
+        let user_data = user_data as usize;
+        let guard = ExternalDropGuard::new(move || {
+            // SAFETY: `release` was provided by the caller and `user_data` is the
+            // same opaque pointer that was passed in.
+            unsafe { release(user_data as *mut c_void) };
+        });
+        Ok((ExternalHandle::from_raw(raw), guard))
+    }
 }
 
 impl DgStringView {
@@ -549,16 +693,16 @@ impl Engine {
     }
 
     fn shutdown(&mut self, timeout_ms: u64) -> Result<(), String> {
-        let mut running = self
-            .running
-            .take()
-            .ok_or_else(|| "engine is not running".to_string())?;
         let timeout = std::time::Duration::from_millis(timeout_ms);
-        running
-            .shutdown(timeout)
-            .map_err(|error| error.to_string())?;
-        // After shutdown the graph is no longer running; keep the built graph
-        // so `dg_engine_run` can still be used for a final one-shot execution.
+        if let Some(mut running) = self.running.take() {
+            if let Err(error) = running.shutdown(timeout) {
+                // Timeout keeps the running graph valid so the caller can retry.
+                self.running = Some(running);
+                return Err(error.to_string());
+            }
+        }
+        // No running graph or shutdown completed; the built graph is kept so
+        // `dg_engine_run` can still be used for a final one-shot execution.
         Ok(())
     }
 
@@ -1192,26 +1336,41 @@ pub unsafe extern "C" fn dg_engine_create(
     })
 }
 
-/// Frees an engine handle. Null is accepted.
+/// Destroys an engine handle with a timeout in milliseconds. Null is accepted.
 ///
-/// If the engine still holds a live graph, this best-effort requests stop and
-/// waits up to 5 seconds for shutdown before dropping (INT5-09 free→shutdown).
+/// On success the handle is freed. If the running graph cannot be shut down
+/// within `timeout_ms`, `DgStatus::Busy` is returned and the handle remains
+/// valid so the caller can retry.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_free(engine: *mut DgEngine) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if !engine.is_null() {
-            // SAFETY: the pointer must have been returned by `dg_engine_create` exactly once.
-            let handle = unsafe { Box::from_raw(engine) };
-            let mut engine = match handle.inner.into_inner() {
-                Ok(engine) => engine,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(mut running) = engine.running.take() {
-                running.request_stop();
-                let _ = running.shutdown(std::time::Duration::from_secs(5));
-            }
+pub unsafe extern "C" fn dg_engine_destroy(
+    engine: *mut DgEngine,
+    timeout_ms: u64,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
+        if engine.is_null() {
+            return Ok(());
         }
-    }));
+        {
+            // SAFETY: `engine` is a valid handle returned by `dg_engine_create`.
+            let engine_ref = unsafe { &*engine };
+            let mut guard = lock_engine_write(engine_ref)?;
+            guard.shutdown(timeout_ms).map_err(|message| {
+                if message.contains("timed out") {
+                    (DgStatus::Busy, message)
+                } else {
+                    (DgStatus::RuntimeError, message)
+                }
+            })?;
+            drop(guard);
+        }
+        // SAFETY: no outstanding borrows; the handle was created by `dg_engine_create`.
+        unsafe { drop(Box::from_raw(engine)) };
+        Ok(())
+    }) {
+        Ok(()) => DgStatus::Ok,
+        Err(status) => status,
+    }
 }
 
 /// Loads a graph specification from a UTF-8 string.
@@ -1653,9 +1812,13 @@ pub unsafe extern "C" fn dg_engine_shutdown(
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
-        engine
-            .shutdown(timeout_ms)
-            .map_err(|message| (DgStatus::RuntimeError, message))?;
+        engine.shutdown(timeout_ms).map_err(|message| {
+            if message.contains("timed out") {
+                (DgStatus::Busy, message)
+            } else {
+                (DgStatus::RuntimeError, message)
+            }
+        })?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -1985,15 +2148,11 @@ pub unsafe extern "C" fn dg_tensor_create(
 /// Creates a tensor backed by an imported external buffer.
 #[no_mangle]
 pub unsafe extern "C" fn dg_tensor_create_external(
-    fd: c_int,
-    raw: u64,
-    domain: i32,
-    size_bytes: usize,
+    desc: *const DgExternalMemoryV2,
     shape: *const usize,
     rank: usize,
     dtype: i32,
     format: i32,
-    device: i32,
     out: *mut *mut DgTensor,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
@@ -2004,14 +2163,16 @@ pub unsafe extern "C" fn dg_tensor_create_external(
                 "tensor output pointer is null".to_string(),
             ));
         }
+        let (device, domain, size_bytes, fd, raw, release, user_data) =
+            parse_external_memory_descriptor(desc)?;
         let shape = unsafe { dims(shape, rank)? };
-        let desc = TensorDesc::new(
+        let tensor_desc = TensorDesc::new(
             Shape::new(shape.to_vec()),
             data_type_from_c(dtype)?,
             format_from_c_enum(format)?,
-            device_from_c(device)?,
+            device,
         );
-        let expected = desc
+        let expected = tensor_desc
             .storage_bytes()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         if expected != size_bytes {
@@ -2020,20 +2181,16 @@ pub unsafe extern "C" fn dg_tensor_create_external(
                 format!("external size {size_bytes} does not match tensor size {expected}"),
             ));
         }
-        let external = if fd >= 0 {
-            ExternalHandle::from_fd(fd)
-        } else {
-            ExternalHandle::from_raw(raw)
-        };
+        let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
         let buffer = Buffer::from_external(
-            device_from_c(device)?,
-            domain_from_c(domain)?,
+            device,
+            domain,
             BufferDesc::new(size_bytes, 1),
             external,
-            ExternalDropGuard::new(|| {}),
+            guard,
         )
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        let tensor = Tensor::from_buffer(desc, buffer)
+        let tensor = Tensor::from_buffer(tensor_desc, buffer)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         // SAFETY: `out` was checked non-null and points to writable caller storage.
         unsafe { out.write(Box::into_raw(Box::new(DgTensor { tensor }))) };
@@ -2141,11 +2298,7 @@ pub unsafe extern "C" fn dg_engine_poll(
 /// Imports an external buffer handle without dereferencing the external address.
 #[no_mangle]
 pub unsafe extern "C" fn dg_buffer_import_external(
-    fd: c_int,
-    raw: u64,
-    domain: i32,
-    device: i32,
-    size_bytes: usize,
+    desc: *const DgExternalMemoryV2,
     out: *mut *mut DgBuffer,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
@@ -2156,17 +2309,15 @@ pub unsafe extern "C" fn dg_buffer_import_external(
                 "buffer output pointer is null".to_string(),
             ));
         }
-        let external = if fd >= 0 {
-            ExternalHandle::from_fd(fd)
-        } else {
-            ExternalHandle::from_raw(raw)
-        };
+        let (device, domain, size_bytes, fd, raw, release, user_data) =
+            parse_external_memory_descriptor(desc)?;
+        let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
         let buffer = Buffer::from_external(
-            device_from_c(device)?,
-            domain_from_c(domain)?,
+            device,
+            domain,
             BufferDesc::new(size_bytes, 1),
             external,
-            ExternalDropGuard::new(|| {}),
+            guard,
         )
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         // SAFETY: `out` was checked non-null and points to writable caller storage.
@@ -2223,7 +2374,16 @@ mod tests {
     use super::*;
     use std::ffi::CString;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    unsafe extern "C" fn test_release_callback(user_data: *mut c_void) {
+        if !user_data.is_null() {
+            let counter = user_data as *mut AtomicUsize;
+            // SAFETY: `user_data` was provided by the test as `&AtomicUsize`.
+            unsafe { (*counter).fetch_add(1, Ordering::SeqCst) };
+        }
+    }
 
     #[test]
     fn unsupported_dtype_is_rejected_instead_of_mapped_to_u8() {
@@ -2411,7 +2571,7 @@ connections:
         unsafe {
             dg_tensor_free(output);
             dg_tensor_free(tensor);
-            dg_engine_free(engine);
+            dg_engine_destroy(engine, 5000, ptr::null_mut());
         }
     }
 
@@ -2435,7 +2595,7 @@ connections:
             },
             DgStatus::Ok
         );
-        unsafe { dg_engine_free(engine) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
     }
 
     #[test]
@@ -2530,7 +2690,7 @@ connections:
             message.contains("not-a-real-profile") || message.contains("unknown avcodec profile"),
             "{message}"
         );
-        unsafe { dg_engine_free(engine) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
     }
 
     #[test]
@@ -2565,7 +2725,7 @@ connections: []
         );
         assert!(!error.is_null());
         unsafe { dg_error_free(error) };
-        unsafe { dg_engine_free(engine) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
         fs::remove_file(path).expect("remove invalid graph");
     }
 
@@ -2698,24 +2858,27 @@ connections: []
             dg_tensor_free(output);
             dg_tensor_free(tensor);
         }
-        unsafe { dg_engine_free(engine) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
     }
 
     #[test]
     fn external_buffer_import_preserves_handle_metadata() {
+        let mut counter = Box::new(AtomicUsize::new(0));
+        let counter_ptr: *mut AtomicUsize = &mut *counter;
+        let desc = DgExternalMemoryV2 {
+            struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+            struct_version: 0,
+            fd: -1,
+            raw: 0x1234,
+            domain: DgMemoryDomain::CudaDevice as i32,
+            device: DgDeviceKind::CudaGpu as i32,
+            size_bytes: 16,
+            release: Some(test_release_callback),
+            user_data: counter_ptr as *mut c_void,
+        };
         let mut buffer = ptr::null_mut();
         assert_eq!(
-            unsafe {
-                dg_buffer_import_external(
-                    -1,
-                    0x1234,
-                    DgMemoryDomain::CudaDevice as i32,
-                    DgDeviceKind::CudaGpu as i32,
-                    16,
-                    &mut buffer,
-                    ptr::null_mut(),
-                )
-            },
+            unsafe { dg_buffer_import_external(&desc, &mut buffer, ptr::null_mut()) },
             DgStatus::Ok
         );
         let mut size = 0;
@@ -2725,6 +2888,11 @@ connections: []
         );
         assert_eq!(size, 16);
         unsafe { dg_buffer_free(buffer) };
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "release callback must be invoked exactly once"
+        );
     }
 
     #[test]
@@ -2943,19 +3111,20 @@ connections: []
         );
         assert!(backend.is_null());
 
+        let bad_external = DgExternalMemoryV2 {
+            struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+            struct_version: 0,
+            fd: -1,
+            raw: 0x1234,
+            domain: 123,
+            device: DgDeviceKind::Cpu as i32,
+            size_bytes: 16,
+            release: Some(test_release_callback),
+            user_data: ptr::null_mut(),
+        };
         let mut buffer = ptr::null_mut();
         assert_eq!(
-            unsafe {
-                dg_buffer_import_external(
-                    -1,
-                    0x1234,
-                    123,
-                    DgDeviceKind::Cpu as i32,
-                    16,
-                    &mut buffer,
-                    ptr::null_mut(),
-                )
-            },
+            unsafe { dg_buffer_import_external(&bad_external, &mut buffer, ptr::null_mut()) },
             DgStatus::InvalidArgument
         );
 
@@ -2977,6 +3146,9 @@ connections: []
             DgStatus::InvalidArgument
         );
 
-        assert_eq!(unsafe { dg_engine_free(engine) }, ());
+        assert_eq!(
+            unsafe { dg_engine_destroy(engine, 0, ptr::null_mut()) },
+            DgStatus::Ok
+        );
     }
 }

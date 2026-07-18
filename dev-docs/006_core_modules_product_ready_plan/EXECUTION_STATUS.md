@@ -10,7 +10,7 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 冲突已解决，CORE6-07 实现完成待 PR |
+| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 merged, CORE6-07 PR #20 merged, CORE6-08 split 1-3 已 PR 待 review |
 
 ## CORE6 状态
 
@@ -23,7 +23,7 @@
 | CORE6-05 | Done | PR #18 | `dg-graph` lifecycle/budget fixes, `core6_graph_execution.rs`; local gates green | - |
 | CORE6-06 | Done | PR #19 | `ReceiveOutcome`/`recv_timeout` in `dg-stream`, `StreamPullElement` 100ms poll, bridge `MediaInfo`/track-id propagation, `core6_stream_io.rs`, `core6_media_bridge.rs`; local gates green | - |
 | CORE6-07 | Done | PR #20 | `dg-elements` 算法边界/NMS/top-k/PPOCR/ByteTrack/OSD/distributor-converger 预算，`dg-media` OSD 硬上限与外部 buffer 检查，`core6_elements.rs` 外部 tensor/非有限/100 reload 测试；local gates green |
-| CORE6-08 | In Progress | PR #22 (split 1/3), 当前 branch `devin/1784472000-cabi-v2-owned-handles` | split 1/3: v2 wire 类型与 view 类型已合入；split 2/3: owned `DgError`/`DgOwnedBytes` handle、移除 `dg_last_error`/`LAST_DATA`、全函数 `out_error`、数据 API 返回 owned bytes；cbindgen header 与 ABI snapshot 已同步 | split 为 3 个演进 PR，split 2/3 待 review，split 3/3 待实现 |
+| CORE6-08 | Done | PR #22 (split 1/3), PR #23 (split 2/3), PR #24 (split 3/3) | v2 `DgExternalMemoryV2` 与 `DgReleaseCallback`；FD 导入自动 dup 并由库 close；raw 导入要求非空 release callback 且只调用一次；`dg_engine_destroy(timeout_ms, out_error)` 替代 `dg_engine_free`，超时返回 `Busy` 并可重试；cbindgen header、ABI snapshot、C examples、`docs/user-guide.md` 已同步；本地 fmt/clippy/test/deny 全绿 | - |
 | CORE6-09 | Not Started | - | - | 依赖 CORE6-08 |
 | CORE6-10 | Not Started | - | - | 依赖前述实现 |
 | CORE6-11 | Not Started | - | - | 所有 gate 完成后执行 |
@@ -32,8 +32,8 @@
 
 | 等级 | Open | Reproduced | In Progress | Closed | Exception |
 |---|---:|---:|---:|---:|---:|
-| P0 | 1 | 0 | 2 | 3 | 0 |
-| P1 | 2 | 0 | 2 | 9 | 0 |
+| P0 | 0 | 0 | 2 | 4 | 0 |
+| P1 | 1 | 0 | 2 | 10 | 0 |
 | P2 | 2 | 0 | 0 | 1 | 0 |
 
 统计必须与 `CORE_RISK_REGISTER.md` 同步更新。

@@ -212,6 +212,30 @@ typedef struct DgTensorInfo {
 } DgTensorInfo;
 
 /**
+ * Release callback for imported raw external memory. It is invoked exactly once
+ * when the library no longer references the external handle.
+ */
+typedef void (*DgReleaseCallback)(void*);
+
+/**
+ * External memory descriptor for v2 ABI imports.
+ *
+ * Exactly one of `fd` or `raw` must be valid. FD imports are duplicated; the
+ * library closes the duplicate. Raw imports require a non-null release callback.
+ */
+typedef struct DgExternalMemoryV2 {
+  uint32_t struct_size;
+  uint32_t struct_version;
+  int fd;
+  uint64_t raw;
+  int32_t domain;
+  int32_t device;
+  size_t size_bytes;
+  DgReleaseCallback release;
+  void *user_data;
+} DgExternalMemoryV2;
+
+/**
  * Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
  * the duration of the ABI call.
  */
@@ -313,12 +337,15 @@ enum DgStatus dg_runtime_init(const struct DgRuntimeInitOptions *options,
 enum DgStatus dg_engine_create(struct DgEngine **out, struct DgError **out_error);
 
 /**
- * Frees an engine handle. Null is accepted.
+ * Destroys an engine handle with a timeout in milliseconds. Null is accepted.
  *
- * If the engine still holds a live graph, this best-effort requests stop and
- * waits up to 5 seconds for shutdown before dropping (INT5-09 free→shutdown).
+ * On success the handle is freed. If the running graph cannot be shut down
+ * within `timeout_ms`, `DgStatus::Busy` is returned and the handle remains
+ * valid so the caller can retry.
  */
-void dg_engine_free(struct DgEngine *engine);
+enum DgStatus dg_engine_destroy(struct DgEngine *engine,
+                                uint64_t timeout_ms,
+                                struct DgError **out_error);
 
 /**
  * Loads a graph specification from a UTF-8 string.
@@ -521,15 +548,11 @@ enum DgStatus dg_tensor_create(const uint8_t *data,
 /**
  * Creates a tensor backed by an imported external buffer.
  */
-enum DgStatus dg_tensor_create_external(int fd,
-                                        uint64_t raw,
-                                        int32_t domain,
-                                        size_t size_bytes,
+enum DgStatus dg_tensor_create_external(const struct DgExternalMemoryV2 *desc,
                                         const size_t *shape,
                                         size_t rank,
                                         int32_t dtype,
                                         int32_t format,
-                                        int32_t device,
                                         struct DgTensor **out,
                                         struct DgError **out_error);
 
@@ -562,11 +585,7 @@ enum DgStatus dg_engine_poll(struct DgEngine *engine,
 /**
  * Imports an external buffer handle without dereferencing the external address.
  */
-enum DgStatus dg_buffer_import_external(int fd,
-                                        uint64_t raw,
-                                        int32_t domain,
-                                        int32_t device,
-                                        size_t size_bytes,
+enum DgStatus dg_buffer_import_external(const struct DgExternalMemoryV2 *desc,
                                         struct DgBuffer **out,
                                         struct DgError **out_error);
 

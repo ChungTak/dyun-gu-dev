@@ -26,6 +26,8 @@ include = [
     "DgStringView",
     "DgByteView",
     "DgShapeView",
+    "DgReleaseCallback",
+    "DgExternalMemoryV2",
     "DgError",
     "DgOwnedBytes",
 ]
