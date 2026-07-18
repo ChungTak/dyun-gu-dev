@@ -28,42 +28,8 @@ pub fn frame_to_tensor(frame: MediaFrame) -> Result<Tensor> {
 }
 
 pub fn graph_packet_to_media_frame(packet: Packet) -> Result<MediaFrame> {
-    let Packet { meta, payload } = packet;
-    let tensor = match Arc::try_unwrap(payload) {
-        Ok(PacketPayload::Tensor(tensor)) => Some(tensor),
-        Ok(
-            PacketPayload::Detections(_)
-            | PacketPayload::Classifications(_)
-            | PacketPayload::Faces(_)
-            | PacketPayload::Tracks(_)
-            | PacketPayload::Ocr(_)
-            | PacketPayload::EndOfStream,
-        ) => None,
-        Err(payload) => match payload.as_ref() {
-            PacketPayload::Tensor(tensor) => Some(tensor.clone()),
-            PacketPayload::Detections(_)
-            | PacketPayload::Classifications(_)
-            | PacketPayload::Faces(_)
-            | PacketPayload::Tracks(_)
-            | PacketPayload::Ocr(_)
-            | PacketPayload::EndOfStream => None,
-        },
-    };
-    match tensor {
-        Some(tensor) => {
-            let mut frame = MediaFrame::from_tensor(tensor);
-            let timing = media_frame_timing(&frame.meta);
-            frame.meta.stream_id = meta.stream_id;
-            frame.meta.tags = meta.tags;
-            frame.meta.media_info = meta.media_info;
-            if frame.meta.media_info.is_none() {
-                frame.meta.pts = timing.pts;
-                frame.meta.dts = timing.dts;
-            }
-            normalize_media_frame_meta(&mut frame.meta)?;
-            Ok(frame)
-        }
-        None => Ok(MediaFrame::new(
+    if packet.is_eos() {
+        return Ok(MediaFrame::new(
             MediaFrameKind::EndOfStream,
             DataType::U8,
             DataFormat::Auto,
@@ -71,8 +37,43 @@ pub fn graph_packet_to_media_frame(packet: Packet) -> Result<MediaFrame> {
             DeviceKind::Cpu,
             MemoryDomain::Host,
             Buffer::allocate_host(DeviceKind::Cpu, 0)?,
-        )),
+        ));
     }
+    let Packet { meta, payload } = packet;
+    let tensor = match Arc::try_unwrap(payload) {
+        Ok(PacketPayload::Tensor(tensor)) => Some(tensor),
+        Ok(other) => {
+            return Err(dg_core::Error::InvalidArgument(format!(
+                "graph packet payload is not a media tensor: {:?}",
+                std::mem::discriminant(&other)
+            )))
+        }
+        Err(payload) => match payload.as_ref() {
+            PacketPayload::Tensor(tensor) => Some(tensor.clone()),
+            other => {
+                return Err(dg_core::Error::InvalidArgument(format!(
+                    "graph packet payload is not a media tensor: {:?}",
+                    std::mem::discriminant(other)
+                )))
+            }
+        },
+    };
+    let Some(tensor) = tensor else {
+        return Err(dg_core::Error::InvalidArgument(
+            "graph packet payload is not a tensor".to_string(),
+        ));
+    };
+    let mut frame = MediaFrame::from_tensor(tensor);
+    let timing = media_frame_timing(&frame.meta);
+    frame.meta.stream_id = meta.stream_id;
+    frame.meta.tags = meta.tags;
+    frame.meta.media_info = meta.media_info;
+    if frame.meta.media_info.is_none() {
+        frame.meta.pts = timing.pts;
+        frame.meta.dts = timing.dts;
+    }
+    normalize_media_frame_meta(&mut frame.meta)?;
+    Ok(frame)
 }
 
 pub fn media_frame_to_graph_packet(frame: MediaFrame) -> Result<Packet> {

@@ -26,7 +26,7 @@ use crate::hub::{KEYFRAME_TAG, MEDIA_TAG};
 use crate::stream::SubscriberSourceSyncExt;
 use crate::stream::{
     BackpressurePolicy, BootstrapPolicy, DispatchResult, MediaFilter, PublisherOptions,
-    PublisherSink, RetryConfig, SubscriberOptions,
+    PublisherSink, ReceiveOutcome, RetryConfig, SubscriberOptions,
 };
 use crate::track::{CodecExtradata, CodecId as TrackCodec, TrackInfo, TrackReadiness};
 use dg_media::{MediaFrame, MediaFrameKind};
@@ -287,9 +287,12 @@ impl Element for StreamPullElement {
                 dg_graph::Error::Runtime("pull endpoint missing in run loop".to_string())
             })?;
 
-            match endpoint.source.recv_blocking() {
-                Ok(Some(frame)) if frame.is_end_of_stream() => break,
-                Ok(Some(frame)) => {
+            match endpoint
+                .source
+                .recv_blocking_timeout(Duration::from_millis(100))
+            {
+                Ok(ReceiveOutcome::Frame(frame)) if frame.is_end_of_stream() => break,
+                Ok(ReceiveOutcome::Frame(frame)) => {
                     let is_resumed = needs_keyframe;
                     if needs_keyframe {
                         if !is_keyframe(&frame) {
@@ -307,7 +310,14 @@ impl Element for StreamPullElement {
                     sequence = sequence.saturating_add(1);
                     io.send("out", packet)?;
                 }
-                Ok(None) => break,
+                Ok(ReceiveOutcome::EndOfStream) => break,
+                Ok(ReceiveOutcome::TimedOut) => {
+                    if io.should_stop() {
+                        let _ = endpoint.source.close_blocking();
+                        return Err(dg_graph::Error::NotRunning);
+                    }
+                    continue;
+                }
                 Err(err) => {
                     if err.retryable()
                         && self

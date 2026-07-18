@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tracing::debug;
@@ -10,12 +10,12 @@ use crate::error::{Error, Result};
 use crate::ids::SubscriberId;
 use crate::stream::{
     BackpressurePolicy, DispatchResult, MediaFilter, PublisherOptions, PublisherSink,
-    SubscriberOptions, SubscriberSource,
+    ReceiveOutcome, SubscriberOptions, SubscriberSource,
 };
 use crate::track::{TrackInfo, TrackReadiness};
 use dg_media::MediaFrame;
 
-const RECV_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const RECV_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Tag key marking a frame as a random access point.
 pub const KEYFRAME_TAG: &str = "keyframe";
@@ -76,10 +76,23 @@ impl StreamCore {
 /// subscribers exchange frames through bounded per-subscriber queues with the
 /// configured [`BackpressurePolicy`], and publisher close is propagated to all
 /// subscribers as a clean end of stream.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MemoryStreamHub {
     streams: Mutex<HashMap<String, Arc<StreamCore>>>,
     next_subscriber: AtomicU64,
+    max_streams: usize,
+    max_subscribers_per_stream: usize,
+}
+
+impl Default for MemoryStreamHub {
+    fn default() -> Self {
+        Self {
+            streams: Mutex::new(HashMap::new()),
+            next_subscriber: AtomicU64::new(0),
+            max_streams: 10_000,
+            max_subscribers_per_stream: 1_000,
+        }
+    }
 }
 
 static GLOBAL_HUB: OnceLock<MemoryStreamHub> = OnceLock::new();
@@ -87,6 +100,15 @@ static GLOBAL_HUB: OnceLock<MemoryStreamHub> = OnceLock::new();
 impl MemoryStreamHub {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_limits(max_streams: usize, max_subscribers_per_stream: usize) -> Self {
+        Self {
+            streams: Mutex::new(HashMap::new()),
+            next_subscriber: AtomicU64::new(0),
+            max_streams,
+            max_subscribers_per_stream,
+        }
     }
 
     /// Process-wide hub used by graph elements with `mock://` URLs.
@@ -102,8 +124,23 @@ impl MemoryStreamHub {
         Arc::clone(guard.entry(url.to_string()).or_default())
     }
 
+    fn check_stream_limit(&self, url: &str) -> Result<()> {
+        let guard = self
+            .streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !guard.contains_key(url) && guard.len() >= self.max_streams {
+            return Err(Error::Overflow(format!(
+                "stream registry limit {} reached",
+                self.max_streams
+            )));
+        }
+        Ok(())
+    }
+
     /// Opens a publisher for the stream at `url`.
     pub fn publish(&self, url: &str, _options: PublisherOptions) -> Result<HubPublisher> {
+        self.check_stream_limit(url)?;
         let core = self.stream(url);
         {
             let mut state = core.lock();
@@ -114,15 +151,27 @@ impl MemoryStreamHub {
 
     /// Opens a subscriber for the stream at `url`.
     pub fn subscribe(&self, url: &str, options: SubscriberOptions) -> Result<HubSubscriber> {
+        self.check_stream_limit(url)?;
         if options.queue_capacity == 0 {
             return Err(Error::InvalidArgument(
                 "subscriber queue_capacity must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_subscribers_per_stream == 0 {
+            return Err(Error::Overflow(
+                "subscriber limit for stream is zero".to_string(),
             ));
         }
         let core = self.stream(url);
         let id = SubscriberId(self.next_subscriber.fetch_add(1, Ordering::Relaxed));
         {
             let mut state = core.lock();
+            if state.subscribers.len() >= self.max_subscribers_per_stream {
+                return Err(Error::Overflow(format!(
+                    "subscriber limit {} reached for stream {url}",
+                    self.max_subscribers_per_stream
+                )));
+            }
             state.subscribers.insert(
                 id,
                 SubscriberQueue {
@@ -275,6 +324,7 @@ impl Drop for HubPublisher {
 }
 
 /// Subscriber endpoint of the in-memory hub.
+#[derive(Clone)]
 pub struct HubSubscriber {
     core: Arc<StreamCore>,
     id: SubscriberId,
@@ -284,13 +334,27 @@ pub struct HubSubscriber {
 #[async_trait]
 impl SubscriberSource for HubSubscriber {
     async fn recv(&mut self) -> Result<Option<Arc<MediaFrame>>> {
+        loop {
+            match self.recv_timeout(RECV_POLL_INTERVAL).await? {
+                ReceiveOutcome::Frame(frame) => return Ok(Some(frame)),
+                ReceiveOutcome::EndOfStream => return Ok(None),
+                ReceiveOutcome::TimedOut => continue,
+            }
+        }
+    }
+
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome> {
         if self.closed {
-            return Ok(None);
+            return Ok(ReceiveOutcome::EndOfStream);
         }
         let mut state = self.core.lock();
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| Error::InvalidArgument("recv timeout overflowed".to_string()))?;
         loop {
             let Some(subscriber) = state.subscribers.get_mut(&self.id) else {
-                return Ok(None);
+                self.closed = true;
+                return Ok(ReceiveOutcome::EndOfStream);
             };
             if subscriber.overflowed {
                 state.subscribers.remove(&self.id);
@@ -300,17 +364,25 @@ impl SubscriberSource for HubSubscriber {
                 ));
             }
             if let Some(frame) = subscriber.queue.pop_front() {
-                return Ok(Some(frame));
+                return Ok(ReceiveOutcome::Frame(frame));
             }
             if state.publisher_closed {
-                return Ok(None);
+                return Ok(ReceiveOutcome::EndOfStream);
             }
-            state = self
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(ReceiveOutcome::TimedOut);
+            }
+            let wait = deadline - now;
+            let (s, result) = self
                 .core
                 .frame_ready
-                .wait_timeout(state, RECV_POLL_INTERVAL)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .0;
+                .wait_timeout(state, wait)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = s;
+            if result.timed_out() {
+                return Ok(ReceiveOutcome::TimedOut);
+            }
         }
     }
 
@@ -319,6 +391,8 @@ impl SubscriberSource for HubSubscriber {
             self.closed = true;
             let mut state = self.core.lock();
             state.subscribers.remove(&self.id);
+            drop(state);
+            self.core.frame_ready.notify_all();
         }
         Ok(())
     }

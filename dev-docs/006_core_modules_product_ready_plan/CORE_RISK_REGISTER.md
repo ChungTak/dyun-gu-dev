@@ -14,7 +14,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Closed | John Doe |
 | R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | In Progress | John Doe
 | | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；graph source/sink/input 队列 packets/bytes 预算已生效；device/policy 计数仍需 05/11 | | |
-| R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Open | John Doe |
+| R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Mitigated | John Doe |
 | R6-004 | P1 | `dg-graph/src/inference.rs` | pool 只 attach 首 Runtime metrics | 全 pool 共享 metrics，2/4/8 实例对账 | Closed | John Doe |
 | R6-005 | P1 | `dg-runtime/src/metrics.rs` | latency 保存到无界 `Vec<u64>` | 固定 buckets，百万观测常量内存 | Closed | John Doe |
 | R6-006 | P1 | `dg-scheduler/src/lib.rs` | 两级 affinity HashMap 无 capacity/TTL | 有界 LRU/TTL，churn/close/reload 测试 | Closed | John Doe |
@@ -30,7 +30,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-016 | P1 | `dg-runtime::Runtime` | sync submit 可阻塞；cancel无失败报告 | capability诚实 + cancel report + pending shutdown | Closed | John Doe |
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
 | R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
-| R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Open | John Doe |
+| R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Mitigated | John Doe |
 | R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Open | John Doe |
 | R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Open | John Doe |
 | R6-022 | P2 | 横向 error paths | timeout/retry等部分路径依赖字符串判断 | typed taxonomy matrix | Open | John Doe |
@@ -200,5 +200,33 @@ Closed commit/date:
 - Tests: `crates/dg-graph/tests/core6_graph_execution.rs::shutdown_timeout_is_retryable_and_keeps_draining_status`；既有 `running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomically`、`hot_update_keeps_unaffected_branch_lossless_under_backpressure` 回归通过。
 - Runtime evidence: 同上。
 - Residual risk: prepare/create/drain/switch 的独立注入故障覆盖仍不完整，需后续补充 fault injection tests。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 7. CORE6-06 记录
+
+**R6-003**
+- Owner: John Doe
+- Branch/PR: `devin/1784457249-core6-06-media-stream-cancellable-io`
+- Reproduction: `dg-stream/tests/core6_stream_io.rs::subscriber_recv_timeout_returns_timed_out_then_resumes`, `subscriber_close_wakes_pending_recv`
+- Root cause: `SubscriberSource` 没有超时/`close` 唤醒语义，`StreamPullElement` 调用 `recv_blocking()` 在帧未到达时无法协作取消。
+- Chosen fix: 引入 `ReceiveOutcome { Frame, EndOfStream, TimedOut }`；`SubscriberSource` 增加 `async fn recv_timeout`；`SubscriberSourceSyncExt` 增加 `recv_blocking_timeout` 并使 `recv_blocking` 内部循环超时；`HubSubscriber` 用 `Condvar::wait_timeout` 实现真实 deadline 返回 `TimedOut`，`close` 删除 subscriber 后 `notify_all`；`StreamPullElement` 用 100ms poll slice 调用 `recv_blocking_timeout`，`TimedOut` 仅检查 `io.should_stop()`；桥接 adapter 提供 tokio/线程定时 fallback。
+- Public compatibility impact: `SubscriberSource` 新增必需方法 `recv_timeout`；`SubscriberSourceSyncExt` 新增 `recv_blocking_timeout`；`ReceiveOutcome` 公开导出。
+- Tests: `crates/dg-stream/tests/core6_stream_io.rs`（timeout、close wake、registry/subscriber limits），`crates/dg-stream/tests/elements.rs`（回归）。
+- Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`dg-media --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
+- Residual risk: 真实网络下的长时 reconnect backoff、pull open 重试、EOS 与 graph shutdown race 需要 Cheetah runner 长 soak 证据。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+**R6-019**
+- Owner: John Doe
+- Branch/PR: `devin/1784457249-core6-06-media-stream-cancellable-io`
+- Reproduction: `dg-stream/src/bridge.rs` 中 `u32::try_from(track.track_id).unwrap_or(u32::MAX)`；`cheetah_avframe_to_media_frame_with_transfer` 中 `MediaInfo::encoded` 和 `normalize_media_frame_meta` 被 `let _ =` 吞掉；`dg-media/src/bridge.rs::graph_packet_to_media_frame` 对任意非 Tensor 返回伪造 EOS。
+- Root cause: 桥接层把不可信网络帧当内部可信对象处理，错误被静默、ID 被饱和、非 tensor payload 被降级。
+- Chosen fix: `media_frame_to_cheetah_track_info` 返回 `Result`，track id 溢出报错；`cheetah_avframe_to_media_frame_with_transfer` 在拷贝前检查 `timebase.den != 0` 与 track id 可表示性；`MediaInfo::encoded` 与 `normalize_media_frame_meta` 用 `?` 传播错误；`graph_packet_to_media_frame` 仅对 `PacketPayload::EndOfStream` 返回 EOS，其它非 Tensor payload 返回 `InvalidArgument`。
+- Public compatibility impact: `media_frame_to_cheetah_track_info` 签名改为 `Result<dg_stream_cheetah::TrackInfo>`；`graph_packet_to_media_frame` 不再生成默认 EOS，调用者需显式发送 EOS packet。
+- Tests: `crates/dg-media/tests/core6_media_bridge.rs`（非 tensor 拒绝、EOS 保留、共享 tensor roundtrip），`dg-stream/tests/core6_stream_io.rs`。
+- Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`dg-media --features avcodec-profile-native-free` 全绿；Cargo.lock 无变化。
+- Residual risk: 仍缺少 frame bytes / codec config count / metadata tags 到 `ResourcePolicy` 的动态预算绑定；待 CORE6-07/09 结合 policy 计数继续收敛。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)

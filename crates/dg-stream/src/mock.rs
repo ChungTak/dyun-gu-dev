@@ -1,13 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
 use crate::ids::{StreamId, StreamKey, SubscriberId};
 use crate::stream::{
-    DispatchResult, PublisherOptions, PublisherSink, StreamManagerApi, StreamSnapshot,
-    SubscriberOptions, SubscriberSource,
+    DispatchResult, PublisherOptions, PublisherSink, ReceiveOutcome, StreamManagerApi,
+    StreamSnapshot, SubscriberOptions, SubscriberSource,
 };
 use crate::track::TrackInfo;
 use dg_media::MediaFrame;
@@ -99,10 +100,32 @@ impl MockSubscriberSource {
 #[async_trait]
 impl SubscriberSource for MockSubscriberSource {
     async fn recv(&mut self) -> Result<Option<Arc<MediaFrame>>> {
-        if self.closed {
-            return Ok(None);
+        loop {
+            match self.recv_timeout(Duration::from_millis(100)).await? {
+                ReceiveOutcome::Frame(frame) => return Ok(Some(frame)),
+                ReceiveOutcome::EndOfStream => return Ok(None),
+                ReceiveOutcome::TimedOut => continue,
+            }
         }
-        Ok(self.frames.pop_front())
+    }
+
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome> {
+        if self.closed {
+            return Ok(ReceiveOutcome::EndOfStream);
+        }
+        if let Some(frame) = self.frames.pop_front() {
+            return Ok(ReceiveOutcome::Frame(frame));
+        }
+        if !timeout.is_zero() {
+            std::thread::sleep(timeout);
+        }
+        if self.closed {
+            return Ok(ReceiveOutcome::EndOfStream);
+        }
+        if let Some(frame) = self.frames.pop_front() {
+            return Ok(ReceiveOutcome::Frame(frame));
+        }
+        Ok(ReceiveOutcome::TimedOut)
     }
 
     async fn close(&mut self) -> Result<()> {

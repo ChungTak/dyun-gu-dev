@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -210,10 +211,19 @@ pub trait PublisherSink: Send + Sync {
     fn take_keyframe_requests(&self) -> u64;
 }
 
+/// Result of a bounded receive attempt on a subscriber source.
+#[derive(Debug, Clone)]
+pub enum ReceiveOutcome {
+    Frame(Arc<MediaFrame>),
+    EndOfStream,
+    TimedOut,
+}
+
 /// Subscriber source boundary.
 #[async_trait]
 pub trait SubscriberSource: Send {
     async fn recv(&mut self) -> Result<Option<Arc<MediaFrame>>>;
+    async fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome>;
     async fn close(&mut self) -> Result<()>;
     fn id(&self) -> SubscriberId;
 }
@@ -221,7 +231,17 @@ pub trait SubscriberSource: Send {
 /// Convenience extension for synchronous call sites.
 pub trait SubscriberSourceSyncExt: SubscriberSource {
     fn recv_blocking(&mut self) -> Result<Option<Arc<MediaFrame>>> {
-        futures::executor::block_on(self.recv())
+        loop {
+            match self.recv_blocking_timeout(Duration::from_millis(100))? {
+                ReceiveOutcome::Frame(frame) => return Ok(Some(frame)),
+                ReceiveOutcome::EndOfStream => return Ok(None),
+                ReceiveOutcome::TimedOut => continue,
+            }
+        }
+    }
+
+    fn recv_blocking_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome> {
+        futures::executor::block_on(self.recv_timeout(timeout))
     }
 
     fn close_blocking(&mut self) -> Result<()> {
