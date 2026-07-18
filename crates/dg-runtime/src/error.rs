@@ -31,6 +31,8 @@ pub enum Error {
     CapabilityUnsupported(String),
     #[error("IO error: {0}")]
     Io(String),
+    #[error("sequence number space exhausted while in-flight requests remain")]
+    SequenceExhausted,
 }
 
 impl From<std::io::Error> for Error {

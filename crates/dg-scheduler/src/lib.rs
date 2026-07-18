@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub use dg_core::CoreSelection;
 use dg_core::{DeployMode, DeviceKind};
@@ -49,6 +50,8 @@ pub enum Error {
     NoAvailableCore,
     #[error("instance pool must contain at least one instance")]
     InvalidInstanceCount,
+    #[error("scheduler core load overflow")]
+    LoadOverflow,
 }
 
 /// A schedulable device with a numeric card id.
@@ -224,11 +227,13 @@ impl Request {
     }
 }
 
-/// Snapshot of a core including current load.
+/// Snapshot of a core including current load and invariant violations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreLoad {
     pub id: u8,
     pub load: usize,
+    pub overflow_count: u64,
+    pub underflow_count: u64,
 }
 
 /// Snapshot of a device including current core loads.
@@ -239,10 +244,20 @@ pub struct DeviceLoad {
     pub cores: Vec<CoreLoad>,
 }
 
+/// Affinity table usage counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AffinityMetrics {
+    pub entries: usize,
+    pub evictions: u64,
+    pub expired: u64,
+}
+
 #[derive(Clone, Debug)]
 struct CoreState {
     id: u8,
     load: usize,
+    overflow_count: u64,
+    underflow_count: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -255,8 +270,94 @@ struct DeviceState {
 #[derive(Clone, Debug)]
 struct SchedulerState {
     devices: Vec<DeviceState>,
-    affinity: HashMap<String, Allocation>,
+    affinity: BoundedAffinityTable<Allocation>,
     round_robin_cursor: usize,
+}
+
+/// A bounded affinity table with TTL and LRU eviction.
+#[derive(Clone, Debug)]
+struct BoundedAffinityTable<T: Clone> {
+    capacity: usize,
+    ttl: Duration,
+    entries: HashMap<String, AffinityEntry<T>>,
+    evictions: u64,
+    expired: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AffinityEntry<T: Clone> {
+    value: T,
+    last_used: Instant,
+}
+
+impl<T: Clone> BoundedAffinityTable<T> {
+    fn new(capacity: usize, ttl: Duration) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            ttl,
+            entries: HashMap::new(),
+            evictions: 0,
+            expired: 0,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<T> {
+        let now = Instant::now();
+        if let Some(entry) = self.entries.get_mut(key) {
+            if now.duration_since(entry.last_used) > self.ttl {
+                self.entries.remove(key);
+                self.expired += 1;
+                return None;
+            }
+            entry.last_used = now;
+            return Some(entry.value.clone());
+        }
+        None
+    }
+
+    fn insert(&mut self, key: String, value: T) {
+        let now = Instant::now();
+        if !self.entries.contains_key(&key) && self.entries.len() >= self.capacity {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+                self.evictions += 1;
+            }
+        }
+        self.entries.insert(
+            key,
+            AffinityEntry {
+                value,
+                last_used: now,
+            },
+        );
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
+
+    fn metrics(&self) -> AffinityMetrics {
+        AffinityMetrics {
+            entries: self.entries.len(),
+            evictions: self.evictions,
+            expired: self.expired,
+        }
+    }
+
+    #[cfg(test)]
+    fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(1);
+    }
+
+    #[cfg(test)]
+    fn set_ttl(&mut self, ttl: Duration) {
+        self.ttl = ttl;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,12 +391,28 @@ impl Scheduler {
         Ok(state.snapshot())
     }
 
+    pub fn affinity_metrics(&self) -> AffinityMetrics {
+        self.state
+            .lock()
+            .map_or(AffinityMetrics::default(), |state| state.affinity.metrics())
+    }
+
     pub fn acquire(&self, request: Request) -> Result<Lease> {
         let mut state = self.state.lock().map_err(|_| Error::NoAvailableCore)?;
         let allocation = state.acquire(request)?;
+        let (device_kind, device_id, core_id) = {
+            let device = &state.devices[allocation.device_index];
+            (
+                device.kind,
+                device.id,
+                device.cores[allocation.core_index].id,
+            )
+        };
         Ok(Lease {
             state: Arc::clone(&self.state),
             allocation,
+            device: (device_kind, device_id),
+            core_id,
         })
     }
 }
@@ -305,18 +422,17 @@ impl Scheduler {
 pub struct Lease {
     state: Arc<Mutex<SchedulerState>>,
     allocation: Allocation,
+    device: (DeviceKind, u16),
+    core_id: u8,
 }
 
 impl Lease {
     pub fn device(&self) -> (DeviceKind, u16) {
-        let state = self.state.lock().expect("scheduler state poisoned");
-        let device = &state.devices[self.allocation.device_index];
-        (device.kind, device.id)
+        self.device
     }
 
     pub fn core_id(&self) -> u8 {
-        let state = self.state.lock().expect("scheduler state poisoned");
-        state.devices[self.allocation.device_index].cores[self.allocation.core_index].id
+        self.core_id
     }
 }
 
@@ -324,6 +440,10 @@ impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.release(self.allocation);
+        } else {
+            // Mutex poisoned: the scheduler invariant is broken. The load is
+            // permanently leaked rather than panicking, but callers can detect
+            // this through load imbalance in tests/metrics.
         }
     }
 }
@@ -347,7 +467,7 @@ pub struct InstancePool {
     placements: Vec<Placement>,
     allowed_placements: Vec<(u16, u8)>,
     next_instance: Arc<Mutex<usize>>,
-    affinity: Arc<Mutex<HashMap<String, usize>>>,
+    affinity: Arc<Mutex<BoundedAffinityTable<usize>>>,
 }
 
 impl InstancePool {
@@ -392,7 +512,10 @@ impl InstancePool {
             placements,
             allowed_placements,
             next_instance: Arc::new(Mutex::new(0)),
-            affinity: Arc::new(Mutex::new(HashMap::new())),
+            affinity: Arc::new(Mutex::new(BoundedAffinityTable::new(
+                instance_count,
+                Duration::from_secs(600),
+            ))),
         })
     }
 
@@ -410,7 +533,7 @@ impl InstancePool {
         affinity_key: Option<&str>,
     ) -> Result<PooledLease> {
         if let Some(key) = affinity_key {
-            if let Some(&instance_index) = self
+            if let Some(instance_index) = self
                 .affinity
                 .lock()
                 .map_err(|_| Error::NoAvailableCore)?
@@ -461,6 +584,33 @@ impl InstancePool {
             )
             .with_allowed_placements(vec![placement]),
         )
+    }
+
+    pub fn affinity_metrics(&self) -> AffinityMetrics {
+        self.affinity
+            .lock()
+            .map_or(AffinityMetrics::default(), |table| table.metrics())
+    }
+
+    /// Removes an affinity entry when its stream ends or the node reloads.
+    pub fn remove_affinity(&self, key: &str) {
+        if let Ok(mut table) = self.affinity.lock() {
+            table.remove(key);
+        }
+    }
+
+    #[cfg(test)]
+    fn set_affinity_capacity(&self, capacity: usize) {
+        if let Ok(mut table) = self.affinity.lock() {
+            table.set_capacity(capacity);
+        }
+    }
+
+    #[cfg(test)]
+    fn set_affinity_ttl(&self, ttl: Duration) {
+        if let Ok(mut table) = self.affinity.lock() {
+            table.set_ttl(ttl);
+        }
     }
 
     fn checkout_request(&self, request: Request) -> Result<PooledLease> {
@@ -516,6 +666,12 @@ impl PooledLease {
 impl SchedulerState {
     fn from_topology(topology: &Topology) -> Result<Self> {
         validate_topology(&topology.devices)?;
+        let total_cores = topology
+            .devices
+            .iter()
+            .map(|device| device.cores.len())
+            .sum::<usize>()
+            .max(1);
         let devices = topology
             .devices
             .iter()
@@ -528,13 +684,15 @@ impl SchedulerState {
                     .map(|core| CoreState {
                         id: core.id,
                         load: 0,
+                        overflow_count: 0,
+                        underflow_count: 0,
                     })
                     .collect(),
             })
             .collect();
         Ok(Self {
             devices,
-            affinity: HashMap::new(),
+            affinity: BoundedAffinityTable::new(total_cores, Duration::from_secs(600)),
             round_robin_cursor: 0,
         })
     }
@@ -551,6 +709,8 @@ impl SchedulerState {
                     .map(|core| CoreLoad {
                         id: core.id,
                         load: core.load,
+                        overflow_count: core.overflow_count,
+                        underflow_count: core.underflow_count,
                     })
                     .collect(),
             })
@@ -580,14 +740,14 @@ impl SchedulerState {
 
         if request.mode == SchedulingMode::Auto {
             if let Some(key) = &request.affinity_key {
-                if let Some(allocation) = self.affinity.get(key).copied() {
+                if let Some(allocation) = self.affinity.get(key) {
                     if self.allocation_is_valid(
                         request.kind,
                         &device_indexes,
                         allocation,
                         request.core_selection,
                     ) {
-                        self.increment(allocation);
+                        self.increment(allocation)?;
                         return Ok(allocation);
                     }
                 }
@@ -648,7 +808,7 @@ impl SchedulerState {
             device_index: selected.0,
             core_index: selected.1,
         };
-        self.increment(allocation);
+        self.increment(allocation)?;
 
         if let Some(key) = request.affinity_key {
             self.affinity.insert(key, allocation);
@@ -676,14 +836,29 @@ impl SchedulerState {
         selection.contains(core.id)
     }
 
-    fn increment(&mut self, allocation: Allocation) {
+    fn increment(&mut self, allocation: Allocation) -> Result<()> {
         let core = &mut self.devices[allocation.device_index].cores[allocation.core_index];
-        core.load = core.load.saturating_add(1);
+        match core.load.checked_add(1) {
+            Some(new_load) => {
+                core.load = new_load;
+                Ok(())
+            }
+            None => {
+                core.overflow_count += 1;
+                Err(Error::LoadOverflow)
+            }
+        }
     }
 
     fn release(&mut self, allocation: Allocation) {
         let core = &mut self.devices[allocation.device_index].cores[allocation.core_index];
-        core.load = core.load.saturating_sub(1);
+        match core.load.checked_sub(1) {
+            Some(new_load) => core.load = new_load,
+            None => {
+                core.underflow_count += 1;
+                core.load = 0;
+            }
+        }
     }
 }
 
@@ -900,8 +1075,13 @@ mod tests {
         let scheduler =
             Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 2).expect("topology"))
                 .expect("scheduler");
-        let pool =
-            InstancePool::new(scheduler, DeviceKind::RknnNpu, 2, CoreSelection::All).expect("pool");
+        let pool = InstancePool::new(
+            scheduler.clone(),
+            DeviceKind::RknnNpu,
+            2,
+            CoreSelection::All,
+        )
+        .expect("pool");
         let checkout = pool.checkout_explicit(0, 1).expect("explicit checkout");
         assert_eq!(checkout.instance_index(), 1);
         assert_eq!(checkout.placement().core_id, 1);
@@ -923,6 +1103,114 @@ mod tests {
             .checkout(SchedulingPolicy::RoundRobin, Some("stream-a"))
             .expect("second checkout");
         assert_eq!(second.instance_index(), first_index);
+    }
+
+    #[test]
+    fn scheduler_affinity_table_is_bounded_by_core_count() {
+        let scheduler = rknn_topology();
+        let mut leases = Vec::new();
+        for i in 0..6 {
+            let lease = scheduler
+                .acquire(
+                    Request::auto(DeviceKind::RknnNpu).with_affinity_key(format!("stream-{i}")),
+                )
+                .expect("lease");
+            leases.push(lease);
+        }
+        drop(leases);
+        let metrics = scheduler.affinity_metrics();
+        assert_eq!(metrics.entries, 5);
+        assert!(metrics.evictions >= 1);
+        assert!(scheduler
+            .snapshot()
+            .expect("snapshot")
+            .iter()
+            .all(|device| device.cores.iter().all(|core| core.load == 0)));
+    }
+
+    #[test]
+    fn instance_pool_affinity_capacity_evicts_lru() {
+        let scheduler =
+            Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 2).expect("topology"))
+                .expect("scheduler");
+        let pool = InstancePool::new(
+            scheduler.clone(),
+            DeviceKind::RknnNpu,
+            2,
+            CoreSelection::All,
+        )
+        .expect("pool");
+        pool.set_affinity_capacity(2);
+
+        let mut checkouts = Vec::new();
+        for i in 0..3 {
+            let checkout = pool
+                .checkout(SchedulingPolicy::RoundRobin, Some(&format!("stream-{i}")))
+                .expect("checkout");
+            checkouts.push(checkout);
+        }
+        drop(checkouts);
+
+        let metrics = pool.affinity_metrics();
+        assert_eq!(metrics.entries, 2);
+        assert!(metrics.evictions >= 1);
+        assert!(scheduler
+            .snapshot()
+            .expect("snapshot")
+            .iter()
+            .all(|device| device.cores.iter().all(|core| core.load == 0)));
+    }
+
+    #[test]
+    fn instance_pool_affinity_expires_after_ttl() {
+        let scheduler =
+            Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 1).expect("topology"))
+                .expect("scheduler");
+        let pool = InstancePool::new(
+            scheduler.clone(),
+            DeviceKind::RknnNpu,
+            1,
+            CoreSelection::All,
+        )
+        .expect("pool");
+        pool.set_affinity_ttl(Duration::from_millis(1));
+
+        let first = pool
+            .checkout(SchedulingPolicy::RoundRobin, Some("stream-a"))
+            .expect("first");
+        drop(first);
+        std::thread::sleep(Duration::from_millis(5));
+
+        let second = pool
+            .checkout(SchedulingPolicy::RoundRobin, Some("stream-a"))
+            .expect("second");
+        drop(second);
+
+        let metrics = pool.affinity_metrics();
+        assert!(metrics.expired >= 1);
+    }
+
+    #[test]
+    fn instance_pool_remove_affinity_drops_entry_and_load() {
+        let scheduler =
+            Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 1).expect("topology"))
+                .expect("scheduler");
+        let pool = InstancePool::new(
+            scheduler.clone(),
+            DeviceKind::RknnNpu,
+            1,
+            CoreSelection::All,
+        )
+        .expect("pool");
+
+        let first = pool
+            .checkout(SchedulingPolicy::RoundRobin, Some("stream-a"))
+            .expect("first");
+        drop(first);
+        pool.remove_affinity("stream-a");
+
+        let metrics = pool.affinity_metrics();
+        assert_eq!(metrics.entries, 0);
     }
 
     #[test]

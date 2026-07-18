@@ -17,7 +17,7 @@ mod tensor_info;
 
 pub use backend::{
     configure_backend, create_backend, registered_backends, BackendDescriptor, BackendKind,
-    InferBackend,
+    CancelReport, InferBackend,
 };
 pub use capabilities::{
     backend_capabilities, supports_deployment, supports_device, supports_precision,

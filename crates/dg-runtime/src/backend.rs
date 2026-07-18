@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
@@ -13,6 +14,18 @@ pub enum BackendKind {
     Rknn,
     TensorRt,
     Sophon,
+}
+
+/// Report returned by a backend cancel operation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReport {
+    /// Number of in-flight submissions the runtime asked the backend to cancel.
+    pub requested: u64,
+    /// Number of in-flight submissions the backend confirmed as released.
+    pub completed: u64,
+    /// Number of in-flight submissions the backend could not cancel but
+    /// disowned from its own tracking.
+    pub abandoned: u64,
 }
 
 /// A backend implementation.
@@ -77,8 +90,10 @@ pub trait InferBackend: Send {
     /// Attaches the runtime-owned metrics handle to this backend.
     fn attach_metrics(&mut self, _metrics: Arc<BackendMetrics>) {}
 
-    /// Cancels all in-flight submissions.
-    fn cancel(&mut self) {}
+    /// Cancels all in-flight submissions and reports how many were released.
+    fn cancel(&mut self) -> Result<CancelReport> {
+        Ok(CancelReport::default())
+    }
 
     /// Probes backend capabilities after initialization.
     fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
