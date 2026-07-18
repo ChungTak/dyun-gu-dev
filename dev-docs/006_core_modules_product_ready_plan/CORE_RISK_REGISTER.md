@@ -250,7 +250,7 @@ Closed commit/date:
 
 **R6-013**
 - Owner: John Doe
-- Branch/PR: `devin/1784471000-cabi-v2-wire-types`
+- Branch/PR: PR #22 (`devin/1784471000-cabi-v2-wire-types`)
 - Reproduction: `dg-capi/src/lib.rs::tests::c_abi_v2_wire_types_reject_invalid_inputs`
 - Root cause: C ABI 函数直接把 `DgGraphFormat`/`DgDataType`/`DgDataFormat`/`DgDeviceKind`/`DgMemoryDomain`/`DgBackendKind` 等 `#[repr(C)]` 枚举作为参数，C 侧传入的未知判别值会在进入 Rust 函数体前被编译器当作对应枚举值，存在未定义行为。
 - Chosen fix: 所有 C 输入枚举参数改为 `int32_t`（Rust `i32`），在 Rust 侧通过 `format_from_c`/`data_type_from_c`/`format_from_c_enum`/`device_from_c`/`domain_from_c`/`backend_kind_from_c` 校验后再构造内部枚举；未知/越界值统一返回 `DgStatus::InvalidArgument`。
@@ -263,7 +263,7 @@ Closed commit/date:
 
 **R6-015**
 - Owner: John Doe
-- Branch/PR: `devin/1784471000-cabi-v2-wire-types`
+- Branch/PR: PR #22 (`devin/1784471000-cabi-v2-wire-types`)
 - Reproduction: 直接对任意 `length`/`rank` 调用 `std::slice::from_raw_parts` 构造 view，缺少统一的 null/零长/溢出/硬上限校验。
 - Chosen fix: 新增 `DgStringView`/`DgByteView`/`DgShapeView` 三个 view 类型（`DgByteView`/`DgShapeView` 先验 `MAX_VIEW_LEN`/`MAX_SHAPE_RANK` 检查）与 `check_struct_version` 统一函数；现有 `bytes`/`dims` helper 也增加 `MAX_VIEW_LEN`/`MAX_SHAPE_RANK` 上限与 null 检查。
 - Public compatibility impact: header 中新增 `DgStringView`、`DgByteView`、`DgShapeView` struct 定义；`DgTensorInfo`/`DgBackendCapabilities`/`DgRuntimeInitOptions` 增加 `uint32_t struct_version` 字段，`struct_size` 改为 `uint32_t`。
