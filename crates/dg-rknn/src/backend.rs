@@ -356,7 +356,7 @@ impl RknnBackend {
             return Err(Error::Backend("rknn zero-copy binding missing".to_string()));
         };
         for ((mem, tensor), info) in binding.inputs.iter().zip(inputs).zip(&self.input_infos) {
-            let bytes = tensor.buffer().read_bytes();
+            let bytes = tensor.buffer().read_bytes()?;
             match &info.strides {
                 Some(strides) => {
                     let elem_bytes = info.dtype.bytes_per_element_ceil();
@@ -401,7 +401,7 @@ impl RknnBackend {
         let input_buffers: Vec<Vec<u8>> = inputs
             .iter()
             .map(|tensor| tensor.buffer().read_bytes())
-            .collect();
+            .collect::<std::result::Result<Vec<_>, dg_core::Error>>()?;
         let mut inputs_set = Vec::with_capacity(input_buffers.len());
         for (index, buffer) in input_buffers.iter().enumerate() {
             inputs_set.push(sys::rknn_input {
@@ -816,8 +816,8 @@ mod tests {
             .expect("input bytes");
         let outputs = backend.run(std::slice::from_ref(&input)).expect("run");
         assert_eq!(
-            outputs[0].buffer().read_bytes(),
-            input.buffer().read_bytes()
+            outputs[0].buffer().read_bytes().unwrap(),
+            input.buffer().read_bytes().unwrap()
         );
         assert!(matches!(backend.run(&[]), Err(Error::InvalidOption(_))));
     }

@@ -77,8 +77,14 @@ impl TensorDesc {
         self.shape.element_count()
     }
 
+    /// Number of bytes required to store the tensor, accounting for explicit
+    /// non-contiguous strides when present.
     pub fn storage_bytes(&self) -> Result<usize> {
-        self.dtype.storage_bytes_for_shape(&self.shape)
+        let physical_elements = match &self.strides {
+            Some(strides) => strides.physical_element_count(&self.shape)?,
+            None => self.shape.element_count()?,
+        };
+        self.dtype.storage_bytes_for_elements(physical_elements)
     }
 }
 
@@ -140,19 +146,16 @@ impl Tensor {
             ));
         }
 
-        if self
-            .desc
-            .strides
-            .as_ref()
-            .is_some_and(|strides| !strides.is_contiguous_for(&self.desc.shape))
-        {
-            return Err(Error::Shape(
-                "cannot reshape a tensor with non-contiguous strides".to_string(),
-            ));
+        if let Some(strides) = self.desc.strides.as_ref() {
+            if !strides.is_contiguous_for(&self.desc.shape)? {
+                return Err(Error::Shape(
+                    "cannot reshape a tensor with non-contiguous strides".to_string(),
+                ));
+            }
         }
 
         self.desc.shape = shape;
-        self.desc.strides = Some(self.desc.shape.contiguous_strides());
+        self.desc.strides = Some(self.desc.shape.contiguous_strides()?);
         Ok(())
     }
 

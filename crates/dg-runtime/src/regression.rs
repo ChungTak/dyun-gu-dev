@@ -223,7 +223,10 @@ fn make_tensor(fixture: &RegressionTensor, device: &CpuDevice) -> Result<Tensor,
 }
 
 fn read_f32(tensor: &Tensor, case: &str, output: usize) -> Result<Vec<f32>, RegressionError> {
-    let bytes = tensor.buffer().read_bytes();
+    let bytes = tensor
+        .buffer()
+        .read_bytes()
+        .map_err(|e| RegressionError::Backend(RuntimeError::Core(e)))?;
     let chunks = bytes.chunks_exact(std::mem::size_of::<f32>());
     if !chunks.remainder().is_empty() {
         return Err(RegressionError::Invalid(format!(

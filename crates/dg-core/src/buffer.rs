@@ -27,12 +27,15 @@ enum BufferStorage {
 }
 
 impl BufferStorage {
-    fn read_bytes(&self) -> Vec<u8> {
+    fn try_read_bytes(&self) -> Result<Vec<u8>> {
         match self {
-            Self::Host(bytes) => read_guard(bytes).clone(),
-            Self::External { bytes, .. } => bytes
-                .as_ref()
-                .map_or_else(Vec::new, |bytes| read_guard(bytes).clone()),
+            Self::Host(bytes) => Ok(read_guard(bytes).clone()),
+            Self::External { bytes: None, .. } => Err(Error::Buffer(
+                "external buffer is not host-mapped; call map or stage explicitly".to_string(),
+            )),
+            Self::External {
+                bytes: Some(bytes), ..
+            } => Ok(read_guard(bytes).clone()),
         }
     }
 
@@ -92,21 +95,28 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub(crate) fn new_host(device: DeviceKind, desc: BufferDesc) -> Self {
-        Self {
+    pub(crate) fn try_new_host(device: DeviceKind, desc: BufferDesc) -> Result<Self> {
+        if desc.align == 0 {
+            return Err(Error::InvalidArgument(
+                "buffer alignment must be non-zero".to_string(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(desc.size_bytes)
+            .map_err(|_| Error::OutOfMemory)?;
+        bytes.resize(desc.size_bytes, 0);
+        Ok(Self {
             device,
             domain: MemoryDomain::Host,
             desc,
             external: ExternalHandle::none(),
-            storage: Arc::new(BufferStorage::Host(Arc::new(RwLock::new(vec![
-                0;
-                desc.size_bytes
-            ])))),
-        }
+            storage: Arc::new(BufferStorage::Host(Arc::new(RwLock::new(bytes)))),
+        })
     }
 
-    pub fn allocate_host(device: DeviceKind, size_bytes: usize) -> Self {
-        Self::new_host(device, BufferDesc::new(size_bytes, 1))
+    pub fn allocate_host(device: DeviceKind, size_bytes: usize) -> Result<Self> {
+        Self::try_new_host(device, BufferDesc::new(size_bytes, 1))
     }
 
     pub fn from_host_bytes(device: DeviceKind, desc: BufferDesc, bytes: Vec<u8>) -> Result<Self> {
@@ -216,29 +226,20 @@ impl Buffer {
 
     /// Reads host bytes, cloning shared storage when necessary.
     ///
-    /// Prefer [`Self::try_into_host_bytes`] when consuming an owned buffer.
-    /// Codec bridges should not use this helper.
-    pub fn read_bytes(&self) -> Vec<u8> {
-        self.storage.read_bytes()
+    /// Device-only external buffers return [`Error::Buffer`].
+    pub fn read_bytes(&self) -> Result<Vec<u8>> {
+        self.storage.try_read_bytes()
     }
 
     /// Reads bytes only when host storage is already available.
     pub fn try_read_bytes(&self) -> Result<Vec<u8>> {
-        if matches!(
-            self.storage.as_ref(),
-            BufferStorage::External { bytes: None, .. }
-        ) {
-            return Err(Error::Buffer(
-                "external buffer is not host-mapped; call map or stage explicitly".to_string(),
-            ));
-        }
-        Ok(self.storage.read_bytes())
+        self.read_bytes()
     }
 
     /// Explicitly maps host-backed storage. External-only buffers require
     /// [`Self::map_with`] because dg-core cannot dereference vendor handles.
     pub fn map(&self) -> Result<Vec<u8>> {
-        self.try_read_bytes()
+        self.read_bytes()
     }
 
     /// Explicitly stages an external buffer using a caller-provided mapper.
@@ -250,7 +251,7 @@ impl Buffer {
             self.storage.as_ref(),
             BufferStorage::External { bytes: None, .. }
         ) {
-            return self.try_read_bytes();
+            return self.read_bytes();
         }
         let bytes = mapper(self.external, self.domain, self.desc.size_bytes)?;
         if bytes.len() != self.desc.size_bytes {
@@ -271,41 +272,42 @@ impl Buffer {
                 "buffer is not host-readable; staging is required".to_string(),
             ));
         }
-        Ok(self.into_host_bytes())
-    }
-
-    /// Consumes the buffer and returns host bytes, moving them out when possible.
-    ///
-    /// Device-only external buffers yield an empty vector. Codec bridges must use
-    /// [`Self::try_into_host_bytes`] instead.
-    pub fn into_host_bytes(self) -> Vec<u8> {
         let Self { storage, .. } = self;
         match Arc::try_unwrap(storage) {
             Ok(BufferStorage::Host(bytes)) => match Arc::try_unwrap(bytes) {
                 Ok(lock) => match lock.into_inner() {
-                    Ok(bytes) => bytes,
-                    Err(poisoned) => poisoned.into_inner(),
+                    Ok(bytes) => Ok(bytes),
+                    Err(poisoned) => Ok(poisoned.into_inner()),
                 },
-                Err(bytes) => read_guard(&bytes).clone(),
+                Err(bytes) => Ok(read_guard(&bytes).clone()),
             },
             Ok(BufferStorage::External {
                 bytes: Some(bytes), ..
             }) => match Arc::try_unwrap(bytes) {
                 Ok(lock) => match lock.into_inner() {
-                    Ok(bytes) => bytes,
-                    Err(poisoned) => poisoned.into_inner(),
+                    Ok(bytes) => Ok(bytes),
+                    Err(poisoned) => Ok(poisoned.into_inner()),
                 },
-                Err(bytes) => read_guard(&bytes).clone(),
+                Err(bytes) => Ok(read_guard(&bytes).clone()),
             },
-            Ok(BufferStorage::External { bytes: None, .. }) => Vec::new(),
+            Ok(BufferStorage::External { bytes: None, .. }) => {
+                unreachable!("is_host_readable checked above")
+            }
             Err(storage) => match &*storage {
-                BufferStorage::Host(bytes) => read_guard(bytes).clone(),
+                BufferStorage::Host(bytes) => Ok(read_guard(bytes).clone()),
                 BufferStorage::External {
                     bytes: Some(bytes), ..
-                } => read_guard(bytes).clone(),
-                BufferStorage::External { bytes: None, .. } => Vec::new(),
+                } => Ok(read_guard(bytes).clone()),
+                BufferStorage::External { bytes: None, .. } => {
+                    unreachable!("is_host_readable checked above")
+                }
             },
         }
+    }
+
+    /// Alias for [`Self::try_into_host_bytes`].
+    pub fn into_host_bytes(self) -> Result<Vec<u8>> {
+        self.try_into_host_bytes()
     }
 
     pub fn write_from_slice(&self, src: &[u8]) -> Result<()> {
@@ -323,13 +325,13 @@ impl Buffer {
                 "source and destination size differ".to_string(),
             ));
         }
-        let bytes = self.try_read_bytes()?;
+        let bytes = self.read_bytes()?;
         dst.copy_from_slice(&bytes);
         Ok(())
     }
 
     pub fn copy_to(&self, dst: &Buffer) -> Result<()> {
-        let bytes = self.try_read_bytes()?;
+        let bytes = self.read_bytes()?;
         dst.write_from_slice(&bytes)
     }
 
@@ -373,7 +375,7 @@ mod host_bytes_tests {
         let shared = buffer.clone();
         let bytes = buffer.try_into_host_bytes().expect("into host bytes");
         assert_eq!(bytes, vec![9, 8]);
-        assert_eq!(shared.read_bytes(), vec![9, 8]);
+        assert_eq!(shared.read_bytes().unwrap(), vec![9, 8]);
     }
 
     #[test]

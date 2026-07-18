@@ -28,7 +28,7 @@ fn cpu_tensor_allocate_copy_and_reshape() {
     );
     let mut other = Tensor::allocate(&device, other_desc).expect("allocate other tensor");
     tensor.copy_to(&mut other).expect("copy tensor");
-    assert_eq!(other.buffer().read_bytes(), vec![1, 2, 3, 4]);
+    assert_eq!(other.buffer().read_bytes().unwrap(), vec![1, 2, 3, 4]);
 
     tensor.reshape(Shape::new([4])).expect("reshape");
     assert_eq!(tensor.desc().shape().dims(), &[4]);
@@ -215,8 +215,8 @@ proptest! {
     #[test]
     fn contiguous_shape_stride_round_trip(dims in prop::collection::vec(1usize..8, 0..6)) {
         let shape = Shape::new(dims);
-        let strides = shape.contiguous_strides();
-        prop_assert!(strides.is_contiguous_for(&shape));
+        let strides = shape.contiguous_strides().expect("contiguous strides");
+        prop_assert!(strides.is_contiguous_for(&shape).expect("check contiguous"));
         prop_assert_eq!(strides.values().len(), shape.rank());
     }
 }

@@ -244,7 +244,7 @@ impl Element for MockInferenceElement {
             } else {
                 let mut outputs = self.runtime.run(&[tensor])?;
                 for output in &mut outputs {
-                    let bytes = output.buffer().read_bytes();
+                    let bytes = output.buffer().read_bytes()?;
                     let fill = vec![self.fill_value; bytes.len()];
                     output.buffer().write_from_slice(&fill)?;
                 }

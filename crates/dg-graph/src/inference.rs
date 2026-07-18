@@ -736,7 +736,8 @@ connections:
         assert_eq!(
             report.sinks.get("sink").expect("sink outputs")[0]
                 .buffer()
-                .read_bytes(),
+                .read_bytes()
+                .unwrap(),
             vec![0, 0, 0, 0, 0, 0, 0, 0]
         );
         assert_scheduler_load_released();

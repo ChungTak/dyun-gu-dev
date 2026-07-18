@@ -386,7 +386,7 @@ fn decode_detections(
 }
 
 fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
-    let bytes = tensor.buffer().read_bytes();
+    let bytes = tensor.buffer().read_bytes()?;
     match tensor.desc().dtype() {
         DataType::U8 => Ok(bytes.into_iter().map(f32::from).collect()),
         DataType::F32 => {

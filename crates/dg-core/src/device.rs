@@ -165,7 +165,7 @@ mod tests {
                     "buffer alignment must be non-zero".to_string(),
                 ));
             }
-            Ok(crate::Buffer::new_host(DeviceKind::IntelGpu, desc))
+            crate::Buffer::try_new_host(DeviceKind::IntelGpu, desc)
         }
 
         fn deallocate(&self, _buffer: crate::Buffer) -> Result<()> {

@@ -93,7 +93,7 @@ fn assert_in_order(report: &dg_graph::GraphReport, sink: &str, count: usize) {
     for (index, tensor) in tensors.iter().enumerate() {
         let expected = 1.0 + index as f32;
         assert_eq!(
-            tensor.buffer().read_bytes(),
+            tensor.buffer().read_bytes().unwrap(),
             f32_bytes(&[expected; 4]),
             "packet {index} out of order in {sink}"
         );

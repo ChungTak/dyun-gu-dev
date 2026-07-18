@@ -83,7 +83,7 @@ fn decode_resize_osd_encode_pipeline_runs_end_to_end() {
     assert_eq!(outputs.len(), 2);
 
     for (index, interior) in [(0_usize, 10_u8), (1_usize, 1_u8)] {
-        let bytes = outputs[index].buffer().read_bytes();
+        let bytes = outputs[index].buffer().read_bytes().unwrap();
         assert_eq!(bytes.len(), 16);
         // Border pixels overwritten by the OSD box.
         assert_eq!(bytes[0], 255);

@@ -202,7 +202,7 @@ impl ResizeCore {
             ));
         }
         let expected = checked_pixel_count(src_height, src_width, channels, "media_resize")?;
-        let src = frame.buffer.read_bytes();
+        let src = frame.buffer.read_bytes()?;
         if src.len() != expected {
             return Err(Error::Media(format!(
                 "media_resize: buffer has {} bytes, expected {expected}",
@@ -296,7 +296,7 @@ impl OsdCore {
             )));
         }
         let expected = checked_pixel_count(height, width, channels, "media_osd")?;
-        let mut bytes = frame.buffer.read_bytes();
+        let mut bytes = frame.buffer.read_bytes()?;
         if bytes.len() != expected {
             return Err(Error::Media(format!(
                 "media_osd: buffer has {} bytes, expected {expected}",
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(image.shape, vec![2, 2, 1]);
         // Shared storage: decode must not copy the payload.
         assert!(shared.ref_count() >= 2);
-        assert_eq!(image.buffer.read_bytes(), vec![9, 8, 7, 6]);
+        assert_eq!(image.buffer.read_bytes().unwrap(), vec![9, 8, 7, 6]);
         core.submit_end_of_stream();
         assert!(matches!(core.poll(), MediaPoll::EndOfStream));
     }
@@ -449,7 +449,7 @@ mod tests {
         };
         assert_eq!(resized.shape, vec![4, 4, 1]);
         assert_eq!(
-            resized.buffer.read_bytes(),
+            resized.buffer.read_bytes().unwrap(),
             vec![1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4]
         );
     }
@@ -470,7 +470,7 @@ mod tests {
         let MediaPoll::Ready(drawn) = core.poll() else {
             panic!("expected osd output");
         };
-        let bytes = drawn.buffer.read_bytes();
+        let bytes = drawn.buffer.read_bytes().unwrap();
         assert_eq!(bytes[0], 255);
         assert_eq!(bytes[3], 255);
         assert_eq!(bytes[12], 255);

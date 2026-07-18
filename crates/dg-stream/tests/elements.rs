@@ -470,7 +470,7 @@ fn end_to_end_pull_push_pipeline() {
     );
     assert_eq!(received[1].meta.pts, Some(40));
     assert_eq!(received[2].meta.pts, Some(80));
-    assert_eq!(received[2].buffer.read_bytes(), b"delta2");
+    assert_eq!(received[2].buffer.read_bytes().unwrap(), b"delta2");
 }
 
 #[test]

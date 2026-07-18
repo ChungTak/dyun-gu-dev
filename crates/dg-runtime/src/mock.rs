@@ -81,7 +81,7 @@ impl MockBackend {
         for (index, output_info) in self.output_infos.iter().enumerate() {
             let output = output_info.allocate(&device)?;
             if self.options.echo_inputs && index < inputs.len() {
-                let bytes = inputs[index].buffer().read_bytes();
+                let bytes = inputs[index].buffer().read_bytes()?;
                 if bytes.len() != output.buffer().len() {
                     return Err(Error::Backend(
                         "mock backend echo output size mismatch".to_string(),

@@ -53,8 +53,8 @@ fn source_mock_sink_pipeline_runs_end_to_end() {
         .expect("run graph");
     let tensors = report.sinks.get("sink").expect("sink outputs");
     assert_eq!(tensors.len(), 2);
-    let first_bytes = tensors[0].buffer().read_bytes();
-    let second_bytes = tensors[1].buffer().read_bytes();
+    let first_bytes = tensors[0].buffer().read_bytes().unwrap();
+    let second_bytes = tensors[1].buffer().read_bytes().unwrap();
     assert_eq!(first_bytes.len(), 16);
     assert_eq!(first_bytes, f32_bytes(&[3.0, 3.0, 3.0, 3.0]));
     assert_eq!(second_bytes, f32_bytes(&[4.0, 4.0, 4.0, 4.0]));
@@ -112,7 +112,7 @@ fn injected_input_mock_sink_pipeline_runs_end_to_end() {
     let tensors = report.sinks.get("sink").expect("sink outputs");
     assert_eq!(tensors.len(), 1);
     assert_eq!(
-        tensors[0].buffer().read_bytes(),
+        tensors[0].buffer().read_bytes().unwrap(),
         f32_bytes(&[1.0, 2.0, 3.0, 4.0])
     );
 }
@@ -163,7 +163,7 @@ fn pipeline_load_balances_packets_across_threaded_element_instances() {
     assert_eq!(tensors.len(), count);
     let mut observed = tensors
         .iter()
-        .map(|tensor| tensor.buffer().read_bytes())
+        .map(|tensor| tensor.buffer().read_bytes().unwrap())
         .collect::<Vec<_>>();
     observed.sort();
     let mut expected = (0..count)
@@ -341,9 +341,14 @@ fn running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomical
     let report = running.finish().expect("finish updated graph");
     let outputs = report.sinks.get("sink").expect("sink outputs");
     assert!(!outputs.is_empty());
-    assert!(outputs
-        .iter()
-        .any(|tensor| { tensor.buffer().read_bytes().iter().all(|byte| *byte == 7) }));
+    assert!(outputs.iter().any(|tensor| {
+        tensor
+            .buffer()
+            .read_bytes()
+            .unwrap()
+            .iter()
+            .all(|byte| *byte == 7)
+    }));
 }
 
 #[test]

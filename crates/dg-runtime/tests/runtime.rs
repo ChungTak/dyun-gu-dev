@@ -47,7 +47,7 @@ fn mock_backend_registry_and_run_identity() {
 
     let outputs = runtime.run(&[input]).expect("run backend");
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].buffer().read_bytes(), vec![1, 2, 3, 4]);
+    assert_eq!(outputs[0].buffer().read_bytes().unwrap(), vec![1, 2, 3, 4]);
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn runtime_submit_poll_round_trip_and_overlap_guard() {
         panic!("submission should be ready");
     };
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].buffer().read_bytes(), vec![4, 3, 2, 1]);
+    assert_eq!(outputs[0].buffer().read_bytes().unwrap(), vec![4, 3, 2, 1]);
     assert!(matches!(runtime.poll().expect("poll"), InferPoll::Pending));
 }
 
@@ -379,7 +379,7 @@ fn delayed_mock_submit_returns_immediately_and_poll_becomes_ready() {
         panic!("submission should be ready after delay");
     };
     assert_eq!(ready_seq, sequence);
-    assert_eq!(outputs[0].buffer().read_bytes(), vec![1, 2, 3, 4]);
+    assert_eq!(outputs[0].buffer().read_bytes().unwrap(), vec![1, 2, 3, 4]);
 }
 
 fn make_input_tensor(device: &dg_core::CpuDevice, values: &[u8]) -> Tensor {
@@ -440,7 +440,7 @@ fn delayed_mock_out_of_order_completion_preserves_sequence() {
     let deadline = Instant::now() + Duration::from_millis(500);
     while results.len() < 3 && Instant::now() < deadline {
         if let InferPoll::Ready { outputs, sequence } = runtime.poll().expect("poll") {
-            results.push((sequence, outputs[0].buffer().read_bytes().clone()));
+            results.push((sequence, outputs[0].buffer().read_bytes().unwrap().clone()));
         } else {
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -518,7 +518,7 @@ fn delayed_mock_in_flight_limit_and_cancel() {
         panic!("should be ready after cancel and re-submit");
     };
     assert_eq!(ready_seq, sequence);
-    assert_eq!(outputs[0].buffer().read_bytes(), vec![9, 8, 7, 6]);
+    assert_eq!(outputs[0].buffer().read_bytes().unwrap(), vec![9, 8, 7, 6]);
 }
 
 #[test]
