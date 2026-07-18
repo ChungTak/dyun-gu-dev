@@ -26,6 +26,8 @@ include = [
     "DgStringView",
     "DgByteView",
     "DgShapeView",
+    "DgError",
+    "DgOwnedBytes",
 ]
 
 [struct]

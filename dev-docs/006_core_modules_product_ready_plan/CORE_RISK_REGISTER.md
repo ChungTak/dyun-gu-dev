@@ -25,7 +25,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Open | John Doe |
 | R6-012 | P0 | `dg-capi/src/lib.rs` external imports | C 导入使用空 drop guard，可 UAF | v2 release callback exactly-once + ASan | Open | John Doe |
 | R6-013 | P0 | `dg-capi/src/lib.rs` enum parameters | C 未知判别值先形成 Rust enum，存在 UB | v2 `int32_t` 输入 + fuzz/ABI tests | Closed | John Doe |
-| R6-014 | P1 | `dg-capi` `LAST_DATA/LAST_ERROR` | pointer 被后续 ABI 调用覆盖 | owned bytes/error handle 跨调用稳定 | Open | John Doe |
+| R6-014 | P1 | `dg-capi` `LAST_DATA/LAST_ERROR` | pointer 被后续 ABI 调用覆盖 | owned bytes/error handle 跨调用稳定 | Closed | John Doe |
 | R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Closed | John Doe |
 | R6-016 | P1 | `dg-runtime::Runtime` | sync submit 可阻塞；cancel无失败报告 | capability诚实 + cancel report + pending shutdown | Closed | John Doe |
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
@@ -270,5 +270,20 @@ Closed commit/date:
 - Tests: `dg-capi/src/lib.rs::c_abi_v2_wire_types_reject_invalid_inputs` 覆盖 `DgRuntimeInitOptions` 错误 `struct_size`/`struct_version`；`DgBackendCapabilities`/`DgTensorInfo` 输出 struct 在 `dg_backend_capabilities`/`dg_backend_tensor_info` 中校验 version/size；非法枚举值测试顺带验证输入参数不形成 Rust 枚举。
 - Runtime evidence: 同上。
 - Residual risk: 当前函数签名仍未接收 view 类型，length/rank 校验通过旧 helper 完成；split 2/3 将统一把字符串、字节、shape 入参替换为 view 类型，并增加 null/zero/huge rank/huge length/UTF-8 专门回归。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 10. CORE6-08 split 2/3：owned error/bytes handles
+
+**R6-014**
+- Owner: John Doe
+- Branch/PR: `devin/1784472000-cabi-v2-owned-handles`
+- Reproduction: `dg-capi` 使用线程局部 `LAST_ERROR`/`LAST_DATA` 保存错误字符串与返回数据，后续 ABI 调用会覆盖指针，导致 caller 读取过期/悬空指针；`dg_engine_metrics`/`dg_tensor_data`/`dg_build_capabilities_json` 返回的指针生命周期未定义。
+- Root cause: C ABI v1 把错误/数据缓冲区放在库管理的 thread-local 中，所有函数共享同一份存储，无法并发/重入，且释放语义不清。
+- Chosen fix: 删除 `LAST_ERROR`/`LAST_DATA` thread-local 与 `dg_last_error()`；新增不透明 `DgError` 与 `DgOwnedBytes` handle，每个 fallible API 接受可选的 `DgError **out_error`；数据 API（`dg_build_capabilities_json`/`dg_engine_metrics`/`dg_tensor_data`）改为通过 `DgOwnedBytes **out` 返回所有权明确的字节缓冲区；增加 `dg_error_status`/`category`/`operation`/`message`/`free` 与 `dg_owned_bytes_data`/`len`/`free` accessor；`ffi_result` 统一初始化 `*out_error = null` 并在失败时写入新 handle；新增 `ffi_result_with_out` 负责在失败时把输出指针写为 null；`dg_engine_status` 在 `Failed` 时通过 `DgOwnedBytes **out_cause` 输出失败原因。
+- Public compatibility impact: 破坏性 ABI 变更：所有返回 `DgStatus` 的 C 函数新增末尾 `DgError **out_error` 参数；`dg_engine_metrics`/`dg_tensor_data` 不再返回 `(const char*/const uint8_t*, size_t)`，而是返回 `DgOwnedBytes **`；`dg_engine_status` 新增 `DgOwnedBytes **out_cause`；`dg_last_error()` 已删除；`include/dg_capi.h` 与 `tests/abi_snapshot.txt` 已同步。
+- Tests: `dg-capi/src/lib.rs` 单测更新为传递 `&mut error` 并使用 `dg_error_*` accessor；`dg-capi/src/lib.rs::c_abi_push_poll_round_trip` 与 `direct_backend_lifecycle_queries_and_runs_mock` 使用 `DgOwnedBytes` 读取 tensor/metrics 数据；`tests/abi_snapshot.rs` 验证 `DgError`/`DgOwnedBytes` 符号存在且 `dg_last_error` 不再导出；fuzz target 已同步签名。
+- Runtime evidence: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo test -p dg-media --locked --features avcodec-profile-native-free`、`cargo deny check`、`git diff --exit-code Cargo.lock` 全绿。
+- Residual risk: 输入字符串/字节/shape 仍未全面切换到 `DgStringView`/`DgByteView`/`DgShapeView`；`DgExternalMemoryV2` release callback 与 engine destroy timeout/retry 语义留待 split 3/3。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)

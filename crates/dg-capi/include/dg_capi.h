@@ -144,6 +144,18 @@ typedef struct DgBuffer DgBuffer;
 typedef struct DgEngine DgEngine;
 
 /**
+ * Opaque error handle returned by fallible v2 ABI calls. The library allocates
+ * and frees it; callers must use `dg_error_free`.
+ */
+typedef struct DgError DgError;
+
+/**
+ * Owned byte buffer returned by v2 ABI calls. The library allocates and frees
+ * it; callers must use `dg_owned_bytes_free`.
+ */
+typedef struct DgOwnedBytes DgOwnedBytes;
+
+/**
  * Opaque tensor handle.
  */
 typedef struct DgTensor DgTensor;
@@ -227,11 +239,6 @@ typedef struct DgShapeView {
 } DgShapeView;
 
 /**
- * Returns the most recent error for the calling thread.
- */
-const char *dg_last_error(void);
-
-/**
  * Returns the package version as a static UTF-8 C string.
  */
 const char *dg_version(void);
@@ -242,13 +249,53 @@ const char *dg_version(void);
 const char *dg_abi_version(void);
 
 /**
+ * Returns the diagnostic status code stored in an error handle.
+ */
+enum DgStatus dg_error_status(const struct DgError *error);
+
+/**
+ * Returns the error category (e.g. "InvalidArgument") as a stable UTF-8 C
+ * string. The pointer is valid as long as `error` is not freed.
+ */
+const char *dg_error_category(const struct DgError *error);
+
+/**
+ * Returns the operation name associated with the error, or "Unknown".
+ */
+const char *dg_error_operation(const struct DgError *error);
+
+/**
+ * Returns the full human-readable error message.
+ */
+const char *dg_error_message(const struct DgError *error);
+
+/**
+ * Frees an error handle obtained from a fallible v2 ABI call.
+ */
+void dg_error_free(struct DgError *error);
+
+/**
+ * Returns a pointer to the owned byte buffer's contents.
+ */
+const uint8_t *dg_owned_bytes_data(const struct DgOwnedBytes *owned);
+
+/**
+ * Returns the length of the owned byte buffer in bytes.
+ */
+size_t dg_owned_bytes_len(const struct DgOwnedBytes *owned);
+
+/**
+ * Frees an owned byte handle obtained from a v2 ABI call.
+ */
+void dg_owned_bytes_free(struct DgOwnedBytes *owned);
+
+/**
  * Returns a JSON object describing this build's C ABI capabilities.
  *
- * The pointer is valid until the next call that overwrites thread-local data
- * (for example [`dg_engine_metrics`]). On failure returns null and sets
- * [`dg_last_error`].
+ * On success writes a `DgOwnedBytes` handle to `out`. On failure writes null
+ * to `out` and, if non-null, an error handle to `out_error`.
  */
-const char *dg_build_capabilities_json(void);
+enum DgStatus dg_build_capabilities_json(struct DgOwnedBytes **out, struct DgError **out_error);
 
 /**
  * Idempotent process-level runtime bootstrap (INT5-09).
@@ -257,12 +304,13 @@ const char *dg_build_capabilities_json(void);
  * enabled. `options` may be null for defaults; when non-null, `struct_size`
  * must match `sizeof(DgRuntimeInitOptions)`.
  */
-enum DgStatus dg_runtime_init(const struct DgRuntimeInitOptions *options);
+enum DgStatus dg_runtime_init(const struct DgRuntimeInitOptions *options,
+                              struct DgError **out_error);
 
 /**
  * Creates an engine handle.
  */
-enum DgStatus dg_engine_create(struct DgEngine **out);
+enum DgStatus dg_engine_create(struct DgEngine **out, struct DgError **out_error);
 
 /**
  * Frees an engine handle. Null is accepted.
@@ -275,12 +323,17 @@ void dg_engine_free(struct DgEngine *engine);
 /**
  * Loads a graph specification from a UTF-8 string.
  */
-enum DgStatus dg_engine_load_string(struct DgEngine *engine, int32_t format, const char *content);
+enum DgStatus dg_engine_load_string(struct DgEngine *engine,
+                                    int32_t format,
+                                    const char *content,
+                                    struct DgError **out_error);
 
 /**
  * Loads a graph specification from a UTF-8 path.
  */
-enum DgStatus dg_engine_load_file(struct DgEngine *engine, const char *path);
+enum DgStatus dg_engine_load_file(struct DgEngine *engine,
+                                  const char *path,
+                                  struct DgError **out_error);
 
 /**
  * Reloads a graph specification from a UTF-8 string.
@@ -288,7 +341,10 @@ enum DgStatus dg_engine_load_file(struct DgEngine *engine, const char *path);
  * A built graph is updated in place and remains ready to run. Reload is rejected while inputs
  * are pending so that queued data is never silently interpreted by a changed graph.
  */
-enum DgStatus dg_engine_reload_string(struct DgEngine *engine, int32_t format, const char *content);
+enum DgStatus dg_engine_reload_string(struct DgEngine *engine,
+                                      int32_t format,
+                                      const char *content,
+                                      struct DgError **out_error);
 
 /**
  * Reloads a graph specification from a UTF-8 path.
@@ -296,7 +352,9 @@ enum DgStatus dg_engine_reload_string(struct DgEngine *engine, int32_t format, c
  * A built graph is updated in place and remains ready to run. Reload is rejected while inputs
  * are pending so that queued data is never silently interpreted by a changed graph.
  */
-enum DgStatus dg_engine_reload_file(struct DgEngine *engine, const char *path);
+enum DgStatus dg_engine_reload_file(struct DgEngine *engine,
+                                    const char *path,
+                                    struct DgError **out_error);
 
 /**
  * Computes node and connection changes against a UTF-8 graph specification.
@@ -308,7 +366,8 @@ enum DgStatus dg_engine_diff_string(const struct DgEngine *engine,
                                     size_t *out_removed_nodes,
                                     size_t *out_updated_nodes,
                                     size_t *out_added_connections,
-                                    size_t *out_removed_connections);
+                                    size_t *out_removed_connections,
+                                    struct DgError **out_error);
 
 /**
  * Computes node and connection changes against a UTF-8 graph file.
@@ -319,7 +378,8 @@ enum DgStatus dg_engine_diff_file(const struct DgEngine *engine,
                                   size_t *out_removed_nodes,
                                   size_t *out_updated_nodes,
                                   size_t *out_added_connections,
-                                  size_t *out_removed_connections);
+                                  size_t *out_removed_connections,
+                                  struct DgError **out_error);
 
 /**
  * Adds a node programmatically. `params_json` may be null for an empty object.
@@ -327,63 +387,73 @@ enum DgStatus dg_engine_diff_file(const struct DgEngine *engine,
 enum DgStatus dg_engine_add_node(struct DgEngine *engine,
                                  const char *name,
                                  const char *kind,
-                                 const char *params_json);
+                                 const char *params_json,
+                                 struct DgError **out_error);
 
 /**
  * Removes a node by name and its incident connections.
  */
-enum DgStatus dg_engine_remove_node(struct DgEngine *engine, const char *name);
+enum DgStatus dg_engine_remove_node(struct DgEngine *engine,
+                                    const char *name,
+                                    struct DgError **out_error);
 
 /**
  * Adds a graph edge in `source.port -> destination.port` form.
  */
-enum DgStatus dg_engine_connect(struct DgEngine *engine, const char *connection);
+enum DgStatus dg_engine_connect(struct DgEngine *engine,
+                                const char *connection,
+                                struct DgError **out_error);
 
 /**
  * Removes a graph edge.
  */
-enum DgStatus dg_engine_disconnect(struct DgEngine *engine, const char *connection);
+enum DgStatus dg_engine_disconnect(struct DgEngine *engine,
+                                   const char *connection,
+                                   struct DgError **out_error);
 
 /**
  * Validates and builds the current graph specification.
  */
-enum DgStatus dg_engine_build(struct DgEngine *engine);
+enum DgStatus dg_engine_build(struct DgEngine *engine, struct DgError **out_error);
 
 /**
  * Runs the built graph with pending inputs and stores sink outputs for polling.
  */
-enum DgStatus dg_engine_run(struct DgEngine *engine);
+enum DgStatus dg_engine_run(struct DgEngine *engine, struct DgError **out_error);
 
 /**
  * Starts the engine as a long-running graph.
  */
-enum DgStatus dg_engine_init(struct DgEngine *engine);
+enum DgStatus dg_engine_init(struct DgEngine *engine, struct DgError **out_error);
 
 /**
  * Requests a cooperative stop of the running graph.
  */
-enum DgStatus dg_engine_stop(struct DgEngine *engine);
+enum DgStatus dg_engine_stop(struct DgEngine *engine, struct DgError **out_error);
 
 /**
  * Shuts down the running graph with a timeout in milliseconds.
  */
-enum DgStatus dg_engine_shutdown(struct DgEngine *engine, uint64_t timeout_ms);
+enum DgStatus dg_engine_shutdown(struct DgEngine *engine,
+                                 uint64_t timeout_ms,
+                                 struct DgError **out_error);
 
 /**
- * Returns the current lifecycle status of the engine and copies the root cause
- * (if any) into thread-local storage. The caller can read it through
- * `dg_last_error()` when `out_status` is `Failed`.
+ * Returns the current lifecycle status of the engine. On success `out_status`
+ * is written; if the status is `Failed` and `out_cause` is non-null, an owned
+ * byte handle containing the root cause is written to `out_cause`.
  */
-enum DgStatus dg_engine_status(const struct DgEngine *engine, enum DgGraphStatus *out_status);
+enum DgStatus dg_engine_status(const struct DgEngine *engine,
+                               enum DgGraphStatus *out_status,
+                               struct DgOwnedBytes **out_cause,
+                               struct DgError **out_error);
 
 /**
- * Writes a JSON snapshot of per-element metrics into thread-local storage and
- * returns a pointer to it. The returned pointer is valid until the next call
- * that overwrites `LAST_DATA`.
+ * Returns a JSON snapshot of per-element metrics as an owned byte handle.
  */
 enum DgStatus dg_engine_metrics(const struct DgEngine *engine,
-                                const char **out_data,
-                                size_t *out_length);
+                                struct DgOwnedBytes **out,
+                                struct DgError **out_error);
 
 /**
  * Creates and initializes a backend without constructing a graph.
@@ -392,7 +462,8 @@ enum DgStatus dg_backend_create(int32_t kind,
                                 const uint8_t *model_data,
                                 size_t model_length,
                                 const char *options_json,
-                                struct DgBackend **out);
+                                struct DgBackend **out,
+                                struct DgError **out_error);
 
 /**
  * Frees a direct backend handle. Null is accepted.
@@ -404,13 +475,15 @@ void dg_backend_free(struct DgBackend *backend);
  */
 enum DgStatus dg_backend_io_counts(const struct DgBackend *backend,
                                    size_t *out_inputs,
-                                   size_t *out_outputs);
+                                   size_t *out_outputs,
+                                   struct DgError **out_error);
 
 /**
  * Queries runtime device and precision capabilities.
  */
 enum DgStatus dg_backend_capabilities(const struct DgBackend *backend,
-                                      struct DgBackendCapabilities *out);
+                                      struct DgBackendCapabilities *out,
+                                      struct DgError **out_error);
 
 /**
  * Queries one input or output tensor description.
@@ -418,7 +491,8 @@ enum DgStatus dg_backend_capabilities(const struct DgBackend *backend,
 enum DgStatus dg_backend_tensor_info(const struct DgBackend *backend,
                                      bool output,
                                      size_t index,
-                                     struct DgTensorInfo *out);
+                                     struct DgTensorInfo *out,
+                                     struct DgError **out_error);
 
 /**
  * Runs direct backend inference over caller-owned tensor handles.
@@ -428,7 +502,8 @@ enum DgStatus dg_backend_run(struct DgBackend *backend,
                              size_t input_count,
                              struct DgTensor **outputs,
                              size_t output_capacity,
-                             size_t *out_count);
+                             size_t *out_count,
+                             struct DgError **out_error);
 
 /**
  * Creates a host tensor from a caller-owned byte array.
@@ -440,7 +515,8 @@ enum DgStatus dg_tensor_create(const uint8_t *data,
                                int32_t dtype,
                                int32_t format,
                                int32_t device,
-                               struct DgTensor **out);
+                               struct DgTensor **out,
+                               struct DgError **out_error);
 
 /**
  * Creates a tensor backed by an imported external buffer.
@@ -454,7 +530,8 @@ enum DgStatus dg_tensor_create_external(int fd,
                                         int32_t dtype,
                                         int32_t format,
                                         int32_t device,
-                                        struct DgTensor **out);
+                                        struct DgTensor **out,
+                                        struct DgError **out_error);
 
 /**
  * Frees a tensor handle. Null is accepted.
@@ -462,21 +539,25 @@ enum DgStatus dg_tensor_create_external(int fd,
 void dg_tensor_free(struct DgTensor *tensor);
 
 /**
- * Returns a copied tensor byte snapshot.
+ * Returns a copied tensor byte snapshot as an owned byte handle.
  */
 enum DgStatus dg_tensor_data(const struct DgTensor *tensor,
-                             const uint8_t **out_data,
-                             size_t *out_length);
+                             struct DgOwnedBytes **out,
+                             struct DgError **out_error);
 
 /**
  * Pushes one tensor into the built graph.
  */
-enum DgStatus dg_engine_push(struct DgEngine *engine, const struct DgTensor *tensor);
+enum DgStatus dg_engine_push(struct DgEngine *engine,
+                             const struct DgTensor *tensor,
+                             struct DgError **out_error);
 
 /**
  * Polls one output tensor. `Again` means the queue is empty.
  */
-enum DgStatus dg_engine_poll(struct DgEngine *engine, struct DgTensor **out);
+enum DgStatus dg_engine_poll(struct DgEngine *engine,
+                             struct DgTensor **out,
+                             struct DgError **out_error);
 
 /**
  * Imports an external buffer handle without dereferencing the external address.
@@ -486,12 +567,15 @@ enum DgStatus dg_buffer_import_external(int fd,
                                         int32_t domain,
                                         int32_t device,
                                         size_t size_bytes,
-                                        struct DgBuffer **out);
+                                        struct DgBuffer **out,
+                                        struct DgError **out_error);
 
 /**
  * Returns the logical size of an imported buffer.
  */
-enum DgStatus dg_buffer_size(const struct DgBuffer *buffer, size_t *out_size);
+enum DgStatus dg_buffer_size(const struct DgBuffer *buffer,
+                             size_t *out_size,
+                             struct DgError **out_error);
 
 /**
  * Frees an external buffer handle.

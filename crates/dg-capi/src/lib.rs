@@ -2,7 +2,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -26,11 +25,6 @@ use dg_runtime::{
 #[cfg(feature = "stream")]
 use dg_stream as _;
 use serde_json::{Map, Value};
-
-thread_local! {
-    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
-    static LAST_DATA: RefCell<Option<Box<[u8]>>> = const { RefCell::new(None) };
-}
 
 /// ABI status returned by every fallible C entry point.
 #[repr(C)]
@@ -172,6 +166,63 @@ pub struct DgByteView {
 pub struct DgShapeView {
     pub dims: *const usize,
     pub rank: usize,
+}
+
+/// Owned byte buffer returned by v2 ABI calls. The library allocates and frees
+/// it; callers must use `dg_owned_bytes_free`.
+pub struct DgOwnedBytes {
+    bytes: Vec<u8>,
+}
+
+/// Opaque error handle returned by fallible v2 ABI calls. The library allocates
+/// and frees it; callers must use `dg_error_free`.
+pub struct DgError {
+    status: DgStatus,
+    category: CString,
+    operation: CString,
+    message: CString,
+}
+
+impl DgOwnedBytes {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    fn data(&self) -> *const u8 {
+        self.bytes.as_ptr()
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl DgError {
+    fn new(status: DgStatus, message: impl Into<String>) -> Self {
+        let message = format_c_error_message(message);
+        let message_c = CString::new(message.clone()).unwrap_or_else(|_| {
+            CString::new("kind=Other operation=Unknown detail=invalid error message").unwrap()
+        });
+        let operation = parse_operation(&message);
+        let operation_c =
+            CString::new(operation).unwrap_or_else(|_| CString::new("Unknown").unwrap());
+        let category_c = CString::new(format!("{status:?}"))
+            .unwrap_or_else(|_| CString::new("Unknown").unwrap());
+        Self {
+            status,
+            category: category_c,
+            operation: operation_c,
+            message: message_c,
+        }
+    }
+}
+
+fn parse_operation(message: &str) -> String {
+    message
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("operation="))
+        .map(String::from)
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 /// Fixed-size tensor metadata returned by direct backend queries.
@@ -547,7 +598,7 @@ fn graph_status_to_c(status: GraphStatus) -> DgGraphStatus {
     }
 }
 
-/// Formats a thread-local C error string with stable diagnostic fields.
+/// Formats a C error string with stable diagnostic fields.
 ///
 /// Media failures already use `kind= profile= role= operation= backend= domain=`
 /// prefixes from `dg_media::MediaErrorContext`. Other failures are wrapped as
@@ -564,36 +615,65 @@ fn format_c_error_message(message: impl Into<String>) -> String {
     format!("kind=Other operation=Unknown detail={message}")
 }
 
-fn set_error(message: impl Into<String>) {
-    let message = format_c_error_message(message);
-    let fallback = c"kind=Other operation=Unknown detail=unknown error".to_owned();
-    let value = CString::new(message).unwrap_or(fallback);
-    LAST_ERROR.with(|last| *last.borrow_mut() = Some(value));
+fn write_error(out_error: *mut *mut DgError, status: DgStatus, message: impl Into<String>) {
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid, possibly uninitialised `*mut DgError`.
+        unsafe { out_error.write(Box::into_raw(Box::new(DgError::new(status, message)))) };
+    }
 }
 
-fn clear_error() {
-    LAST_ERROR.with(|last| *last.borrow_mut() = None);
-}
-
-fn last_data_ptr() -> (*const u8, usize) {
-    LAST_DATA.with(|last| {
-        last.borrow()
-            .as_ref()
-            .map_or((ptr::null(), 0), |data| (data.as_ptr(), data.len()))
-    })
-}
-
-fn ffi_result<T>(operation: impl FnOnce() -> Result<T, (DgStatus, String)>) -> Result<T, DgStatus> {
-    clear_error();
+fn ffi_result<T>(
+    out_error: *mut *mut DgError,
+    operation: impl FnOnce() -> Result<T, (DgStatus, String)>,
+) -> Result<T, DgStatus> {
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid pointer; we own writing the initial null.
+        unsafe { out_error.write(ptr::null_mut()) };
+    }
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(value)) => Ok(value),
         Ok(Err((status, message))) => {
-            set_error(message);
+            write_error(out_error, status, message);
             Err(status)
         }
         Err(_) => {
-            set_error("panic crossed C ABI boundary");
-            Err(DgStatus::Panic)
+            let status = DgStatus::Panic;
+            write_error(out_error, status, "panic crossed C ABI boundary");
+            Err(status)
+        }
+    }
+}
+
+fn ffi_result_with_out<T: Copy>(
+    out: *mut T,
+    out_error: *mut *mut DgError,
+    operation: impl FnOnce() -> Result<T, (DgStatus, String)>,
+) -> DgStatus {
+    if out.is_null() {
+        write_error(out_error, DgStatus::NullPointer, "output pointer is null");
+        return DgStatus::NullPointer;
+    }
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid pointer; we own writing the initial null.
+        unsafe { out_error.write(ptr::null_mut()) };
+    }
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => {
+            // SAFETY: `out` was checked non-null and points to writable caller storage.
+            unsafe { out.write(value) };
+            DgStatus::Ok
+        }
+        Ok(Err((status, message))) => {
+            write_error(out_error, status, message);
+            // SAFETY: `out` was checked non-null; zero is a safe sentinel for Copy types.
+            unsafe { out.write(std::mem::zeroed()) };
+            status
+        }
+        Err(_) => {
+            let status = DgStatus::Panic;
+            write_error(out_error, status, "panic crossed C ABI boundary");
+            unsafe { out.write(std::mem::zeroed()) };
+            status
         }
     }
 }
@@ -917,16 +997,6 @@ fn tensor_from_bytes(
     Ok(tensor)
 }
 
-/// Returns the most recent error for the calling thread.
-#[no_mangle]
-pub extern "C" fn dg_last_error() -> *const c_char {
-    LAST_ERROR.with(|last| {
-        last.borrow()
-            .as_ref()
-            .map_or(ptr::null(), |message| message.as_ptr())
-    })
-}
-
 /// Returns the package version as a static UTF-8 C string.
 #[no_mangle]
 pub extern "C" fn dg_version() -> *const c_char {
@@ -939,14 +1009,98 @@ pub extern "C" fn dg_abi_version() -> *const c_char {
     c"2.0".as_ptr()
 }
 
+/// Returns the diagnostic status code stored in an error handle.
+#[no_mangle]
+pub unsafe extern "C" fn dg_error_status(error: *const DgError) -> DgStatus {
+    if error.is_null() {
+        return DgStatus::NullPointer;
+    }
+    // SAFETY: `error` is a valid `DgError` handle.
+    unsafe { (*error).status }
+}
+
+/// Returns the error category (e.g. "InvalidArgument") as a stable UTF-8 C
+/// string. The pointer is valid as long as `error` is not freed.
+#[no_mangle]
+pub unsafe extern "C" fn dg_error_category(error: *const DgError) -> *const c_char {
+    if error.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: `error` is a valid `DgError` handle.
+    unsafe { (*error).category.as_ptr() }
+}
+
+/// Returns the operation name associated with the error, or "Unknown".
+#[no_mangle]
+pub unsafe extern "C" fn dg_error_operation(error: *const DgError) -> *const c_char {
+    if error.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: `error` is a valid `DgError` handle.
+    unsafe { (*error).operation.as_ptr() }
+}
+
+/// Returns the full human-readable error message.
+#[no_mangle]
+pub unsafe extern "C" fn dg_error_message(error: *const DgError) -> *const c_char {
+    if error.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: `error` is a valid `DgError` handle.
+    unsafe { (*error).message.as_ptr() }
+}
+
+/// Frees an error handle obtained from a fallible v2 ABI call.
+#[no_mangle]
+pub unsafe extern "C" fn dg_error_free(error: *mut DgError) {
+    if !error.is_null() {
+        // SAFETY: `error` was obtained from a successful v2 call.
+        drop(Box::from_raw(error));
+    }
+}
+
+/// Returns a pointer to the owned byte buffer's contents.
+#[no_mangle]
+pub unsafe extern "C" fn dg_owned_bytes_data(owned: *const DgOwnedBytes) -> *const u8 {
+    if owned.is_null() {
+        return ptr::null();
+    }
+    // SAFETY: `owned` is a valid `DgOwnedBytes` handle.
+    unsafe { (*owned).data() }
+}
+
+/// Returns the length of the owned byte buffer in bytes.
+#[no_mangle]
+pub unsafe extern "C" fn dg_owned_bytes_len(owned: *const DgOwnedBytes) -> usize {
+    if owned.is_null() {
+        return 0;
+    }
+    // SAFETY: `owned` is a valid `DgOwnedBytes` handle.
+    unsafe { (*owned).len() }
+}
+
+/// Frees an owned byte handle obtained from a v2 ABI call.
+#[no_mangle]
+pub unsafe extern "C" fn dg_owned_bytes_free(owned: *mut DgOwnedBytes) {
+    if !owned.is_null() {
+        // SAFETY: `owned` was obtained from a successful v2 call.
+        drop(Box::from_raw(owned));
+    }
+}
+
 /// Returns a JSON object describing this build's C ABI capabilities.
 ///
-/// The pointer is valid until the next call that overwrites thread-local data
-/// (for example [`dg_engine_metrics`]). On failure returns null and sets
-/// [`dg_last_error`].
+/// On success writes a `DgOwnedBytes` handle to `out`. On failure writes null
+/// to `out` and, if non-null, an error handle to `out_error`.
 #[no_mangle]
-pub extern "C" fn dg_build_capabilities_json() -> *const c_char {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_build_capabilities_json(
+    out: *mut *mut DgOwnedBytes,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    if out.is_null() {
+        return DgStatus::NullPointer;
+    }
+    match ffi_result(out_error, || {
         let payload = serde_json::json!({
             "abi_version": "2.0",
             "package_version": env!("CARGO_PKG_VERSION"),
@@ -967,15 +1121,16 @@ pub extern "C" fn dg_build_capabilities_json() -> *const c_char {
         });
         let text = serde_json::to_string(&payload)
             .map_err(|error| (DgStatus::InternalError, error.to_string()))?;
-        let bytes = text.into_bytes().into_boxed_slice();
-        let length = bytes.len();
-        LAST_DATA.with(|last| *last.borrow_mut() = Some(bytes));
-        let (ptr, stored_len) = last_data_ptr();
-        debug_assert_eq!(length, stored_len);
-        Ok(ptr as *const c_char)
+        Ok(DgOwnedBytes::new(text.into_bytes()))
     }) {
-        Ok(ptr) => ptr,
-        Err(_) => ptr::null(),
+        Ok(owned) => {
+            unsafe { out.write(Box::into_raw(Box::new(owned))) };
+            DgStatus::Ok
+        }
+        Err(status) => {
+            unsafe { out.write(ptr::null_mut()) };
+            status
+        }
     }
 }
 
@@ -985,8 +1140,11 @@ pub extern "C" fn dg_build_capabilities_json() -> *const c_char {
 /// enabled. `options` may be null for defaults; when non-null, `struct_size`
 /// must match `sizeof(DgRuntimeInitOptions)`.
 #[no_mangle]
-pub unsafe extern "C" fn dg_runtime_init(options: *const DgRuntimeInitOptions) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_runtime_init(
+    options: *const DgRuntimeInitOptions,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if !options.is_null() {
             let opts = unsafe { &*options };
             check_struct_version(
@@ -1022,24 +1180,16 @@ pub unsafe extern "C" fn dg_runtime_init(options: *const DgRuntimeInitOptions) -
 
 /// Creates an engine handle.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_create(out: *mut *mut DgEngine) -> DgStatus {
-    match ffi_result(|| {
-        if out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "engine output pointer is null".to_string(),
-            ));
-        }
+pub unsafe extern "C" fn dg_engine_create(
+    out: *mut *mut DgEngine,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    ffi_result_with_out(out, out_error, || {
         let handle = Box::new(DgEngine {
             inner: RwLock::new(Engine::new()),
         });
-        // SAFETY: `out` was checked non-null and points to writable caller storage.
-        unsafe { out.write(Box::into_raw(handle)) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(handle))
+    })
 }
 
 /// Frees an engine handle. Null is accepted.
@@ -1070,8 +1220,9 @@ pub unsafe extern "C" fn dg_engine_load_string(
     engine: *mut DgEngine,
     format: i32,
     content: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1097,8 +1248,9 @@ pub unsafe extern "C" fn dg_engine_load_string(
 pub unsafe extern "C" fn dg_engine_load_file(
     engine: *mut DgEngine,
     path: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1127,8 +1279,9 @@ pub unsafe extern "C" fn dg_engine_reload_string(
     engine: *mut DgEngine,
     format: i32,
     content: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1156,8 +1309,9 @@ pub unsafe extern "C" fn dg_engine_reload_string(
 pub unsafe extern "C" fn dg_engine_reload_file(
     engine: *mut DgEngine,
     path: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1187,8 +1341,9 @@ pub unsafe extern "C" fn dg_engine_diff_string(
     out_updated_nodes: *mut usize,
     out_added_connections: *mut usize,
     out_removed_connections: *mut usize,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1232,8 +1387,9 @@ pub unsafe extern "C" fn dg_engine_diff_file(
     out_updated_nodes: *mut usize,
     out_added_connections: *mut usize,
     out_removed_connections: *mut usize,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1272,8 +1428,9 @@ pub unsafe extern "C" fn dg_engine_add_node(
     name: *const c_char,
     kind: *const c_char,
     params_json: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1316,8 +1473,9 @@ pub unsafe extern "C" fn dg_engine_add_node(
 pub unsafe extern "C" fn dg_engine_remove_node(
     engine: *mut DgEngine,
     name: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1344,8 +1502,9 @@ pub unsafe extern "C" fn dg_engine_remove_node(
 pub unsafe extern "C" fn dg_engine_connect(
     engine: *mut DgEngine,
     connection: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1369,8 +1528,9 @@ pub unsafe extern "C" fn dg_engine_connect(
 pub unsafe extern "C" fn dg_engine_disconnect(
     engine: *mut DgEngine,
     connection: *const c_char,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1390,8 +1550,11 @@ pub unsafe extern "C" fn dg_engine_disconnect(
 
 /// Validates and builds the current graph specification.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_build(engine: *mut DgEngine) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_engine_build(
+    engine: *mut DgEngine,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1409,8 +1572,11 @@ pub unsafe extern "C" fn dg_engine_build(engine: *mut DgEngine) -> DgStatus {
 
 /// Runs the built graph with pending inputs and stores sink outputs for polling.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_engine_run(
+    engine: *mut DgEngine,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1432,8 +1598,11 @@ pub unsafe extern "C" fn dg_engine_run(engine: *mut DgEngine) -> DgStatus {
 
 /// Starts the engine as a long-running graph.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_init(engine: *mut DgEngine) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_engine_init(
+    engine: *mut DgEngine,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1451,8 +1620,11 @@ pub unsafe extern "C" fn dg_engine_init(engine: *mut DgEngine) -> DgStatus {
 
 /// Requests a cooperative stop of the running graph.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_stop(engine: *mut DgEngine) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_engine_stop(
+    engine: *mut DgEngine,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1470,8 +1642,12 @@ pub unsafe extern "C" fn dg_engine_stop(engine: *mut DgEngine) -> DgStatus {
 
 /// Shuts down the running graph with a timeout in milliseconds.
 #[no_mangle]
-pub unsafe extern "C" fn dg_engine_shutdown(engine: *mut DgEngine, timeout_ms: u64) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_engine_shutdown(
+    engine: *mut DgEngine,
+    timeout_ms: u64,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
@@ -1487,71 +1663,61 @@ pub unsafe extern "C" fn dg_engine_shutdown(engine: *mut DgEngine, timeout_ms: u
     }
 }
 
-/// Returns the current lifecycle status of the engine and copies the root cause
-/// (if any) into thread-local storage. The caller can read it through
-/// `dg_last_error()` when `out_status` is `Failed`.
+/// Returns the current lifecycle status of the engine. On success `out_status`
+/// is written; if the status is `Failed` and `out_cause` is non-null, an owned
+/// byte handle containing the root cause is written to `out_cause`.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_status(
     engine: *const DgEngine,
     out_status: *mut DgGraphStatus,
+    out_cause: *mut *mut DgOwnedBytes,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
-        if engine.is_null() || out_status.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "engine or output pointer is null".to_string(),
-            ));
+    ffi_result_with_out(out_status, out_error, || {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_read(engine_handle)?;
         let (status, cause) = engine.status();
-        if let Some(cause) = cause {
-            set_error(cause);
-        } else {
-            clear_error();
+        if status == DgGraphStatus::Failed {
+            if !out_cause.is_null() {
+                let cause = cause.unwrap_or_else(|| "unknown failure".to_string());
+                // SAFETY: `out_cause` is non-null and points to writable storage.
+                unsafe {
+                    out_cause.write(Box::into_raw(Box::new(DgOwnedBytes::new(
+                        cause.into_bytes(),
+                    ))))
+                };
+            }
+        } else if !out_cause.is_null() {
+            // SAFETY: `out_cause` is non-null and points to writable storage.
+            unsafe { out_cause.write(ptr::null_mut()) };
         }
-        unsafe { out_status.write(status) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(status)
+    })
 }
 
-/// Writes a JSON snapshot of per-element metrics into thread-local storage and
-/// returns a pointer to it. The returned pointer is valid until the next call
-/// that overwrites `LAST_DATA`.
+/// Returns a JSON snapshot of per-element metrics as an owned byte handle.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_metrics(
     engine: *const DgEngine,
-    out_data: *mut *const c_char,
-    out_length: *mut usize,
+    out: *mut *mut DgOwnedBytes,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
-        if engine.is_null() || out_data.is_null() || out_length.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "engine or output pointer is null".to_string(),
-            ));
+    ffi_result_with_out(out, out_error, || {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
         let engine_handle = unsafe { &*engine };
         let engine = lock_engine_read(engine_handle)?;
         let json = engine
             .metrics_json()
             .map_err(|message| (DgStatus::RuntimeError, message))?;
-        let bytes = json.into_bytes().into_boxed_slice();
-        let length = bytes.len();
-        LAST_DATA.with(|last| *last.borrow_mut() = Some(bytes));
-        let (ptr, _) = last_data_ptr();
-        unsafe {
-            out_data.write(ptr as *const c_char);
-            out_length.write(length);
-        }
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgOwnedBytes::new(
+            json.into_bytes(),
+        ))))
+    })
 }
 
 /// Creates and initializes a backend without constructing a graph.
@@ -1562,14 +1728,9 @@ pub unsafe extern "C" fn dg_backend_create(
     model_length: usize,
     options_json: *const c_char,
     out: *mut *mut DgBackend,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
-        if out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "backend output pointer is null".to_string(),
-            ));
-        }
+    ffi_result_with_out(out, out_error, || {
         let model = unsafe { bytes(model_data, model_length)? }.to_vec();
         let options = if options_json.is_null() {
             Value::Object(Map::new())
@@ -1589,13 +1750,8 @@ pub unsafe extern "C" fn dg_backend_create(
         backend
             .init(&option)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        let handle = DgBackend { backend };
-        unsafe { out.write(Box::into_raw(Box::new(handle))) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgBackend { backend })))
+    })
 }
 
 /// Frees a direct backend handle. Null is accepted.
@@ -1615,8 +1771,9 @@ pub unsafe extern "C" fn dg_backend_io_counts(
     backend: *const DgBackend,
     out_inputs: *mut usize,
     out_outputs: *mut usize,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if backend.is_null() || out_inputs.is_null() || out_outputs.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1640,8 +1797,9 @@ pub unsafe extern "C" fn dg_backend_io_counts(
 pub unsafe extern "C" fn dg_backend_capabilities(
     backend: *const DgBackend,
     out: *mut DgBackendCapabilities,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if backend.is_null() || out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1698,8 +1856,9 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
     output: bool,
     index: usize,
     out: *mut DgTensorInfo,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if backend.is_null() || out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1738,8 +1897,9 @@ pub unsafe extern "C" fn dg_backend_run(
     outputs: *mut *mut DgTensor,
     output_capacity: usize,
     out_count: *mut usize,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if backend.is_null() || out_count.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1801,8 +1961,9 @@ pub unsafe extern "C" fn dg_tensor_create(
     format: i32,
     device: i32,
     out: *mut *mut DgTensor,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1834,8 +1995,9 @@ pub unsafe extern "C" fn dg_tensor_create_external(
     format: i32,
     device: i32,
     out: *mut *mut DgTensor,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1893,44 +2055,25 @@ pub unsafe extern "C" fn dg_tensor_free(tensor: *mut DgTensor) {
     }));
 }
 
-/// Returns a copied tensor byte snapshot.
+/// Returns a copied tensor byte snapshot as an owned byte handle.
 #[no_mangle]
 pub unsafe extern "C" fn dg_tensor_data(
     tensor: *const DgTensor,
-    out_data: *mut *const u8,
-    out_length: *mut usize,
+    out: *mut *mut DgOwnedBytes,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
-        if tensor.is_null() || out_data.is_null() || out_length.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "tensor data argument is null".to_string(),
-            ));
+    ffi_result_with_out(out, out_error, || {
+        if tensor.is_null() {
+            return Err((DgStatus::NullPointer, "tensor pointer is null".to_string()));
         }
         let tensor = unsafe { &*tensor };
         let snapshot = tensor
             .tensor
             .buffer()
             .try_read_bytes()
-            .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?
-            .into_boxed_slice();
-        let length = snapshot.len();
-        LAST_DATA.with(|last| *last.borrow_mut() = Some(snapshot));
-        let data = LAST_DATA.with(|last| {
-            last.borrow()
-                .as_ref()
-                .map_or(ptr::null(), |snapshot| snapshot.as_ptr())
-        });
-        // SAFETY: output pointers were checked non-null and point to writable storage.
-        unsafe {
-            out_data.write(data);
-            out_length.write(length);
-        }
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+            .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
+        Ok(Box::into_raw(Box::new(DgOwnedBytes::new(snapshot))))
+    })
 }
 
 /// Pushes one tensor into the built graph.
@@ -1938,8 +2081,9 @@ pub unsafe extern "C" fn dg_tensor_data(
 pub unsafe extern "C" fn dg_engine_push(
     engine: *mut DgEngine,
     tensor: *const DgTensor,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() || tensor.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -1970,8 +2114,9 @@ pub unsafe extern "C" fn dg_engine_push(
 pub unsafe extern "C" fn dg_engine_poll(
     engine: *mut DgEngine,
     out: *mut *mut DgTensor,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if engine.is_null() || out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -2002,8 +2147,9 @@ pub unsafe extern "C" fn dg_buffer_import_external(
     device: i32,
     size_bytes: usize,
     out: *mut *mut DgBuffer,
+    out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(|| {
+    match ffi_result(out_error, || {
         if out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -2034,8 +2180,12 @@ pub unsafe extern "C" fn dg_buffer_import_external(
 
 /// Returns the logical size of an imported buffer.
 #[no_mangle]
-pub unsafe extern "C" fn dg_buffer_size(buffer: *const DgBuffer, out_size: *mut usize) -> DgStatus {
-    match ffi_result(|| {
+pub unsafe extern "C" fn dg_buffer_size(
+    buffer: *const DgBuffer,
+    out_size: *mut usize,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    match ffi_result(out_error, || {
         if buffer.is_null() || out_size.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -2184,13 +2334,26 @@ connections:
     #[test]
     fn c_abi_push_poll_round_trip() {
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
-        let spec = graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
             DgStatus::Ok
         );
-        assert_eq!(unsafe { dg_engine_build(engine) }, DgStatus::Ok);
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
 
         let input = [1.0_f32, 2.0, 3.0, 4.0];
         let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
@@ -2207,33 +2370,44 @@ connections:
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
                     &mut tensor,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
         );
-        assert_eq!(unsafe { dg_engine_push(engine, tensor) }, DgStatus::Ok);
-        let run_status = unsafe { dg_engine_run(engine) };
-        let error = dg_last_error();
-        let error = if error.is_null() {
-            "<missing last error>".to_string()
-        } else {
-            unsafe { CStr::from_ptr(error) }
-                .to_string_lossy()
-                .into_owned()
-        };
-        assert_eq!(run_status, DgStatus::Ok, "{}", error);
-        let mut output = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_poll(engine, &mut output) }, DgStatus::Ok);
-        let mut output_data = ptr::null();
-        let mut output_len = 0;
         assert_eq!(
-            unsafe { dg_tensor_data(output, &mut output_data, &mut output_len) },
+            unsafe { dg_engine_push(engine, tensor, ptr::null_mut()) },
             DgStatus::Ok
         );
+        let mut error = ptr::null_mut();
+        let run_status = unsafe { dg_engine_run(engine, &mut error) };
+        let error_message = if error.is_null() {
+            "<missing error>".to_string()
+        } else {
+            let message = unsafe { CStr::from_ptr(dg_error_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { dg_error_free(error) };
+            message
+        };
+        assert_eq!(run_status, DgStatus::Ok, "{}", error_message);
+        let mut output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let mut output_owned = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_tensor_data(output, &mut output_owned, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let output_data = unsafe { dg_owned_bytes_data(output_owned) };
+        let output_len = unsafe { dg_owned_bytes_len(output_owned) };
         assert_eq!(
             unsafe { std::slice::from_raw_parts(output_data, output_len) },
             input_bytes.as_slice()
         );
+        unsafe { dg_owned_bytes_free(output_owned) };
         unsafe {
             dg_tensor_free(output);
             dg_tensor_free(tensor);
@@ -2245,10 +2419,20 @@ connections:
     #[test]
     fn c_abi_load_discovers_media_and_stream_elements() {
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         let spec = media_stream_graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::Ok
         );
         unsafe { dg_engine_free(engine) };
@@ -2256,19 +2440,21 @@ connections:
 
     #[test]
     fn invalid_pointer_returns_status_and_error() {
-        let status = unsafe { dg_engine_build(ptr::null_mut()) };
+        let mut error = ptr::null_mut();
+        let status = unsafe { dg_engine_build(ptr::null_mut(), &mut error) };
         assert_eq!(status, DgStatus::NullPointer);
-        assert!(!dg_last_error().is_null());
-        let message = unsafe { CStr::from_ptr(dg_last_error()) }
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(dg_error_message(error)) }
             .to_string_lossy()
             .into_owned();
+        unsafe { dg_error_free(error) };
         assert!(
             message.starts_with("kind="),
-            "dg_last_error must start with kind=: {message}"
+            "dg_error_message must start with kind=: {message}"
         );
         assert!(
             message.contains("operation="),
-            "dg_last_error must include operation=: {message}"
+            "dg_error_message must include operation=: {message}"
         );
     }
 
@@ -2297,7 +2483,10 @@ connections:
     #[test]
     fn load_rejects_unknown_media_profile_with_structured_error() {
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         let spec = CString::new(
             r#"apiVersion: dg/v1
 kind: Graph
@@ -2319,13 +2508,23 @@ connections:
 "#,
         )
         .expect("spec");
+        let mut error = ptr::null_mut();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    &mut error,
+                )
+            },
             DgStatus::ParseError
         );
-        let message = unsafe { CStr::from_ptr(dg_last_error()) }
+        assert!(!error.is_null());
+        let message = unsafe { CStr::from_ptr(dg_error_message(error)) }
             .to_string_lossy()
             .into_owned();
+        unsafe { dg_error_free(error) };
         assert!(message.starts_with("kind="), "{message}");
         assert!(
             message.contains("not-a-real-profile") || message.contains("unknown avcodec profile"),
@@ -2355,12 +2554,17 @@ connections: []
         let path_string =
             CString::new(path.to_str().expect("temp path is utf8")).expect("temp path has no nul");
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
         assert_eq!(
-            unsafe { dg_engine_load_file(engine, path_string.as_ptr()) },
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let mut error = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_load_file(engine, path_string.as_ptr(), &mut error) },
             DgStatus::ParseError
         );
-        assert!(!dg_last_error().is_null());
+        assert!(!error.is_null());
+        unsafe { dg_error_free(error) };
         unsafe { dg_engine_free(engine) };
         fs::remove_file(path).expect("remove invalid graph");
     }
@@ -2368,14 +2572,27 @@ connections: []
     #[test]
     fn c_abi_diff_and_reload_preserve_built_graph() {
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         let initial = graph_spec();
         let updated = updated_graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, initial.as_ptr()) },
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    initial.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::Ok
         );
-        assert_eq!(unsafe { dg_engine_build(engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
 
         let mut added_nodes = 0;
         let mut removed_nodes = 0;
@@ -2393,6 +2610,7 @@ connections: []
                     &mut updated_nodes,
                     &mut added_connections,
                     &mut removed_connections,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
@@ -2404,16 +2622,28 @@ connections: []
         assert_eq!(removed_connections, 0);
 
         let invalid = CString::new("not a graph").expect("valid invalid spec bytes");
+        let mut error = ptr::null_mut();
         assert_eq!(
             unsafe {
-                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, invalid.as_ptr())
+                dg_engine_reload_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    invalid.as_ptr(),
+                    &mut error,
+                )
             },
             DgStatus::ParseError
         );
-        assert!(!dg_last_error().is_null());
+        assert!(!error.is_null());
+        unsafe { dg_error_free(error) };
         assert_eq!(
             unsafe {
-                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, updated.as_ptr())
+                dg_engine_reload_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    updated.as_ptr(),
+                    ptr::null_mut(),
+                )
             },
             DgStatus::Ok
         );
@@ -2432,21 +2662,38 @@ connections: []
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
                     &mut tensor,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
         );
-        assert_eq!(unsafe { dg_engine_push(engine, tensor) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_push(engine, tensor, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let mut error = ptr::null_mut();
         assert_eq!(
             unsafe {
-                dg_engine_reload_string(engine, DgGraphFormat::Yaml as i32, initial.as_ptr())
+                dg_engine_reload_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    initial.as_ptr(),
+                    &mut error,
+                )
             },
             DgStatus::RuntimeError
         );
-        assert!(!dg_last_error().is_null());
-        assert_eq!(unsafe { dg_engine_run(engine) }, DgStatus::Ok);
+        assert!(!error.is_null());
+        unsafe { dg_error_free(error) };
+        assert_eq!(
+            unsafe { dg_engine_run(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         let mut output = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_poll(engine, &mut output) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         unsafe {
             dg_tensor_free(output);
             dg_tensor_free(tensor);
@@ -2466,12 +2713,16 @@ connections: []
                     DgDeviceKind::CudaGpu as i32,
                     16,
                     &mut buffer,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
         );
         let mut size = 0;
-        assert_eq!(unsafe { dg_buffer_size(buffer, &mut size) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_buffer_size(buffer, &mut size, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         assert_eq!(size, 16);
         unsafe { dg_buffer_free(buffer) };
     }
@@ -2488,6 +2739,7 @@ connections: []
                     0,
                     options.as_ptr(),
                     &mut backend,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
@@ -2495,7 +2747,14 @@ connections: []
         let mut input_count = 0;
         let mut output_count = 0;
         assert_eq!(
-            unsafe { dg_backend_io_counts(backend, &mut input_count, &mut output_count) },
+            unsafe {
+                dg_backend_io_counts(
+                    backend,
+                    &mut input_count,
+                    &mut output_count,
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::Ok
         );
         assert_eq!((input_count, output_count), (1, 1));
@@ -2508,7 +2767,7 @@ connections: []
             precisions: [DgDataType::U8; 16],
         };
         assert_eq!(
-            unsafe { dg_backend_capabilities(backend, &mut capabilities) },
+            unsafe { dg_backend_capabilities(backend, &mut capabilities, ptr::null_mut()) },
             DgStatus::Ok
         );
         assert_eq!(capabilities.device_count, 1);
@@ -2524,7 +2783,7 @@ connections: []
             shape: [0; 8],
         };
         assert_eq!(
-            unsafe { dg_backend_tensor_info(backend, false, 0, &mut info) },
+            unsafe { dg_backend_tensor_info(backend, false, 0, &mut info, ptr::null_mut()) },
             DgStatus::Ok
         );
         assert_eq!(info.dtype, DgDataType::F32);
@@ -2547,6 +2806,7 @@ connections: []
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
                     &mut input,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
@@ -2563,21 +2823,24 @@ connections: []
                     &mut output,
                     1,
                     &mut output_count_result,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::Ok
         );
         assert_eq!(output_count_result, 1);
-        let mut output_data = ptr::null();
-        let mut output_length = 0;
+        let mut output_owned = ptr::null_mut();
         assert_eq!(
-            unsafe { dg_tensor_data(output, &mut output_data, &mut output_length) },
+            unsafe { dg_tensor_data(output, &mut output_owned, ptr::null_mut()) },
             DgStatus::Ok
         );
+        let output_data = unsafe { dg_owned_bytes_data(output_owned) };
+        let output_length = unsafe { dg_owned_bytes_len(output_owned) };
         assert_eq!(
             unsafe { std::slice::from_raw_parts(output_data, output_length) },
             input_bytes.as_slice()
         );
+        unsafe { dg_owned_bytes_free(output_owned) };
         unsafe {
             dg_tensor_free(output);
             dg_tensor_free(input);
@@ -2588,7 +2851,14 @@ connections: []
     #[test]
     fn direct_backend_null_and_bad_configuration_are_rejected() {
         assert_eq!(
-            unsafe { dg_backend_io_counts(ptr::null(), ptr::null_mut(), ptr::null_mut()) },
+            unsafe {
+                dg_backend_io_counts(
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::NullPointer
         );
         let options = CString::new(r#"{"unknown":true}"#).expect("options");
@@ -2601,6 +2871,7 @@ connections: []
                     0,
                     options.as_ptr(),
                     &mut backend,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::InvalidArgument
@@ -2614,14 +2885,24 @@ connections: []
         assert_eq!(abi.to_string_lossy(), "2.0");
 
         let mut engine = ptr::null_mut();
-        assert_eq!(unsafe { dg_engine_create(&mut engine) }, DgStatus::Ok);
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
         let spec = graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, 42, spec.as_ptr()) },
+            unsafe { dg_engine_load_string(engine, 42, spec.as_ptr(), ptr::null_mut()) },
             DgStatus::InvalidArgument
         );
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, spec.as_ptr()) },
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::Ok
         );
 
@@ -2640,6 +2921,7 @@ connections: []
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
                     &mut tensor,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::InvalidArgument
@@ -2647,7 +2929,16 @@ connections: []
 
         let mut backend = ptr::null_mut();
         assert_eq!(
-            unsafe { dg_backend_create(123, ptr::null(), 0, ptr::null(), &mut backend) },
+            unsafe {
+                dg_backend_create(
+                    123,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    &mut backend,
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::InvalidArgument
         );
         assert!(backend.is_null());
@@ -2662,6 +2953,7 @@ connections: []
                     DgDeviceKind::Cpu as i32,
                     16,
                     &mut buffer,
+                    ptr::null_mut(),
                 )
             },
             DgStatus::InvalidArgument
@@ -2672,7 +2964,7 @@ connections: []
             struct_version: 0,
         };
         assert_eq!(
-            unsafe { dg_runtime_init(&bad_options) },
+            unsafe { dg_runtime_init(&bad_options, ptr::null_mut()) },
             DgStatus::InvalidArgument
         );
 
@@ -2681,7 +2973,7 @@ connections: []
             struct_version: 9,
         };
         assert_eq!(
-            unsafe { dg_runtime_init(&bad_version) },
+            unsafe { dg_runtime_init(&bad_version, ptr::null_mut()) },
             DgStatus::InvalidArgument
         );
 

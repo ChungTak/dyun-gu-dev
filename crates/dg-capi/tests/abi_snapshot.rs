@@ -80,8 +80,22 @@ fn status_enum_numeric_values_are_stable() {
 }
 
 #[test]
-fn last_error_and_version_remain_exported() {
+fn version_and_owned_handle_symbols_remain_exported() {
     let header = fs::read_to_string(header_path()).expect("read header");
-    assert!(header.contains("const char *dg_last_error(void)"));
     assert!(header.contains("const char *dg_version(void)"));
+    assert!(header.contains("const char *dg_abi_version(void)"));
+    for symbol in [
+        "DgError",
+        "DgOwnedBytes",
+        "dg_error_status",
+        "dg_error_category",
+        "dg_error_operation",
+        "dg_error_message",
+        "dg_error_free",
+        "dg_owned_bytes_data",
+        "dg_owned_bytes_len",
+        "dg_owned_bytes_free",
+    ] {
+        assert!(header.contains(symbol), "dg_capi.h must export {symbol}");
+    }
 }
