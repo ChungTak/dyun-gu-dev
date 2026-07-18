@@ -408,10 +408,20 @@ fn run_graph_with_watch(
                         let metrics = running_ref.metrics_snapshot();
                         update_ops_state(&ops_state, graph_status, root_cause.as_deref(), metrics);
                         if graph_status == GraphStatus::Stopped {
-                            let running = running.take().expect("graph still running");
-                            let report = running.finish()?;
-                            print_report(&report, format)?;
-                            status = Some(ExitCode::SUCCESS);
+                            if let Some(running) = running.take() {
+                                let report = running.finish()?;
+                                print_report(&report, format)?;
+                                status = Some(ExitCode::SUCCESS);
+                            } else {
+                                error!("graph reported Stopped but handle was already taken");
+                                update_ops_state(
+                                    &ops_state,
+                                    GraphStatus::Failed,
+                                    Some("graph state inconsistent"),
+                                    BTreeMap::new(),
+                                );
+                                status = Some(ExitCode::from(3));
+                            }
                         }
                     }
                     Err(error) => {
