@@ -70,10 +70,12 @@ impl ExternalDropGuard {
 
 impl Drop for ExternalDropGuard {
     fn drop(&mut self) {
-        if let Ok(mut callback) = self.callback.lock() {
-            if let Some(mut release) = callback.take() {
-                release();
-            }
+        let mut callback = match self.callback.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(mut release) = callback.take() {
+            release();
         }
     }
 }

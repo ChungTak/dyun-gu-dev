@@ -290,17 +290,17 @@ impl Buffer {
                 },
                 Err(bytes) => Ok(read_guard(&bytes).clone()),
             },
-            Ok(BufferStorage::External { bytes: None, .. }) => {
-                unreachable!("is_host_readable checked above")
-            }
+            Ok(BufferStorage::External { bytes: None, .. }) => Err(Error::Buffer(
+                "external buffer is not host-mapped; call map or stage explicitly".to_string(),
+            )),
             Err(storage) => match &*storage {
                 BufferStorage::Host(bytes) => Ok(read_guard(bytes).clone()),
                 BufferStorage::External {
                     bytes: Some(bytes), ..
                 } => Ok(read_guard(bytes).clone()),
-                BufferStorage::External { bytes: None, .. } => {
-                    unreachable!("is_host_readable checked above")
-                }
+                BufferStorage::External { bytes: None, .. } => Err(Error::Buffer(
+                    "external buffer is not host-mapped; call map or stage explicitly".to_string(),
+                )),
             },
         }
     }

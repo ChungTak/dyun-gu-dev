@@ -469,6 +469,7 @@ enum DgStatus dg_engine_shutdown(struct DgEngine *engine,
  * Returns the current lifecycle status of the engine. On success `out_status`
  * is written; if the status is `Failed` and `out_cause` is non-null, an owned
  * byte handle containing the root cause is written to `out_cause`.
+ * On any error `out_status` is set to `DgGraphStatus::NotRunning`.
  */
 enum DgStatus dg_engine_status(const struct DgEngine *engine,
                                enum DgGraphStatus *out_status,
@@ -577,6 +578,7 @@ enum DgStatus dg_engine_push(struct DgEngine *engine,
 
 /**
  * Polls one output tensor. `Again` means the queue is empty.
+ * On `Again` no `DgError` is written and `*out` is set to null.
  */
 enum DgStatus dg_engine_poll(struct DgEngine *engine,
                              struct DgTensor **out,
