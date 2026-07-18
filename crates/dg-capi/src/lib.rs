@@ -581,6 +581,16 @@ pub struct DgBackend {
     backend: Mutex<Box<dyn InferBackend>>,
 }
 
+/// Clones the `Arc` backing a `DgBackend` pointer without consuming the pointer.
+///
+/// SAFETY: `ptr` must have been returned by `dg_backend_create` and not yet freed.
+unsafe fn clone_backend_arc(ptr: *const DgBackend) -> Arc<DgBackend> {
+    let arc = unsafe { Arc::from_raw(ptr) };
+    let clone = arc.clone();
+    std::mem::forget(arc);
+    clone
+}
+
 struct Engine {
     spec: GraphSpec,
     graph: Option<Graph>,
@@ -2101,9 +2111,9 @@ pub unsafe extern "C" fn dg_backend_create(
         backend
             .init(&option)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        Ok(Box::into_raw(Box::new(DgBackend {
+        Ok(Arc::into_raw(Arc::new(DgBackend {
             backend: Mutex::new(backend),
-        })))
+        })) as *mut DgBackend)
     })
 }
 
@@ -2113,7 +2123,9 @@ pub unsafe extern "C" fn dg_backend_free(backend: *mut DgBackend) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         if !backend.is_null() {
             // SAFETY: the pointer must have been returned by `dg_backend_create` exactly once.
-            unsafe { drop(Box::from_raw(backend)) };
+            // Dropping this `Arc` releases the handle's reference; concurrent calls that
+            // cloned the `Arc` will keep the inner backend alive until they finish.
+            unsafe { drop(Arc::from_raw(backend as *const DgBackend)) };
         }
     }));
 }
@@ -2137,7 +2149,8 @@ pub unsafe extern "C" fn dg_backend_io_counts(
             out_inputs.write(0);
             out_outputs.write(0);
         }
-        let backend = lock_backend(unsafe { &*backend });
+        let backend_arc = unsafe { clone_backend_arc(backend) };
+        let backend = lock_backend(&backend_arc);
         unsafe {
             out_inputs.write(backend.input_count());
             out_outputs.write(backend.output_count());
@@ -2170,7 +2183,8 @@ pub unsafe extern "C" fn dg_backend_capabilities(
             out_ref.struct_version,
             std::mem::size_of::<DgBackendCapabilities>(),
         )?;
-        let backend = lock_backend(unsafe { &*backend });
+        let backend_arc = unsafe { clone_backend_arc(backend) };
+        let backend = lock_backend(&backend_arc);
         let capabilities = backend
             .probe_capabilities()
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
@@ -2222,7 +2236,8 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
             out_ref.struct_version,
             std::mem::size_of::<DgTensorInfo>(),
         )?;
-        let backend = lock_backend(unsafe { &*backend });
+        let backend_arc = unsafe { clone_backend_arc(backend) };
+        let backend = lock_backend(&backend_arc);
         let info = if output {
             backend.output_info(index)
         } else {
@@ -2255,7 +2270,8 @@ pub unsafe extern "C" fn dg_backend_run(
         if input_count > 0 && inputs.is_null() {
             return Err((DgStatus::NullPointer, "input array is null".to_string()));
         }
-        let mut backend = lock_backend(unsafe { &*backend });
+        let backend_arc = unsafe { clone_backend_arc(backend as *const DgBackend) };
+        let mut backend = lock_backend(&backend_arc);
         let input_handles = if input_count == 0 {
             &[][..]
         } else {
