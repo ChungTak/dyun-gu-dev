@@ -33,6 +33,12 @@ pub enum Error {
     Runtime(String),
     #[error("graph is not running")]
     NotRunning,
+    #[error("resource limit exceeded for {resource}: requested {requested}, limit {limit}")]
+    ResourceLimit {
+        resource: String,
+        requested: usize,
+        limit: usize,
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

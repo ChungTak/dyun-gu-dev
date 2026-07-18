@@ -42,6 +42,63 @@ pub struct SinkCollector {
     pub faces: Vec<Vec<FaceDetection>>,
     pub tracks: Vec<Vec<Track>>,
     pub ocr: Vec<Vec<OcrText>>,
+    max_packets: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+impl SinkCollector {
+    pub(crate) fn set_budget(&mut self, max_packets: usize, max_bytes: usize) {
+        self.max_packets = max_packets;
+        self.max_bytes = max_bytes;
+    }
+
+    pub(crate) fn try_push(&mut self, packet: &Packet) -> Result<()> {
+        if self.total_packets() >= self.max_packets {
+            return Err(Error::ResourceLimit {
+                resource: "sink packet count".to_string(),
+                requested: self.total_packets().saturating_add(1),
+                limit: self.max_packets,
+            });
+        }
+        let bytes = packet.owned_bytes_estimate()?;
+        let new_bytes = self.current_bytes.saturating_add(bytes);
+        if new_bytes > self.max_bytes {
+            return Err(Error::ResourceLimit {
+                resource: "sink bytes".to_string(),
+                requested: new_bytes,
+                limit: self.max_bytes,
+            });
+        }
+        self.current_bytes = new_bytes;
+        if let Some(tensor) = packet.tensor_ref() {
+            self.tensors.push(tensor.clone());
+        } else if let Some(detections) = packet.detections_ref() {
+            self.detections.push(detections.to_vec());
+        } else if let Some(results) = packet.classifications_ref() {
+            self.classifications.push(results.to_vec());
+        } else if let Some(results) = packet.faces_ref() {
+            self.faces.push(results.to_vec());
+        } else if let Some(results) = packet.tracks_ref() {
+            self.tracks.push(results.to_vec());
+        } else if let Some(results) = packet.ocr_ref() {
+            self.ocr.push(results.to_vec());
+        } else {
+            return Err(Error::Runtime(
+                "expected tensor or detections payload".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn total_packets(&self) -> usize {
+        self.tensors.len()
+            + self.detections.len()
+            + self.classifications.len()
+            + self.faces.len()
+            + self.tracks.len()
+            + self.ocr.len()
+    }
 }
 
 pub struct CreatedElement {
@@ -63,6 +120,7 @@ pub struct ElementIo {
     pub(crate) eos: Arc<Mutex<EosState>>,
     pub(crate) metrics: Arc<ElementMetrics>,
     pub(crate) packet_starts: RefCell<VecDeque<Instant>>,
+    pub(crate) max_packet_starts: usize,
     pub(crate) policy: Arc<ResourcePolicy>,
 }
 
@@ -111,6 +169,13 @@ impl ElementIo {
                 } else {
                     self.metrics.record_received();
                     self.packet_starts.borrow_mut().push_back(Instant::now());
+                    if self.packet_starts.borrow().len() > self.max_packet_starts {
+                        return Err(Error::ResourceLimit {
+                            resource: format!("{}/packet_starts", self.name),
+                            requested: self.packet_starts.borrow().len(),
+                            limit: self.max_packet_starts,
+                        });
+                    }
                 }
                 Ok(Some(packet))
             }

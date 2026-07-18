@@ -13,13 +13,13 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 |---|---|---|---|---|---|---|
 | R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Closed | John Doe |
 | R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | In Progress | John Doe
-| | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；device/policy 计数仍需 05/11 | | |
+| | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；graph source/sink/input 队列 packets/bytes 预算已生效；device/policy 计数仍需 05/11 | | |
 | R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Open | John Doe |
 | R6-004 | P1 | `dg-graph/src/inference.rs` | pool 只 attach 首 Runtime metrics | 全 pool 共享 metrics，2/4/8 实例对账 | Closed | John Doe |
 | R6-005 | P1 | `dg-runtime/src/metrics.rs` | latency 保存到无界 `Vec<u64>` | 固定 buckets，百万观测常量内存 | Closed | John Doe |
 | R6-006 | P1 | `dg-scheduler/src/lib.rs` | 两级 affinity HashMap 无 capacity/TTL | 有界 LRU/TTL，churn/close/reload 测试 | Closed | John Doe |
-| R6-007 | P1 | `dg-graph/src/pipe.rs`, `engine.rs` | sequential/task unbounded；sink/report 可无界 | bounded/budgeted execution，超限不死锁 | Open | John Doe |
-| R6-008 | P2 | `dg-graph/src/pipe.rs::try_recv` | route drain 不递减 depth | depth invariant/golden tests | Open | John Doe |
+| R6-007 | P1 | `dg-graph/src/pipe.rs`, `engine.rs` | sequential/task unbounded；sink/report 可无界 | bounded/budgeted execution，超限不死锁 | Closed | John Doe |
+| R6-008 | P2 | `dg-graph/src/pipe.rs::try_recv` | route drain 不递减 depth | depth invariant/golden tests | Closed | John Doe |
 | R6-009 | P1 | `dg-core/src/buffer.rs::read_bytes` | external-only buffer 静默返回空 Vec | 只保留 fallible/staging API，backend tests | Closed | John Doe |
 | R6-010 | P0 | `dg-core/src/tensor.rs`, `shape.rs` | physical stride bytes 未完整计算，stride 乘法 saturating | checked physical span + padded/packed tests | Closed | John Doe |
 | R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Open | John Doe |
@@ -29,7 +29,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Open | John Doe |
 | R6-016 | P1 | `dg-runtime::Runtime` | sync submit 可阻塞；cancel无失败报告 | capability诚实 + cancel report + pending shutdown | Closed | John Doe |
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
-| R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Open | John Doe |
+| R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
 | R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Open | John Doe |
 | R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Open | John Doe |
 | R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Open | John Doe |
@@ -159,5 +159,46 @@ Closed commit/date:
 - Tests: `dg-scheduler` 既有 lease 测试，`Lease` drop 不 panic 通过 clippy/test 全绿间接验证。
 - Runtime evidence: 同上。
 - Residual risk: poison 后 load 泄漏；后续需显式 poison 注入测试。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 7. CORE6-05 关闭记录
+
+**R6-007**
+- Owner: John Doe
+- Branch/PR: `devin/1784350799-core6-05-graph-execution-lifecycle`
+- Reproduction: `crates/dg-graph/tests/core6_graph_execution.rs::sink_packet_budget_fails_without_oom`, `input_packet_budget_fails_at_start`, `large_packet_backpressure_is_bounded_by_sink_bytes`, `packet_starts_max_depth_is_enforced_without_oom`
+- Root cause: `ResourcePolicy` 的 `max_buffer_packets`/`max_buffer_bytes` 未落到 source/sink/input 的运行时消费边界；`ElementIo::recv` 无限累积 `packet_starts`。
+- Chosen fix: `RuntimeGraph::build` 计算 `effective = hard_policy.effective_for(spec.limits)`，用于 `SinkCollector` 与 input queue 的 packets/bytes 预算；`ElementIo` 暴露 `policy()` 并新增 `max_packet_starts` 限制；`ElementIo::recv` 在 `packet_starts` 超过 `max_packet_starts` 时返回 `Error::ResourceLimit`。
+- Public compatibility impact: `ElementIo` 增加 `policy()`、`packet_starts` 容量随 `execution.queue_capacity`；`SinkCollector` 新增 `set_budget`/`try_push` 内部方法。
+- Tests: `crates/dg-graph/tests/core6_graph_execution.rs`（sink/input/large-packet/packet_starts）；`crates/dg-graph/src/pipe.rs::tests`（depth accounting）。
+- Runtime evidence: 本地 `cargo fmt/clippy/test/deny` 全绿；`dg-media --features avcodec-profile-native-free` 测试通过（仅余 pre-existing warnings）。
+- Residual risk: R6-002 中 device/policy 字节计数与 `MemoryPool` cache eviction 仍待后续收敛。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+**R6-008**
+- Owner: John Doe
+- Branch/PR: `devin/1784350799-core6-05-graph-execution-lifecycle`
+- Reproduction: `crates/dg-graph/src/pipe.rs::tests::try_recv_and_recv_timeout_decrement_depth_exactly`, `disconnect_after_drain_leaves_depth_at_zero`
+- Root cause: `PipeReceiver::try_recv()` 早期只从底层 channel 取包，未同步递减 `PipeState::depth`。
+- Chosen fix: `PipeReceiver::try_recv()` 和 `recv_timeout()` 统一通过 `inspect`/`inspect_err` 在成功接收时 `fetch_sub(1)`；断开连接时不改动 depth。
+- Public compatibility impact: 无。
+- Tests: `crates/dg-graph/src/pipe.rs::tests`。
+- Runtime evidence: 同上。
+- Residual risk: 无。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+**R6-018**
+- Owner: John Doe
+- Branch/PR: `devin/1784350799-core6-05-graph-execution-lifecycle`
+- Reproduction: `crates/dg-graph/tests/core6_graph_execution.rs::shutdown_timeout_is_retryable_and_keeps_draining_status`
+- Root cause: `RunningGraph::drain_routes` 使用固定重试次数，无绝对 deadline，route drain 可能无限阻塞。
+- Chosen fix: `drain_routes` 改为接收 `timeout: Duration`，构造绝对 deadline，在接收循环与全 sender 重试循环中持续检查 deadline，超时返回 `Error::Runtime("drain route timed out")`；`apply_hot_update_candidate` 使用 5s 的 `DEFAULT_DRAIN_TIMEOUT`。
+- Public compatibility impact: 内部 `drain_routes` 签名变化。
+- Tests: `crates/dg-graph/tests/core6_graph_execution.rs::shutdown_timeout_is_retryable_and_keeps_draining_status`；既有 `running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomically`、`hot_update_keeps_unaffected_branch_lossless_under_backpressure` 回归通过。
+- Runtime evidence: 同上。
+- Residual risk: prepare/create/drain/switch 的独立注入故障覆盖仍不完整，需后续补充 fault injection tests。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)

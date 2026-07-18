@@ -82,6 +82,29 @@ impl Packet {
         matches!(self.payload.as_ref(), PacketPayload::EndOfStream)
     }
 
+    /// Approximate owned payload bytes. Shared `Arc` payloads in the same
+    /// route fanout are counted once, which matches the memory accounting used
+    /// by bounded sinks.
+    pub fn owned_bytes_estimate(&self) -> crate::error::Result<usize> {
+        match self.payload.as_ref() {
+            PacketPayload::Tensor(tensor) => Ok(tensor.desc().storage_bytes()?),
+            PacketPayload::Detections(detections) => {
+                Ok(detections.len() * std::mem::size_of::<dg_core::Detection>())
+            }
+            PacketPayload::Classifications(classifications) => {
+                Ok(classifications.len() * std::mem::size_of::<dg_core::Classification>())
+            }
+            PacketPayload::Faces(faces) => {
+                Ok(faces.len() * std::mem::size_of::<dg_core::FaceDetection>())
+            }
+            PacketPayload::Tracks(tracks) => {
+                Ok(tracks.len() * std::mem::size_of::<dg_core::Track>())
+            }
+            PacketPayload::Ocr(ocr) => Ok(ocr.len() * std::mem::size_of::<dg_core::OcrText>()),
+            PacketPayload::EndOfStream => Ok(0),
+        }
+    }
+
     pub fn tensor_ref(&self) -> Option<&Tensor> {
         match self.payload.as_ref() {
             PacketPayload::Tensor(tensor) => Some(tensor),
