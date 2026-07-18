@@ -5,7 +5,7 @@ use dg_core::ResourcePolicy;
 
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
-    BackendMetrics, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
+    BackendMetrics, CancelReport, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 
 fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
@@ -133,10 +133,21 @@ impl Runtime {
     }
 
     pub fn new_with_policy(option: RuntimeOption, policy: ResourcePolicy) -> Result<Self> {
+        Self::new_with_policy_and_metrics(option, policy, Arc::new(BackendMetrics::default()))
+    }
+
+    pub fn new_with_metrics(option: RuntimeOption, metrics: Arc<BackendMetrics>) -> Result<Self> {
+        Self::new_with_policy_and_metrics(option, ResourcePolicy::default(), metrics)
+    }
+
+    pub fn new_with_policy_and_metrics(
+        option: RuntimeOption,
+        policy: ResourcePolicy,
+        metrics: Arc<BackendMetrics>,
+    ) -> Result<Self> {
         validate_runtime_option(&option)?;
         policy.check_model_bytes(model_source_size(&option.model_source)?)?;
         let mut backend = create_backend(option.backend)?;
-        let metrics = Arc::new(BackendMetrics::default());
         backend.attach_metrics(Arc::clone(&metrics));
         backend.init(&option)?;
         let capabilities = backend.probe_capabilities()?;
@@ -153,8 +164,14 @@ impl Runtime {
         })
     }
 
-    pub fn from_backend(mut backend: Box<dyn crate::InferBackend>) -> Self {
-        let metrics = Arc::new(BackendMetrics::default());
+    pub fn from_backend(backend: Box<dyn crate::InferBackend>) -> Self {
+        Self::from_backend_with_metrics(backend, Arc::new(BackendMetrics::default()))
+    }
+
+    pub fn from_backend_with_metrics(
+        mut backend: Box<dyn crate::InferBackend>,
+        metrics: Arc<BackendMetrics>,
+    ) -> Self {
         backend.attach_metrics(Arc::clone(&metrics));
         let max_in_flight = backend.max_in_flight().max(1);
         Self {
@@ -256,13 +273,21 @@ impl Runtime {
         inputs: &[dg_core::Tensor],
         stream: Option<&dyn dg_core::Stream>,
     ) -> Result<u64> {
-        if self.in_flight() >= self.max_in_flight() {
+        let current_in_flight = if self.backend.is_async() {
+            self.backend.in_flight()
+        } else {
+            self.sync_result.is_some() as usize
+        };
+        if current_in_flight >= self.max_in_flight {
             return Err(Error::Backend(
                 "inference in-flight limit reached".to_string(),
             ));
         }
         let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(Error::SequenceExhausted)?;
         if self.backend.is_async() {
             self.backend.submit(inputs, stream, sequence)?;
         } else {
@@ -299,15 +324,30 @@ impl Runtime {
         }
     }
 
-    pub fn cancel(&mut self) -> Result<()> {
+    pub fn cancel(&mut self) -> Result<CancelReport> {
         if self.backend.is_async() {
-            let cleared = self.backend.in_flight();
-            self.backend.cancel();
-            for _ in 0..cleared {
+            let report = self.backend.cancel()?;
+            let released = report.completed.saturating_add(report.abandoned);
+            for _ in 0..released {
                 self.metrics.finish_in_flight();
             }
+            let failed = report.requested.saturating_sub(released);
+            for _ in 0..failed {
+                self.metrics.record_backend_error();
+            }
+            self.metrics.record_cancel();
+            Ok(report)
+        } else if self.sync_result.take().is_some() {
+            self.metrics.finish_in_flight();
+            self.metrics.record_cancel();
+            Ok(CancelReport {
+                requested: 1,
+                completed: 1,
+                abandoned: 0,
+            })
+        } else {
+            Ok(CancelReport::default())
         }
-        Ok(())
     }
 
     pub fn backend_mut(&mut self) -> &mut dyn crate::InferBackend {

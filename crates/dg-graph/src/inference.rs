@@ -121,6 +121,7 @@ enum InferenceExecution {
         pool: InstancePool,
         policy: SchedulingPolicy,
         poll_cursor: usize,
+        metrics: Arc<dg_runtime::BackendMetrics>,
     },
 }
 
@@ -226,18 +227,11 @@ impl Element for InferenceElement {
     fn run(mut self: Box<Self>, io: ElementIo) -> Result<()> {
         trace!(node = %io.name, "running inference element");
 
-        match &self.execution {
-            InferenceExecution::Single { runtime, .. } => {
-                io.metrics
-                    .attach_backend_metrics(Arc::clone(runtime.metrics_arc()));
-            }
-            InferenceExecution::Pool { runtimes, .. } => {
-                if let Some(runtime) = runtimes.first() {
-                    io.metrics
-                        .attach_backend_metrics(Arc::clone(runtime.metrics_arc()));
-                }
-            }
-        }
+        let backend_metrics = match &self.execution {
+            InferenceExecution::Single { runtime, .. } => Arc::clone(runtime.metrics_arc()),
+            InferenceExecution::Pool { metrics, .. } => Arc::clone(metrics),
+        };
+        io.metrics.attach_backend_metrics(backend_metrics);
 
         let mut eos = false;
         loop {
@@ -380,10 +374,11 @@ fn create_inference_pool(plan: InferencePlan) -> Result<InferenceExecution> {
         .map_err(|_| Error::Config("inference instances value is too large".to_string()))?;
     let pool = InstancePool::new(scheduler.clone(), kind, instance_count, core_selection)
         .map_err(|error| Error::Config(format!("failed to create inference pool: {error}")))?;
+    let metrics = Arc::new(dg_runtime::BackendMetrics::default());
     let mut runtimes = Vec::with_capacity(pool.instance_count());
     for placement in pool.placements() {
         let option = option_for_placement(&plan.option, *placement, scheduler);
-        let mut runtime = Runtime::new(option)?;
+        let mut runtime = Runtime::new_with_metrics(option, Arc::clone(&metrics))?;
         if runtimes.is_empty() {
             validate_runtime_shape(&runtime)?;
         }
@@ -397,6 +392,7 @@ fn create_inference_pool(plan: InferencePlan) -> Result<InferenceExecution> {
         pool,
         policy: plan.policy,
         poll_cursor: 0,
+        metrics,
     })
 }
 

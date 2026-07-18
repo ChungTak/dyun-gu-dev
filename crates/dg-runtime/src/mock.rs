@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tracing::trace;
 
 use crate::{
-    backend::{BackendDescriptor, BackendKind, InferBackend},
+    backend::{BackendDescriptor, BackendKind, CancelReport, InferBackend},
     capabilities::{supports_deployment, supports_device, supports_precision},
     error::{Error, Result},
     metrics::BackendMetrics,
@@ -45,6 +45,7 @@ impl Default for MockOptions {
 /// One submitted inference that has not yet completed.
 struct DelayedInference {
     sequence: u64,
+    submitted: Instant,
     finish: Instant,
     inputs: Vec<Tensor>,
 }
@@ -179,11 +180,12 @@ impl InferBackend for MockBackend {
     }
 
     fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>> {
-        if self.is_async() {
+        let start = Instant::now();
+        let outputs = if self.is_async() {
             self.submit(inputs, None, 0)?;
             loop {
                 match self.poll()? {
-                    InferPoll::Ready { outputs, .. } => return Ok(outputs),
+                    InferPoll::Ready { outputs, .. } => break outputs,
                     InferPoll::Pending => {
                         std::thread::sleep(self.options.delay.unwrap_or_default() / 10);
                     }
@@ -193,8 +195,13 @@ impl InferBackend for MockBackend {
                 }
             }
         } else {
-            self.produce_outputs(inputs)
+            self.produce_outputs(inputs)?
+        };
+        if let Some(metrics) = &self.metrics {
+            let elapsed = start.elapsed().as_nanos();
+            metrics.record_infer_latency_ns(u64::try_from(elapsed).unwrap_or(u64::MAX));
         }
+        Ok(outputs)
     }
 
     fn is_async(&self) -> bool {
@@ -230,9 +237,11 @@ impl InferBackend for MockBackend {
                 "mock backend is not configured for async operation".to_string(),
             ));
         };
-        let finish = Instant::now() + delay;
+        let now = Instant::now();
+        let finish = now + delay;
         self.pending.push(DelayedInference {
             sequence,
+            submitted: now,
             finish,
             inputs: inputs.to_vec(),
         });
@@ -254,6 +263,10 @@ impl InferBackend for MockBackend {
         if let Some((index, _)) = ready {
             let pending = self.pending.remove(index);
             let outputs = self.produce_outputs(&pending.inputs)?;
+            if let Some(metrics) = &self.metrics {
+                let elapsed = pending.submitted.elapsed().as_nanos();
+                metrics.record_infer_latency_ns(u64::try_from(elapsed).unwrap_or(u64::MAX));
+            }
             // Do not call finish_in_flight here: Runtime::poll owns the
             // in_flight accounting for both sync and async backends.
             return Ok(InferPoll::Ready {
@@ -264,8 +277,14 @@ impl InferBackend for MockBackend {
         Ok(InferPoll::Pending)
     }
 
-    fn cancel(&mut self) {
+    fn cancel(&mut self) -> Result<CancelReport> {
+        let requested = self.pending.len() as u64;
         self.pending.clear();
+        Ok(CancelReport {
+            requested,
+            completed: requested,
+            abandoned: 0,
+        })
     }
 
     fn attach_metrics(&mut self, metrics: Arc<BackendMetrics>) {

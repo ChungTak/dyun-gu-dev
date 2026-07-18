@@ -10,7 +10,7 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-03 内存/Tensor/媒体不变量已合入；继续 CORE6-04 |
+| 状态 | CORE6-04 runtime/scheduler/metrics 已本地全绿；待 PR 合入 |
 
 ## CORE6 状态
 
@@ -19,7 +19,7 @@
 | CORE6-01 | Done | PR #14 | `ADMISSION_BASELINE.md`, `CORE_RISK_REGISTER.md`, `crates/dg-core/tests/core6_baseline.rs`, `crates/dg-graph/tests/core6_baseline.rs`; CI 15/15 green | - |
 | CORE6-02 | Done | PR #15 | `crates/dg-core/src/resource.rs`, `crates/dg-graph/src/spec.rs`, `crates/dg-graph/src/engine.rs`, `crates/dg-runtime/src/runtime.rs`; boundary tests in `core6_resource_policy.rs`; CI 15/15 green | - |
 | CORE6-03 | Done | PR #16 | `crates/dg-core/src/buffer.rs`, `crates/dg-core/src/tensor.rs`, `crates/dg-core/src/shape.rs`, `crates/dg-core/src/memory.rs`, `crates/dg-core/src/device.rs`; 更新的跨 crate `read_bytes`/`allocate_host` 调用；`core6_baseline.rs` 回归通过 | - |
-| CORE6-04 | Not Started | - | - | 依赖 policy/metrics snapshot 设计 |
+| CORE6-04 | In Progress | `devin/1784405775-core6-04-runtime-scheduler-metrics` | `dg-runtime/src/metrics.rs`, `dg-runtime/src/runtime.rs`, `dg-runtime/src/backend.rs`, `dg-runtime/src/mock.rs`, `dg-scheduler/src/lib.rs`, `dg-graph/src/inference.rs`; 新增 `core6_runtime_scheduler.rs`; 本地门禁全绿 | 待 PR 合入 |
 | CORE6-05 | Not Started | - | - | 依赖 CORE6-02/04 |
 | CORE6-06 | Not Started | - | - | Cheetah timeout 能力需审计 |
 | CORE6-07 | Not Started | - | - | 依赖 CORE6-02/03 |
@@ -33,8 +33,8 @@
 | 等级 | Open | Reproduced | In Progress | Closed | Exception |
 |---|---:|---:|---:|---:|---:|
 | P0 | 4 | 0 | 1 | 1 | 0 |
-| P1 | 9 | 0 | 0 | 2 | 0 |
-| P2 | 3 | 0 | 0 | 0 | 0 |
+| P1 | 7 | 0 | 0 | 7 | 0 |
+| P2 | 2 | 0 | 0 | 0 | 0 |
 
 统计必须与 `CORE_RISK_REGISTER.md` 同步更新。
 
