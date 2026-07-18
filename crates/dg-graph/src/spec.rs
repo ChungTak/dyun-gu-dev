@@ -107,6 +107,10 @@ pub struct ResourceLimits {
     pub max_frame_bytes: usize,
     /// Maximum size of a model artifact in bytes.
     pub max_model_bytes: usize,
+    /// Maximum number of packets held by input queues, sinks and report collectors.
+    pub max_buffer_packets: usize,
+    /// Maximum bytes held by input queues, sinks and report collectors.
+    pub max_buffer_bytes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -120,6 +124,8 @@ impl Default for ResourceLimits {
             max_tensor_bytes: ResourcePolicy::DEFAULT_MAX_TENSOR_BYTES,
             max_frame_bytes: ResourcePolicy::DEFAULT_MAX_FRAME_BYTES,
             max_model_bytes: ResourcePolicy::DEFAULT_MAX_MODEL_BYTES,
+            max_buffer_packets: ResourcePolicy::DEFAULT_MAX_BUFFER_PACKETS,
+            max_buffer_bytes: ResourcePolicy::DEFAULT_MAX_BUFFER_BYTES,
         }
     }
 }
@@ -135,6 +141,8 @@ impl From<&ResourceLimits> for ResourcePolicy {
             max_tensor_bytes: limits.max_tensor_bytes,
             max_frame_bytes: limits.max_frame_bytes,
             max_model_bytes: limits.max_model_bytes,
+            max_buffer_packets: limits.max_buffer_packets,
+            max_buffer_bytes: limits.max_buffer_bytes,
         }
     }
 }

@@ -32,6 +32,10 @@ pub struct ResourcePolicy {
     pub max_tensor_bytes: usize,
     pub max_frame_bytes: usize,
     pub max_model_bytes: usize,
+    /// Maximum number of packets held by input queues, sinks and report collectors.
+    pub max_buffer_packets: usize,
+    /// Maximum bytes held by input queues, sinks and report collectors.
+    pub max_buffer_bytes: usize,
 }
 
 impl ResourcePolicy {
@@ -43,6 +47,8 @@ impl ResourcePolicy {
     pub const DEFAULT_MAX_TENSOR_BYTES: usize = 512 * 1024 * 1024;
     pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
     pub const DEFAULT_MAX_MODEL_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    pub const DEFAULT_MAX_BUFFER_PACKETS: usize = 10_000;
+    pub const DEFAULT_MAX_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 
     /// Creates a new policy after validating that all limits are non-zero,
     /// representable on the current platform and satisfy their relationships.
@@ -66,6 +72,8 @@ impl ResourcePolicy {
             max_tensor_bytes: cmp::min(self.max_tensor_bytes, requested.max_tensor_bytes),
             max_frame_bytes: cmp::min(self.max_frame_bytes, requested.max_frame_bytes),
             max_model_bytes: cmp::min(self.max_model_bytes, requested.max_model_bytes),
+            max_buffer_packets: cmp::min(self.max_buffer_packets, requested.max_buffer_packets),
+            max_buffer_bytes: cmp::min(self.max_buffer_bytes, requested.max_buffer_bytes),
         };
 
         let mut exceeded = Vec::new();
@@ -117,6 +125,18 @@ impl ResourcePolicy {
             requested.max_model_bytes,
             self.max_model_bytes,
         );
+        Self::check_exceeded(
+            &mut exceeded,
+            "max_buffer_packets",
+            requested.max_buffer_packets,
+            self.max_buffer_packets,
+        );
+        Self::check_exceeded(
+            &mut exceeded,
+            "max_buffer_bytes",
+            requested.max_buffer_bytes,
+            self.max_buffer_bytes,
+        );
 
         if !exceeded.is_empty() {
             return Err(Error::Config(exceeded.join("; ")));
@@ -151,6 +171,10 @@ impl ResourcePolicy {
         Self::check_representable(policy.max_tensor_bytes, "max_tensor_bytes")?;
         Self::check_representable(policy.max_frame_bytes, "max_frame_bytes")?;
         Self::check_representable(policy.max_model_bytes, "max_model_bytes")?;
+        Self::check_nonzero(policy.max_buffer_packets, "max_buffer_packets")?;
+        Self::check_representable(policy.max_buffer_packets, "max_buffer_packets")?;
+        Self::check_nonzero(policy.max_buffer_bytes, "max_buffer_bytes")?;
+        Self::check_representable(policy.max_buffer_bytes, "max_buffer_bytes")?;
         Ok(())
     }
 
@@ -250,6 +274,26 @@ impl ResourcePolicy {
         }
         Ok(())
     }
+
+    pub fn check_buffer_packets(&self, packets: usize) -> Result<()> {
+        if packets > self.max_buffer_packets {
+            return Err(Error::Config(format!(
+                "buffer packet count {packets} exceeds limit {}",
+                self.max_buffer_packets
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn check_buffer_bytes(&self, bytes: usize) -> Result<()> {
+        if bytes > self.max_buffer_bytes {
+            return Err(Error::Config(format!(
+                "buffer bytes {bytes} exceeds limit {}",
+                self.max_buffer_bytes
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ResourcePolicy {
@@ -263,6 +307,8 @@ impl Default for ResourcePolicy {
             max_tensor_bytes: Self::DEFAULT_MAX_TENSOR_BYTES,
             max_frame_bytes: Self::DEFAULT_MAX_FRAME_BYTES,
             max_model_bytes: Self::DEFAULT_MAX_MODEL_BYTES,
+            max_buffer_packets: Self::DEFAULT_MAX_BUFFER_PACKETS,
+            max_buffer_bytes: Self::DEFAULT_MAX_BUFFER_BYTES,
         }
     }
 }

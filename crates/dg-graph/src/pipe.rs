@@ -109,7 +109,9 @@ impl PipeReceiver {
     }
 
     pub(crate) fn try_recv(&self) -> std::result::Result<Packet, TryRecvError> {
-        self.receiver.try_recv()
+        self.receiver.try_recv().inspect(|_| {
+            self.state.depth.fetch_sub(1, Ordering::Relaxed);
+        })
     }
 }
 
@@ -129,5 +131,38 @@ impl PipeState {
     fn depth(&self) -> usize {
         let depth = self.depth.load(Ordering::Relaxed);
         self.capacity.map_or(depth, |capacity| depth.min(capacity))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_recv_and_recv_timeout_decrement_depth_exactly() {
+        let pipe = DataPipe::bounded(2);
+        let (sender, receiver) = pipe.split();
+        sender.try_send(Packet::eos()).unwrap();
+        sender.try_send(Packet::eos()).unwrap();
+        assert_eq!(sender.depth(), 2);
+        assert!(receiver.try_recv().is_ok());
+        assert_eq!(receiver.depth(), 1);
+        assert!(receiver.recv_timeout(Duration::from_millis(1)).is_ok());
+        assert_eq!(receiver.depth(), 0);
+    }
+
+    #[test]
+    fn disconnect_after_drain_leaves_depth_at_zero() {
+        let pipe = DataPipe::bounded(2);
+        let (sender, receiver) = pipe.split();
+        sender.try_send(Packet::eos()).unwrap();
+        assert_eq!(receiver.depth(), 1);
+        drop(sender);
+        assert!(receiver.try_recv().is_ok());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+        assert_eq!(receiver.depth(), 0);
     }
 }

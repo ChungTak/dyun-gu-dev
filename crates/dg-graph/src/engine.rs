@@ -262,6 +262,8 @@ impl RuntimeGraph {
         inputs: HashMap<String, Vec<Tensor>>,
         policy: Arc<ResourcePolicy>,
     ) -> Result<(Self, SinkMap, BTreeMap<String, Arc<ElementMetrics>>)> {
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective = Arc::new(policy.effective_for(&requested)?);
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
         for node in &spec.nodes {
@@ -316,6 +318,12 @@ impl RuntimeGraph {
             let mut guard = queue
                 .lock()
                 .map_err(|_| Error::Runtime("input queue poisoned".to_string()))?;
+            let mut input_bytes = 0usize;
+            for tensor in &tensors {
+                input_bytes = input_bytes.saturating_add(tensor.desc().storage_bytes()?);
+            }
+            effective.check_buffer_packets(guard.len().saturating_add(tensors.len()))?;
+            effective.check_buffer_bytes(input_bytes)?;
             guard.extend(tensors);
         }
 
@@ -386,6 +394,14 @@ impl RuntimeGraph {
         }
 
         let total_elements = nodes.values().map(|node| node.elements.len()).sum();
+        let max_packet_starts = spec.execution.queue_capacity.max(1);
+        for node in nodes.values() {
+            if let ElementHandle::Sink(collector) = &node.handle {
+                if let Ok(mut guard) = collector.lock() {
+                    guard.set_budget(effective.max_buffer_packets, effective.max_buffer_bytes);
+                }
+            }
+        }
         let mut exec_nodes = Vec::with_capacity(total_elements);
         let mut metrics = BTreeMap::new();
         for node in nodes.into_values() {
@@ -424,7 +440,8 @@ impl RuntimeGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
-                    policy: Arc::clone(&policy),
+                    max_packet_starts,
+                    policy: Arc::clone(&effective),
                 };
                 exec_nodes.push(ExecNode {
                     name: node.name.clone(),
@@ -474,9 +491,14 @@ impl RuntimeGraph {
             let mut handles = Vec::with_capacity(exec_nodes.len());
             for node in exec_nodes {
                 let stop = self.stop.clone();
-                handles.push(thread::spawn(move || {
-                    run_element(node.element, node.io, &stop)
-                }));
+                let name = node_spec.name.clone();
+                let handle = thread::Builder::new()
+                    .name(name.clone())
+                    .spawn(move || run_element(node.element, node.io, &stop))
+                    .map_err(|err| {
+                        Error::Runtime(format!("failed to spawn worker for node {name}: {err}"))
+                    })?;
+                handles.push(handle);
             }
             workers.insert(
                 node_spec.name.clone(),
@@ -551,7 +573,7 @@ impl RunningGraph {
             .checked_add(timeout)
             .ok_or_else(|| Error::Runtime("shutdown timeout overflowed".to_string()))?;
         let mut first_error = None;
-        for node in self.workers.values_mut() {
+        for (name, node) in self.workers.iter_mut() {
             while let Some(worker) = node.workers.pop() {
                 while !worker.is_finished() {
                     if Instant::now() >= deadline {
@@ -567,7 +589,10 @@ impl RunningGraph {
                     Err(_) => {
                         first_error = select_error(
                             first_error,
-                            Error::Runtime("element worker panicked".to_string()),
+                            Error::Element {
+                                element: name.clone(),
+                                message: "worker panicked".to_string(),
+                            },
                         );
                     }
                 }
@@ -589,7 +614,7 @@ impl RunningGraph {
     pub fn poll(&mut self) -> Result<()> {
         let mut first_error = None;
         let mut all_finished = true;
-        for node in self.workers.values_mut() {
+        for (name, node) in self.workers.iter_mut() {
             let mut still_running = Vec::new();
             for worker in node.workers.drain(..) {
                 if worker.is_finished() {
@@ -600,7 +625,10 @@ impl RunningGraph {
                         Err(_) => {
                             first_error = select_error(
                                 first_error,
-                                Error::Runtime("element worker panicked".to_string()),
+                                Error::Element {
+                                    element: name.clone(),
+                                    message: "worker panicked".to_string(),
+                                },
                             );
                         }
                     }
@@ -722,6 +750,7 @@ impl RunningGraph {
                 message: err.to_string(),
             })?;
         candidate.validate_with_policy(&effective)?;
+        let effective = Arc::new(effective);
         let previous_spec = self.spec.clone();
 
         let mut affected = BTreeSet::new();
@@ -764,7 +793,7 @@ impl RunningGraph {
         let mut joined = Vec::new();
         for name in &affected_names {
             if let Some(mut node) = self.workers.remove(name) {
-                if let Err(error) = join_workers(&mut node.workers, true) {
+                if let Err(error) = join_workers(&mut node.workers, true, name) {
                     // Routes are still the previous topology; restore workers
                     // already joined so the graph can keep running.
                     if let Err(restore_error) =
@@ -852,6 +881,7 @@ impl RunningGraph {
 
         // Spawn replacement workers using the switched routes (inline path
         // matches the pre-restore implementation for success-path stability).
+        let max_packet_starts = candidate.execution.queue_capacity.max(1);
         for node in &candidate.nodes {
             if !affected.contains(&node.name) {
                 continue;
@@ -902,10 +932,20 @@ impl RunningGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
-                    policy: Arc::clone(&self.policy),
+                    max_packet_starts,
+                    policy: Arc::clone(&effective),
                 };
                 let stop = self.stop.clone();
-                handles.push(thread::spawn(move || run_element(element, io, &stop)));
+                let node_name = node.name.clone();
+                let handle = thread::Builder::new()
+                    .name(node_name.clone())
+                    .spawn(move || run_element(element, io, &stop))
+                    .map_err(|err| {
+                        Error::Runtime(format!(
+                            "failed to spawn worker for node {node_name}: {err}"
+                        ))
+                    })?;
+                handles.push(handle);
             }
             self.workers.insert(
                 node.name.clone(),
@@ -916,11 +956,15 @@ impl RunningGraph {
             );
             self.metrics.insert(node.name.clone(), node_metrics.clone());
             if let ElementHandle::Sink(collector) = prepared_node.handle {
+                if let Ok(mut guard) = Arc::clone(&collector).lock() {
+                    guard.set_budget(effective.max_buffer_packets, effective.max_buffer_bytes);
+                }
                 self.sinks.insert(node.name.clone(), collector);
             }
         }
 
-        if let Err(error) = self.drain_routes(drain_routes) {
+        const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_millis(5000);
+        if let Err(error) = self.drain_routes(drain_routes, DEFAULT_DRAIN_TIMEOUT) {
             // Post-switch failure: fail-closed. Full route rollback is unsafe
             // while Arc-shared output tables may already advertise new senders.
             self.set_root_cause(&error);
@@ -935,6 +979,17 @@ impl RunningGraph {
     /// Re-spawns nodes from `spec` using the current route tables (must match `spec`).
     /// Used after a join failure before routes were switched.
     fn respawn_nodes_from_spec(&mut self, spec: &GraphSpec, names: &[String]) -> Result<()> {
+        let requested = ResourcePolicy::from(&spec.limits);
+        let effective =
+            Arc::new(
+                self.policy
+                    .effective_for(&requested)
+                    .map_err(|err| Error::Validation {
+                        path: "limits".to_string(),
+                        message: err.to_string(),
+                    })?,
+            );
+        let max_packet_starts = spec.execution.queue_capacity.max(1);
         for name in names {
             let Some(node) = spec.nodes.iter().find(|node| node.name == *name) else {
                 continue;
@@ -987,10 +1042,20 @@ impl RunningGraph {
                     eos: eos.clone(),
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
-                    policy: Arc::clone(&self.policy),
+                    max_packet_starts,
+                    policy: Arc::clone(&effective),
                 };
                 let stop = self.stop.clone();
-                handles.push(thread::spawn(move || run_element(element, io, &stop)));
+                let node_name = node.name.clone();
+                let handle = thread::Builder::new()
+                    .name(node_name.clone())
+                    .spawn(move || run_element(element, io, &stop))
+                    .map_err(|err| {
+                        Error::Runtime(format!(
+                            "failed to spawn worker for node {node_name}: {err}"
+                        ))
+                    })?;
+                handles.push(handle);
             }
             self.workers.insert(
                 node.name.clone(),
@@ -1001,6 +1066,9 @@ impl RunningGraph {
             );
             self.metrics.insert(node.name.clone(), node_metrics);
             if let ElementHandle::Sink(collector) = prepared_node.handle {
+                if let Ok(mut guard) = Arc::clone(&collector).lock() {
+                    guard.set_budget(effective.max_buffer_packets, effective.max_buffer_bytes);
+                }
                 self.sinks.insert(node.name.clone(), collector);
             }
         }
@@ -1010,11 +1078,18 @@ impl RunningGraph {
     fn drain_routes(
         &self,
         drain_routes: Vec<(Arc<Mutex<PipeReceiver>>, PipeSender, bool)>,
+        timeout: Duration,
     ) -> Result<()> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| Error::Runtime("drain deadline overflowed".to_string()))?;
         for (old_receiver, sender, upstream_stays_live) in drain_routes {
             loop {
                 if self.stop.load(Ordering::Relaxed) {
                     return Err(Error::NotRunning);
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::Runtime("drain route timed out".to_string()));
                 }
                 let packet = {
                     let receiver = old_receiver
@@ -1046,6 +1121,11 @@ impl RunningGraph {
                                     if self.stop.load(Ordering::Relaxed) {
                                         return Err(Error::NotRunning);
                                     }
+                                    if Instant::now() >= deadline {
+                                        return Err(Error::Runtime(
+                                            "drain route timed out".to_string(),
+                                        ));
+                                    }
                                 }
                                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                                     return Err(Error::Runtime(
@@ -1065,6 +1145,9 @@ impl RunningGraph {
                         if self.stop.load(Ordering::Relaxed) {
                             return Err(Error::NotRunning);
                         }
+                        if Instant::now() >= deadline {
+                            return Err(Error::Runtime("drain route timed out".to_string()));
+                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
@@ -1077,8 +1160,8 @@ impl RunningGraph {
     pub fn finish(mut self) -> Result<GraphReport> {
         let workers = std::mem::take(&mut self.workers);
         let mut first_error = None;
-        for mut node in workers.into_values() {
-            if let Err(error) = join_workers(&mut node.workers, false) {
+        for (name, mut node) in workers {
+            if let Err(error) = join_workers(&mut node.workers, false, &name) {
                 first_error = select_error(first_error, error);
             }
         }
@@ -1150,7 +1233,11 @@ impl PreparedNode {
     }
 }
 
-fn join_workers(workers: &mut Vec<thread::JoinHandle<Result<()>>>, cancelled: bool) -> Result<()> {
+fn join_workers(
+    workers: &mut Vec<thread::JoinHandle<Result<()>>>,
+    cancelled: bool,
+    node_name: &str,
+) -> Result<()> {
     let mut first_error = None;
     while let Some(worker) = workers.pop() {
         match worker.join() {
@@ -1160,7 +1247,10 @@ fn join_workers(workers: &mut Vec<thread::JoinHandle<Result<()>>>, cancelled: bo
             Err(_) => {
                 first_error = select_error(
                     first_error,
-                    Error::Runtime("element worker panicked".to_string()),
+                    Error::Element {
+                        element: node_name.to_string(),
+                        message: "worker panicked".to_string(),
+                    },
                 )
             }
         }
@@ -1241,6 +1331,7 @@ fn select_error(current: Option<Error>, candidate: Error) -> Option<Error> {
 }
 
 fn run_element(element: Box<dyn Element>, io: ElementIo, stop: &Arc<AtomicBool>) -> Result<()> {
+    let name = io.name.clone();
     match catch_unwind(AssertUnwindSafe(|| element.run(io))) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => {
@@ -1249,9 +1340,19 @@ fn run_element(element: Box<dyn Element>, io: ElementIo, stop: &Arc<AtomicBool>)
             }
             Err(err)
         }
-        Err(_) => {
+        Err(payload) => {
             stop.store(true, Ordering::Relaxed);
-            Err(Error::Runtime("element panicked".to_string()))
+            let message = if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else if let Some(message) = payload.downcast_ref::<&str>() {
+                message.to_string()
+            } else {
+                "element worker panicked".to_string()
+            };
+            Err(Error::Element {
+                element: name,
+                message,
+            })
         }
     }
 }
