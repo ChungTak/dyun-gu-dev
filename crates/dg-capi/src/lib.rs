@@ -1684,6 +1684,12 @@ pub unsafe extern "C" fn dg_engine_add_node(
         };
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
+        if engine.running.is_some() {
+            return Err((
+                DgStatus::RuntimeError,
+                "graph is currently running; shutdown before adding nodes".to_string(),
+            ));
+        }
         engine.spec.nodes.push(NodeSpec {
             name,
             kind,
@@ -2944,6 +2950,21 @@ connections:
         let sink = CString::new("sink").expect("valid name");
         assert_eq!(
             unsafe { dg_engine_remove_node(engine, sink.as_ptr(), ptr::null_mut()) },
+            DgStatus::RuntimeError
+        );
+
+        let node_name = CString::new("extra").expect("valid name");
+        let node_kind = CString::new("input").expect("valid kind");
+        assert_eq!(
+            unsafe {
+                dg_engine_add_node(
+                    engine,
+                    node_name.as_ptr(),
+                    node_kind.as_ptr(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::RuntimeError
         );
 
