@@ -235,7 +235,7 @@ Closed commit/date:
 
 **R6-020**
 - Owner: John Doe
-- Branch/PR: `devin/1784464000-core6-07-elements-correctness`
+- Branch/PR: PR #20 (`devin/1784464000-core6-07-elements-correctness`)
 - Reproduction: `dg-elements/src/math.rs::nms_rejects_excess_candidates`、`dg-elements/src/extras.rs::{anchor_generation_rejects_excess,bytetrack_caps_active_tracks,ppocr_rec_rejects_oversized_alphabet,retinaface_rejects_oversized_anchors,resnet_postprocess_rejects_oversized_top_k}`、`dg-elements/tests/core6_elements.rs::preprocess_rejects_external_only_tensor`
 - Root cause: `dg-elements` 中 YOLO/RetinaFace 预处理、NMS/top-k、PPOCR 连通域/字母表/行、ByteTrack 活跃轨迹、`media_osd` box/color/thickness、HTTP push URL 等均缺少统一资源/复杂度/失败合同；算法 element 可能直接调用 `read_bytes()` 消费外部不可读 buffer，或把空 `Vec` 当作空检测结果。
 - Chosen fix: 为 `dg-elements` 增加 `MAX_NMS_CANDIDATES`/`MAX_TOP_K`/`MAX_CLASS_COUNT`/`MAX_ANCHORS`/`MAX_TRACKS`/`MAX_OCR_*`/`MAX_URL_LENGTH` 等 crate 级硬上限；`nms` 返回 `Result` 并在超限时报错，`nms_with_top_k` 在 NMS 前做确定性 top-k 截断；`softmax`/`top_k`/`generate_anchors`/`ctc_greedy_decode`/`decode_retinaface`/`ByteTrack::update`/`detect_text_regions` 全部返回 `Result`；`f32_values`/`tensor_values` 先检查 `is_host_readable()`，外部不可读 buffer 返回 `Error::Unsupported`；`OsdCore::try_new` 校验 box 数量、颜色分量、线宽，`dg-media/elements.rs` 在 graph 加载期调用；`http_push` 运行时错误日志对 URL 做 userinfo/query/fragment 脱敏。

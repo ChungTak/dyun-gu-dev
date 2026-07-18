@@ -22,7 +22,7 @@
 | CORE6-04 | Done | PR #17 | `dg-runtime/src/metrics.rs`, `dg-runtime/src/runtime.rs`, `dg-runtime/src/backend.rs`, `dg-runtime/src/mock.rs`, `dg-scheduler/src/lib.rs`, `dg-graph/src/inference.rs`; 新增 `core6_runtime_scheduler.rs`; CI 15/15 green | - |
 | CORE6-05 | Done | PR #18 | `dg-graph` lifecycle/budget fixes, `core6_graph_execution.rs`; local gates green | - |
 | CORE6-06 | Done | PR #19 | `ReceiveOutcome`/`recv_timeout` in `dg-stream`, `StreamPullElement` 100ms poll, bridge `MediaInfo`/track-id propagation, `core6_stream_io.rs`, `core6_media_bridge.rs`; local gates green | - |
-| CORE6-07 | Done | `devin/1784464000-core6-07-elements-correctness` | `dg-elements` 算法边界/NMS/top-k/PPOCR/ByteTrack/OSD/distributor-converger 预算，`dg-media` OSD 硬上限与外部 buffer 检查，`core6_elements.rs` 外部 tensor/非有限/100 reload 测试；local gates green |
+| CORE6-07 | Done | PR #20 | `dg-elements` 算法边界/NMS/top-k/PPOCR/ByteTrack/OSD/distributor-converger 预算，`dg-media` OSD 硬上限与外部 buffer 检查，`core6_elements.rs` 外部 tensor/非有限/100 reload 测试；local gates green |
 | CORE6-08 | Not Started | - | - | 破坏性 ABI v2，需原子切换 |
 | CORE6-09 | Not Started | - | - | 依赖 CORE6-04/05/06 |
 | CORE6-10 | Not Started | - | - | 依赖前述实现 |
