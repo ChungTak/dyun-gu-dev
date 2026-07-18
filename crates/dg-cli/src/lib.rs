@@ -355,7 +355,7 @@ fn run_graph_with_watch(
                         print_report(&report, format)?;
                         status = Some(ExitCode::SUCCESS);
                     }
-                    Err(error) if error.to_string().contains("shutdown timed out") => {
+                    Err(dg_graph::Error::Timeout(_)) => {
                         status = Some(ExitCode::from(4));
                     }
                     Err(error) => {
