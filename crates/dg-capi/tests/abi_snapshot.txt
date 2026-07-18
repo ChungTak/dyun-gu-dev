@@ -8,10 +8,12 @@ DgDataType
 DgDeviceKind
 DgEngine
 DgError
+DgExternalMemoryV2
 DgGraphFormat
 DgGraphStatus
 DgMemoryDomain
 DgOwnedBytes
+DgReleaseCallback
 DgStatus
 DgRuntimeInitOptions
 DgTensor
@@ -43,7 +45,7 @@ dg_engine_create
 dg_engine_diff_file
 dg_engine_diff_string
 dg_engine_disconnect
-dg_engine_free
+dg_engine_destroy
 dg_engine_init
 dg_engine_load_file
 dg_engine_load_string

@@ -23,7 +23,7 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-009 | P1 | `dg-core/src/buffer.rs::read_bytes` | external-only buffer 静默返回空 Vec | 只保留 fallible/staging API，backend tests | Closed | John Doe |
 | R6-010 | P0 | `dg-core/src/tensor.rs`, `shape.rs` | physical stride bytes 未完整计算，stride 乘法 saturating | checked physical span + padded/packed tests | Closed | John Doe |
 | R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Open | John Doe |
-| R6-012 | P0 | `dg-capi/src/lib.rs` external imports | C 导入使用空 drop guard，可 UAF | v2 release callback exactly-once + ASan | Open | John Doe |
+| R6-012 | P0 | `dg-capi/src/lib.rs` external imports | C 导入使用空 drop guard，可 UAF | v2 release callback exactly-once + ASan | Closed | John Doe |
 | R6-013 | P0 | `dg-capi/src/lib.rs` enum parameters | C 未知判别值先形成 Rust enum，存在 UB | v2 `int32_t` 输入 + fuzz/ABI tests | Closed | John Doe |
 | R6-014 | P1 | `dg-capi` `LAST_DATA/LAST_ERROR` | pointer 被后续 ABI 调用覆盖 | owned bytes/error handle 跨调用稳定 | Closed | John Doe |
 | R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Closed | John Doe |
@@ -285,5 +285,20 @@ Closed commit/date:
 - Tests: `dg-capi/src/lib.rs` 单测更新为传递 `&mut error` 并使用 `dg_error_*` accessor；`dg-capi/src/lib.rs::c_abi_push_poll_round_trip` 与 `direct_backend_lifecycle_queries_and_runs_mock` 使用 `DgOwnedBytes` 读取 tensor/metrics 数据；`tests/abi_snapshot.rs` 验证 `DgError`/`DgOwnedBytes` 符号存在且 `dg_last_error` 不再导出；fuzz target 已同步签名。
 - Runtime evidence: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`、`cargo test -p dg-media --locked --features avcodec-profile-native-free`、`cargo deny check`、`git diff --exit-code Cargo.lock` 全绿。
 - Residual risk: 输入字符串/字节/shape 仍未全面切换到 `DgStringView`/`DgByteView`/`DgShapeView`；`DgExternalMemoryV2` release callback 与 engine destroy timeout/retry 语义留待 split 3/3。
+- Reviewer: self-review
+- Closed commit/date: (待 PR 合入后回填)
+
+## 11. CORE6-08 split 3/3：external memory V2 与 engine destroy
+
+**R6-012**
+- Owner: John Doe
+- Branch/PR: `devin/1784473000-cabi-v2-external-memory-destroy`
+- Reproduction: `dg_buffer_import_external`/`dg_tensor_create_external` 使用空 `ExternalDropGuard`，外部句柄（fd/raw）所有权未定义；`dg_engine_free` 返回 `void` 且 best-effort 5s shutdown，调用方无法知道 destroy 是否超时、句柄是否仍有效。
+- Root cause: v1 ABI 把 fd/raw/size/domain/device 拆成平铺参数，没有释放回调；`ExternalDropGuard` 被默认构造为空闭包，外部内存可能永远不被释放。销毁路径返回 `void`，无法报告超时也无法重试。
+- Chosen fix: 引入 `DgExternalMemoryV2` 描述符，通过 `DgReleaseCallback` 为 raw 导入实现 exactly-once 释放；FD 导入用 `BorrowedFd::try_clone_to_owned()` 自动 dup，库持有 duplicate 并在 drop 时 close；`dg_buffer_import_external`/`dg_tensor_create_external` 校验 `fd`/`raw` 互斥且 raw 必须带 release。`dg_engine_destroy(engine, timeout_ms, out_error)` 替代 `dg_engine_free`：timeout 内未完成 shutdown 时返回 `DgStatus::Busy`，保持句柄有效可重试；`Engine::shutdown` 超时把 `RunningGraph` 还原，避免 worker 悬空。cbindgen header、ABI snapshot、C examples、`docs/user-guide.md` 同步。
+- Public compatibility impact: 移除 `dg_engine_free`（已不存在）；`dg_buffer_import_external` 和 `dg_tensor_create_external` 参数改为 `const DgExternalMemoryV2 *`；Linux 构建输出 `libdg_capi.so.2`（`-soname` 已设置）。
+- Tests: `dg-capi/src/lib.rs::external_buffer_import_preserves_handle_metadata` 验证 raw release callback 只调用一次；`tests/abi_snapshot.rs` 验证 `DgExternalMemoryV2` 和 `DgReleaseCallback` 符号存在；fuzz target 同步；本地 `cargo fmt/clippy/test/deny` 全绿。
+- Runtime evidence: 同上；`cargo test -p dg-media --locked --features avcodec-profile-native-free` 全绿；`git diff --exit-code Cargo.lock` 无变化。
+- Residual risk: 外部 FD 导入未在真实 dmabuf/VASurface 上做集成；ASan soak 留待 CORE6-10/11。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)

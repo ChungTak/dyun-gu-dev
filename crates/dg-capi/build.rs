@@ -5,6 +5,10 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
+    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("linux") {
+        println!("cargo:rustc-link-arg=-Wl,-soname,libdg_capi.so.2");
+    }
+
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let config = cbindgen::Config::from_file(crate_dir.join("cbindgen.toml"))
         .expect("load cbindgen configuration");
