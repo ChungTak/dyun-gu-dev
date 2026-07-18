@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
-use std::sync::{Arc, Mutex, Once, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
@@ -1411,23 +1411,19 @@ pub unsafe extern "C" fn dg_runtime_init(
                 std::mem::size_of::<DgRuntimeInitOptions>(),
             )?;
         }
-        static INIT: Once = Once::new();
-        static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
-        INIT.call_once(|| {
+        static INIT: OnceLock<Result<(), String>> = OnceLock::new();
+        let result = INIT.get_or_init(|| {
             #[cfg(all(feature = "stream", feature = "cheetah"))]
             {
                 if let Err(error) = dg_stream::install_embedded_cheetah_connector() {
-                    if let Ok(mut slot) = INIT_ERROR.lock() {
-                        *slot = Some(error.to_string());
-                    }
+                    return Err(error.to_string());
                 }
             }
+            Ok(())
         });
-        if let Ok(slot) = INIT_ERROR.lock() {
-            if let Some(error) = slot.as_ref() {
-                return Err((DgStatus::RuntimeError, error.clone()));
-            }
-        }
+        result
+            .as_ref()
+            .map_err(|error| (DgStatus::RuntimeError, error.clone()))?;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
