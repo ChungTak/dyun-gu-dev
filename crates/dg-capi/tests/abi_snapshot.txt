@@ -7,9 +7,11 @@ DgDataFormat
 DgDataType
 DgDeviceKind
 DgEngine
+DgError
 DgGraphFormat
 DgGraphStatus
 DgMemoryDomain
+DgOwnedBytes
 DgStatus
 DgRuntimeInitOptions
 DgTensor
@@ -20,6 +22,14 @@ dg_backend_free
 dg_backend_io_counts
 dg_abi_version
 dg_build_capabilities_json
+dg_error_category
+dg_error_free
+dg_error_message
+dg_error_operation
+dg_error_status
+dg_owned_bytes_data
+dg_owned_bytes_free
+dg_owned_bytes_len
 dg_runtime_init
 dg_backend_run
 dg_backend_tensor_info
@@ -47,7 +57,6 @@ dg_engine_run
 dg_engine_shutdown
 dg_engine_status
 dg_engine_stop
-dg_last_error
 dg_tensor_create
 dg_tensor_create_external
 dg_tensor_data

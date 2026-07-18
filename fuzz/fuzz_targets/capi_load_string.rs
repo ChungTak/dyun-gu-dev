@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
     let mut engine: *mut DgEngine = std::ptr::null_mut();
     // SAFETY: the output pointer is valid local storage; the returned handle is
     // released exactly once below when creation succeeds.
-    let status = unsafe { dg_engine_create(&mut engine) };
+    let status = unsafe { dg_engine_create(&mut engine, std::ptr::null_mut()) };
     if status != dg_capi::DgStatus::Ok {
         return;
     }
@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
     ] {
         // SAFETY: `engine` is a handle returned by `dg_engine_create`, and
         // `content` is a valid NUL-terminated C string.
-        let _ = unsafe { dg_engine_load_string(engine, format, content.as_ptr()) };
+        let _ = unsafe { dg_engine_load_string(engine, format, content.as_ptr(), std::ptr::null_mut()) };
     }
     // SAFETY: `engine` was returned by `dg_engine_create` and has not been freed.
     unsafe { dg_engine_free(engine) };
