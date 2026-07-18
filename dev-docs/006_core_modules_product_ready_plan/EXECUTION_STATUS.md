@@ -1,22 +1,22 @@
-# 006 执行状态 — **Not Started**
+# 006 执行状态 — **In Progress**
 
 ## 审计基线
 
 | Field | Value |
 |---|---|
 | 计划创建基线 | `main@f0230e946dc05561d830581df277b79aadb1b807` |
-| 正式执行基线 | 待首次实施 PR 填写 |
+| 正式执行基线 | `main@015eb5642972c9e474bcb74b4b513c610865236f` |
 | 范围 | core/runtime/scheduler/graph/media/stream/elements/capi/cli |
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
-| 默认门禁 | 创建计划时 fmt/clippy/workspace tests 通过 |
-| 状态 | 文档计划已建立；实现尚未开始 |
+| 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
+| 状态 | CORE6-01 基线审计与失败测试已提交 PR |
 
 ## CORE6 状态
 
 | ID | 状态 | PR/Commit | Evidence | Blocker |
 |---|---|---|---|---|
-| CORE6-01 | Not Started | - | - | - |
+| CORE6-01 | In Progress | `devin/1784344499-core6-01-baseline` | `ADMISSION_BASELINE.md`, `CORE_RISK_REGISTER.md`, `crates/dg-core/tests/core6_baseline.rs`, `crates/dg-graph/tests/core6_baseline.rs` | 需合入后进入 CORE6-02 |
 | CORE6-02 | Not Started | - | - | 需先冻结 ResourcePolicy 接口 |
 | CORE6-03 | Not Started | - | - | 依赖 CORE6-02 |
 | CORE6-04 | Not Started | - | - | 依赖 policy/metrics snapshot 设计 |
@@ -32,8 +32,8 @@
 
 | 等级 | Open | Reproduced | In Progress | Closed | Exception |
 |---|---:|---:|---:|---:|---:|
-| P0 | 6 | 0 | 0 | 0 | 0 |
-| P1 | 13 | 0 | 0 | 0 | 0 |
+| P0 | 5 | 1 | 0 | 0 | 0 |
+| P1 | 11 | 2 | 0 | 0 | 0 |
 | P2 | 3 | 0 | 0 | 0 | 0 |
 
 统计必须与 `CORE_RISK_REGISTER.md` 同步更新。
