@@ -8,6 +8,7 @@ style = "both"
 usize_is_size_t = true
 
 [export]
+exclude = ["dup"]
 include = [
     "DgStatus",
     "DgGraphFormat",

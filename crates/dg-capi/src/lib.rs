@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
@@ -26,6 +26,15 @@ use dg_runtime::{
 #[cfg(feature = "stream")]
 use dg_stream as _;
 use serde_json::{Map, Value};
+
+#[cfg(unix)]
+mod unix_dup {
+    use std::ffi::c_int;
+
+    extern "C" {
+        pub fn dup(fd: c_int) -> c_int;
+    }
+}
 
 /// ABI status returned by every fallible C entry point.
 #[repr(C)]
@@ -224,13 +233,12 @@ impl DgError {
     fn new(status: DgStatus, message: impl Into<String>) -> Self {
         let message = format_c_error_message(message);
         let message_c = CString::new(message.clone()).unwrap_or_else(|_| {
-            CString::new("kind=Other operation=Unknown detail=invalid error message").unwrap()
+            c"kind=Other operation=Unknown detail=invalid error message".to_owned()
         });
         let operation = parse_operation(&message);
-        let operation_c =
-            CString::new(operation).unwrap_or_else(|_| CString::new("Unknown").unwrap());
-        let category_c = CString::new(format!("{status:?}"))
-            .unwrap_or_else(|_| CString::new("Unknown").unwrap());
+        let operation_c = CString::new(operation).unwrap_or_else(|_| c"Unknown".to_owned());
+        let category_c =
+            CString::new(format!("{status:?}")).unwrap_or_else(|_| c"Unknown".to_owned());
         Self {
             status,
             category: category_c,
@@ -430,16 +438,21 @@ fn build_external_handle(
     }
 
     if fd_valid {
-        // SAFETY: `BorrowedFd::borrow_raw` requires the fd to be valid. We only
-        // call `try_clone_to_owned`, which duplicates it; the original remains
-        // owned by the caller.
-        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-        let owned = borrowed.try_clone_to_owned().map_err(|error| {
-            (
-                DgStatus::RuntimeError,
-                format!("failed to duplicate external fd: {error}"),
-            )
-        })?;
+        // SAFETY: `dup` is a libc call that returns a new descriptor or -1. We
+        // only convert a successfully duplicated fd into `OwnedFd`, which closes
+        // it when the last reference drops; the original fd remains owned by the
+        // caller.
+        let dup_fd = unsafe { unix_dup::dup(fd) };
+        if dup_fd < 0 {
+            return Err((
+                DgStatus::InvalidArgument,
+                format!(
+                    "failed to duplicate external fd: {}",
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) };
         let dup_fd = owned.as_raw_fd();
         let guard = ExternalDropGuard::new(move || {
             // `owned` closes the duplicated fd when the last reference drops.

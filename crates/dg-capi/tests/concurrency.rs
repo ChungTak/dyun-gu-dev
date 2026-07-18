@@ -1,12 +1,14 @@
 use std::ffi::CString;
+use std::os::fd::{FromRawFd, IntoRawFd};
 use std::ptr;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
 use dg_capi::{
-    dg_engine_build, dg_engine_create, dg_engine_destroy, dg_engine_init, dg_engine_load_string,
-    dg_engine_metrics, dg_engine_status, dg_owned_bytes_free, DgEngine, DgGraphFormat,
-    DgGraphStatus, DgOwnedBytes, DgStatus,
+    dg_buffer_import_external, dg_engine_build, dg_engine_create, dg_engine_destroy,
+    dg_engine_init, dg_engine_load_string, dg_engine_metrics, dg_engine_status,
+    dg_owned_bytes_free, DgEngine, DgExternalMemoryV2, DgGraphFormat, DgGraphStatus, DgOwnedBytes,
+    DgStatus,
 };
 
 const BASE_SPEC: &str = r#"apiVersion: dg/v1
@@ -117,4 +119,33 @@ fn concurrent_status_and_metrics_do_not_deadlock() {
             DgStatus::Ok
         );
     }
+}
+
+#[test]
+fn invalid_external_fd_is_rejected_safely() {
+    // Open a file, take its fd, close it, then pass the now-stale fd to the C API.
+    let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+    let stale_fd = file.into_raw_fd();
+    // Close the fd so it is no longer valid.
+    let _ = unsafe { std::fs::File::from_raw_fd(stale_fd) };
+
+    let desc = DgExternalMemoryV2 {
+        struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+        struct_version: 0,
+        fd: stale_fd,
+        raw: 0,
+        domain: 0, // Host
+        device: 0, // Cpu
+        size_bytes: 1,
+        release: None,
+        user_data: ptr::null_mut(),
+    };
+    let mut buffer = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            dg_buffer_import_external(&desc, &mut buffer, ptr::null_mut()),
+            DgStatus::InvalidArgument
+        );
+    }
+    assert!(buffer.is_null());
 }

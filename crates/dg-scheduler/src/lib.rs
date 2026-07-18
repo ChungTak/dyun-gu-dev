@@ -783,10 +783,10 @@ impl SchedulerState {
             return match request.core_selection {
                 CoreSelection::Mask(mask) if mask == 0 => Err(Error::InvalidCoreMask { mask }),
                 CoreSelection::Mask(mask) => Err(Error::InvalidCoreMask { mask }),
-                CoreSelection::Single(core_id) => Err(Error::MissingCore {
-                    mask: 1u32 << u32::from(core_id),
-                    core_id,
-                }),
+                CoreSelection::Single(core_id) => {
+                    let mask = 1u32.checked_shl(u32::from(core_id)).unwrap_or(0);
+                    Err(Error::MissingCore { mask, core_id })
+                }
                 _ => Err(Error::NoAvailableCore),
             };
         }
@@ -1286,5 +1286,18 @@ mod tests {
                 prop_assert_eq!(usize::from(lease.core_id()), index % 2);
             }
         }
+    }
+
+    #[test]
+    fn single_out_of_range_core_id_does_not_panic() {
+        let scheduler =
+            Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 2).expect("topology"))
+                .expect("scheduler");
+        let result = scheduler.acquire(Request::explicit(
+            DeviceKind::RknnNpu,
+            0,
+            CoreSelection::Single(40),
+        ));
+        assert!(result.is_err());
     }
 }
