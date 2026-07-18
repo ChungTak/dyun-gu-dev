@@ -242,9 +242,9 @@ impl RknnBackend {
                 context,
                 sys::rknn_query_cmd::RKNN_QUERY_IN_OUT_NUM,
                 &mut io_num as *mut _ as *mut c_void,
-                std::mem::size_of::<sys::rknn_input_output_num>()
-                    .try_into()
-                    .expect("rknn_input_output_num size fits in u32"),
+                u32::try_from(std::mem::size_of::<sys::rknn_input_output_num>()).map_err(|_| {
+                    Error::Backend("rknn_input_output_num size exceeds u32".to_string())
+                })?,
             )
         };
         check_status(status, "rknn_query(IN_OUT_NUM)")?;
@@ -264,9 +264,9 @@ impl RknnBackend {
                     context,
                     sys::rknn_query_cmd::RKNN_QUERY_INPUT_ATTR,
                     &mut attr as *mut _ as *mut c_void,
-                    std::mem::size_of::<sys::rknn_tensor_attr>()
-                        .try_into()
-                        .expect("rknn_tensor_attr size fits in u32"),
+                    u32::try_from(std::mem::size_of::<sys::rknn_tensor_attr>()).map_err(|_| {
+                        Error::Backend("rknn_tensor_attr size exceeds u32".to_string())
+                    })?,
                 )
             };
             check_status(status, "rknn_query(INPUT_ATTR)")?;
@@ -282,9 +282,9 @@ impl RknnBackend {
                     context,
                     sys::rknn_query_cmd::RKNN_QUERY_OUTPUT_ATTR,
                     &mut attr as *mut _ as *mut c_void,
-                    std::mem::size_of::<sys::rknn_tensor_attr>()
-                        .try_into()
-                        .expect("rknn_tensor_attr size fits in u32"),
+                    u32::try_from(std::mem::size_of::<sys::rknn_tensor_attr>()).map_err(|_| {
+                        Error::Backend("rknn_tensor_attr size exceeds u32".to_string())
+                    })?,
                 )
             };
             check_status(status, "rknn_query(OUTPUT_ATTR)")?;
@@ -460,7 +460,9 @@ impl RknnBackend {
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     output.buf as *const u8,
-                    usize::try_from(output.size).expect("output size fits usize"),
+                    usize::try_from(output.size).map_err(|_| {
+                        Error::Backend("rknn output size exceeds usize".to_string())
+                    })?,
                 )
             };
             if tensor.buffer().len() != bytes.len() {
