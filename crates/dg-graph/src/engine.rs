@@ -612,6 +612,16 @@ impl RunningGraph {
     /// the status moves to [`GraphStatus::Stopped`]; a worker failure moves it
     /// to [`GraphStatus::Failed`] and returns the root cause.
     pub fn poll(&mut self) -> Result<()> {
+        if status_from_u8(self.status.load(Ordering::SeqCst)) == GraphStatus::Failed {
+            let cause = self
+                .root_cause
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_else(|| "graph failed".to_string());
+            return Err(Error::Runtime(cause));
+        }
+
         let mut first_error = None;
         let mut all_finished = true;
         for (name, node) in self.workers.iter_mut() {
