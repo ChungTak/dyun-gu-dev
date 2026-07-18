@@ -7,8 +7,8 @@ use std::thread;
 use dg_capi::{
     dg_buffer_import_external, dg_engine_build, dg_engine_create, dg_engine_destroy,
     dg_engine_init, dg_engine_load_string, dg_engine_metrics, dg_engine_status,
-    dg_owned_bytes_free, DgEngine, DgExternalMemoryV2, DgGraphFormat, DgGraphStatus, DgOwnedBytes,
-    DgStatus,
+    dg_owned_bytes_free, dg_tensor_create, DgEngine, DgExternalMemoryV2, DgGraphFormat,
+    DgGraphStatus, DgOwnedBytes, DgStatus, DgTensor,
 };
 
 const BASE_SPEC: &str = r#"apiVersion: dg/v1
@@ -148,4 +148,30 @@ fn invalid_external_fd_is_rejected_safely() {
         );
     }
     assert!(buffer.is_null());
+}
+
+#[test]
+fn tensor_create_invalid_dtype_zeroes_output_pointer() {
+    let data = [1u8];
+    let shape = [1usize];
+    let out_ptr: *mut *mut DgTensor =
+        Box::into_raw(Box::new(std::ptr::dangling_mut::<DgTensor>()));
+    unsafe {
+        assert_eq!(
+            dg_tensor_create(
+                data.as_ptr(),
+                data.len(),
+                shape.as_ptr(),
+                shape.len(),
+                -1,
+                0,
+                0,
+                out_ptr,
+                ptr::null_mut(),
+            ),
+            DgStatus::InvalidArgument
+        );
+        assert!((*out_ptr).is_null());
+        let _ = Box::from_raw(out_ptr);
+    }
 }

@@ -1973,6 +1973,10 @@ pub unsafe extern "C" fn dg_backend_io_counts(
                 "backend or count output pointer is null".to_string(),
             ));
         }
+        unsafe {
+            out_inputs.write(0);
+            out_outputs.write(0);
+        }
         let backend = unsafe { &*backend };
         unsafe {
             out_inputs.write(backend.backend.input_count());
@@ -1992,7 +1996,7 @@ pub unsafe extern "C" fn dg_backend_capabilities(
     out: *mut DgBackendCapabilities,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
+    ffi_result_with_out(out, out_error, || {
         if backend.is_null() || out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -2025,21 +2029,15 @@ pub unsafe extern "C" fn dg_backend_capabilities(
         for (slot, precision) in capabilities.precisions.iter().copied().enumerate() {
             precisions[slot] = c_dtype(precision)?;
         }
-        unsafe {
-            out.write(DgBackendCapabilities {
-                struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
-                struct_version: 0,
-                device_count: capabilities.devices.len(),
-                devices,
-                precision_count: capabilities.precisions.len(),
-                precisions,
-            });
-        }
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(DgBackendCapabilities {
+            struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
+            struct_version: 0,
+            device_count: capabilities.devices.len(),
+            devices,
+            precision_count: capabilities.precisions.len(),
+            precisions,
+        })
+    })
 }
 
 /// Queries one input or output tensor description.
@@ -2051,7 +2049,7 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
     out: *mut DgTensorInfo,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
+    ffi_result_with_out(out, out_error, || {
         if backend.is_null() || out.is_null() {
             return Err((
                 DgStatus::NullPointer,
@@ -2072,13 +2070,8 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
             backend.backend.input_info(index)
         }
         .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let info = c_tensor_info(info)?;
-        unsafe { out.write(info) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        c_tensor_info(info)
+    })
 }
 
 /// Runs direct backend inference over caller-owned tensor handles.
@@ -2099,6 +2092,7 @@ pub unsafe extern "C" fn dg_backend_run(
                 "backend or output-count pointer is null".to_string(),
             ));
         }
+        unsafe { out_count.write(0) };
         if input_count > 0 && inputs.is_null() {
             return Err((DgStatus::NullPointer, "input array is null".to_string()));
         }
@@ -2156,23 +2150,12 @@ pub unsafe extern "C" fn dg_tensor_create(
     out: *mut *mut DgTensor,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
-        if out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "tensor output pointer is null".to_string(),
-            ));
-        }
+    ffi_result_with_out(out, out_error, || {
         let data = unsafe { bytes(data, length)? };
         let shape = unsafe { dims(shape, rank)? };
         let tensor = tensor_from_bytes(data, shape, dtype, format, device)?;
-        // SAFETY: `out` was checked non-null and points to writable caller storage.
-        unsafe { out.write(Box::into_raw(Box::new(DgTensor { tensor }))) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
+    })
 }
 
 /// Creates a tensor backed by an imported external buffer.
@@ -2186,13 +2169,7 @@ pub unsafe extern "C" fn dg_tensor_create_external(
     out: *mut *mut DgTensor,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
-        if out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "tensor output pointer is null".to_string(),
-            ));
-        }
+    ffi_result_with_out(out, out_error, || {
         let (device, domain, size_bytes, fd, raw, release, user_data) =
             parse_external_memory_descriptor(desc)?;
         let shape = unsafe { dims(shape, rank)? };
@@ -2222,13 +2199,8 @@ pub unsafe extern "C" fn dg_tensor_create_external(
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         let tensor = Tensor::from_buffer(tensor_desc, buffer)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        // SAFETY: `out` was checked non-null and points to writable caller storage.
-        unsafe { out.write(Box::into_raw(Box::new(DgTensor { tensor }))) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
+    })
 }
 
 /// Frees a tensor handle. Null is accepted.
@@ -2297,12 +2269,9 @@ pub unsafe extern "C" fn dg_engine_poll(
     out: *mut *mut DgTensor,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
-        if engine.is_null() || out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "engine or output pointer is null".to_string(),
-            ));
+    ffi_result_with_out(out, out_error, || {
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
         let engine_handle = unsafe { &*engine };
         let mut engine = lock_engine_write(engine_handle)?;
@@ -2310,13 +2279,8 @@ pub unsafe extern "C" fn dg_engine_poll(
             .outputs
             .pop_front()
             .ok_or((DgStatus::Again, "no output is available".to_string()))?;
-        // SAFETY: `out` was checked non-null and points to writable caller storage.
-        unsafe { out.write(Box::into_raw(Box::new(DgTensor { tensor }))) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgTensor { tensor })))
+    })
 }
 
 /// Imports an external buffer handle without dereferencing the external address.
@@ -2326,13 +2290,7 @@ pub unsafe extern "C" fn dg_buffer_import_external(
     out: *mut *mut DgBuffer,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
-        if out.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "buffer output pointer is null".to_string(),
-            ));
-        }
+    ffi_result_with_out(out, out_error, || {
         let (device, domain, size_bytes, fd, raw, release, user_data) =
             parse_external_memory_descriptor(desc)?;
         let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
@@ -2344,13 +2302,8 @@ pub unsafe extern "C" fn dg_buffer_import_external(
             guard,
         )
         .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        // SAFETY: `out` was checked non-null and points to writable caller storage.
-        unsafe { out.write(Box::into_raw(Box::new(DgBuffer { buffer }))) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(Box::into_raw(Box::new(DgBuffer { buffer })))
+    })
 }
 
 /// Returns the logical size of an imported buffer.
@@ -2360,21 +2313,13 @@ pub unsafe extern "C" fn dg_buffer_size(
     out_size: *mut usize,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
-    match ffi_result(out_error, || {
-        if buffer.is_null() || out_size.is_null() {
-            return Err((
-                DgStatus::NullPointer,
-                "buffer or size pointer is null".to_string(),
-            ));
+    ffi_result_with_out(out_size, out_error, || {
+        if buffer.is_null() {
+            return Err((DgStatus::NullPointer, "buffer pointer is null".to_string()));
         }
         let buffer = unsafe { &*buffer };
-        // SAFETY: `out_size` was checked non-null and points to writable caller storage.
-        unsafe { out_size.write(buffer.buffer.len()) };
-        Ok(())
-    }) {
-        Ok(()) => DgStatus::Ok,
-        Err(status) => status,
-    }
+        Ok(buffer.buffer.len())
+    })
 }
 
 /// Frees an external buffer handle.
