@@ -328,6 +328,13 @@ fn lock_engine_read(
     }
 }
 
+fn lock_backend(backend: &DgBackend) -> std::sync::MutexGuard<'_, Box<dyn InferBackend>> {
+    backend
+        .backend
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[allow(dead_code)]
 const MAX_VIEW_LEN: usize = 1 << 40;
 #[allow(dead_code)]
@@ -558,7 +565,7 @@ pub struct DgBuffer {
 
 /// Opaque direct inference backend handle.
 pub struct DgBackend {
-    backend: Box<dyn InferBackend>,
+    backend: Mutex<Box<dyn InferBackend>>,
 }
 
 struct Engine {
@@ -1951,7 +1958,9 @@ pub unsafe extern "C" fn dg_backend_create(
         backend
             .init(&option)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
-        Ok(Box::into_raw(Box::new(DgBackend { backend })))
+        Ok(Box::into_raw(Box::new(DgBackend {
+            backend: Mutex::new(backend),
+        })))
     })
 }
 
@@ -1985,10 +1994,10 @@ pub unsafe extern "C" fn dg_backend_io_counts(
             out_inputs.write(0);
             out_outputs.write(0);
         }
-        let backend = unsafe { &*backend };
+        let backend = lock_backend(unsafe { &*backend });
         unsafe {
-            out_inputs.write(backend.backend.input_count());
-            out_outputs.write(backend.backend.output_count());
+            out_inputs.write(backend.input_count());
+            out_outputs.write(backend.output_count());
         }
         Ok(())
     }) {
@@ -2018,9 +2027,8 @@ pub unsafe extern "C" fn dg_backend_capabilities(
             out_ref.struct_version,
             std::mem::size_of::<DgBackendCapabilities>(),
         )?;
-        let backend = unsafe { &*backend };
+        let backend = lock_backend(unsafe { &*backend });
         let capabilities = backend
-            .backend
             .probe_capabilities()
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         if capabilities.devices.len() > 8 || capabilities.precisions.len() > 16 {
@@ -2071,11 +2079,11 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
             out_ref.struct_version,
             std::mem::size_of::<DgTensorInfo>(),
         )?;
-        let backend = unsafe { &*backend };
+        let backend = lock_backend(unsafe { &*backend });
         let info = if output {
-            backend.backend.output_info(index)
+            backend.output_info(index)
         } else {
-            backend.backend.input_info(index)
+            backend.input_info(index)
         }
         .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         c_tensor_info(info)
@@ -2104,7 +2112,7 @@ pub unsafe extern "C" fn dg_backend_run(
         if input_count > 0 && inputs.is_null() {
             return Err((DgStatus::NullPointer, "input array is null".to_string()));
         }
-        let backend = unsafe { &mut *backend };
+        let mut backend = lock_backend(unsafe { &*backend });
         let input_handles = if input_count == 0 {
             &[][..]
         } else {
@@ -2120,7 +2128,6 @@ pub unsafe extern "C" fn dg_backend_run(
             tensors.push(unsafe { &**handle }.tensor.clone());
         }
         let produced = backend
-            .backend
             .run(&tensors)
             .map_err(|error| (DgStatus::RuntimeError, error.to_string()))?;
         let produced_count = produced.len();

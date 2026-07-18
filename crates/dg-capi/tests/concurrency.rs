@@ -5,10 +5,13 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use dg_capi::{
-    dg_buffer_import_external, dg_engine_build, dg_engine_create, dg_engine_destroy,
-    dg_engine_init, dg_engine_load_string, dg_engine_metrics, dg_engine_status,
-    dg_owned_bytes_free, dg_tensor_create, DgEngine, DgExternalMemoryV2, DgGraphFormat,
-    DgGraphStatus, DgOwnedBytes, DgStatus, DgTensor,
+    dg_backend_capabilities, dg_backend_create, dg_backend_free, dg_backend_io_counts,
+    dg_backend_run, dg_backend_tensor_info, dg_buffer_import_external, dg_engine_build,
+    dg_engine_create, dg_engine_destroy, dg_engine_init, dg_engine_load_string, dg_engine_metrics,
+    dg_engine_status, dg_owned_bytes_data, dg_owned_bytes_free, dg_owned_bytes_len,
+    dg_tensor_create, dg_tensor_data, dg_tensor_free, DgBackend, DgBackendCapabilities,
+    DgBackendKind, DgDataFormat, DgDataType, DgDeviceKind, DgEngine, DgExternalMemoryV2,
+    DgGraphFormat, DgGraphStatus, DgOwnedBytes, DgStatus, DgTensor, DgTensorInfo,
 };
 
 const BASE_SPEC: &str = r#"apiVersion: dg/v1
@@ -172,5 +175,148 @@ fn tensor_create_invalid_dtype_zeroes_output_pointer() {
         );
         assert!((*out_ptr).is_null());
         let _ = Box::from_raw(out_ptr);
+    }
+}
+
+#[test]
+fn concurrent_backend_queries_and_run_do_not_race() {
+    let options = CString::new(r#"{"shape":[1,4],"echo_inputs":true}"#).expect("options");
+    let mut backend = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            dg_backend_create(
+                DgBackendKind::Mock as i32,
+                ptr::null(),
+                0,
+                options.as_ptr(),
+                &mut backend,
+                ptr::null_mut(),
+            ),
+            DgStatus::Ok
+        );
+    }
+    assert!(!backend.is_null());
+
+    let input_bytes: Vec<u8> = [1.0_f32, 2.0, 3.0, 4.0]
+        .into_iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let shape = [1usize, 4];
+    let mut input = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            dg_tensor_create(
+                input_bytes.as_ptr(),
+                input_bytes.len(),
+                shape.as_ptr(),
+                shape.len(),
+                DgDataType::F32 as i32,
+                DgDataFormat::Nc as i32,
+                DgDeviceKind::Cpu as i32,
+                &mut input,
+                ptr::null_mut(),
+            ),
+            DgStatus::Ok
+        );
+    }
+
+    let input_ptr = input as *const DgTensor;
+    let barrier = Arc::new(Barrier::new(4));
+    let input_bytes_for_run = input_bytes.clone();
+    let backend_addr = backend as usize;
+    let input_addr = input_ptr as usize;
+    let mut handles = Vec::new();
+
+    for _ in 0..3 {
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let backend = backend_addr as *mut DgBackend;
+            barrier.wait();
+            unsafe {
+                let mut inputs = 0;
+                let mut outputs = 0;
+                assert_eq!(
+                    dg_backend_io_counts(backend, &mut inputs, &mut outputs, ptr::null_mut()),
+                    DgStatus::Ok
+                );
+                assert_eq!((inputs, outputs), (1, 1));
+
+                let mut capabilities = DgBackendCapabilities {
+                    struct_size: 0,
+                    struct_version: 0,
+                    device_count: 0,
+                    devices: [DgDeviceKind::Cpu; 8],
+                    precision_count: 0,
+                    precisions: [DgDataType::U8; 16],
+                };
+                assert_eq!(
+                    dg_backend_capabilities(backend, &mut capabilities, ptr::null_mut()),
+                    DgStatus::Ok
+                );
+
+                let mut info = DgTensorInfo {
+                    struct_size: 0,
+                    struct_version: 0,
+                    dtype: DgDataType::U8,
+                    format: DgDataFormat::Auto,
+                    device: DgDeviceKind::Cpu,
+                    rank: 0,
+                    shape: [0; 8],
+                };
+                assert_eq!(
+                    dg_backend_tensor_info(backend, false, 0, &mut info, ptr::null_mut()),
+                    DgStatus::Ok
+                );
+            }
+        }));
+    }
+
+    let barrier = Arc::clone(&barrier);
+    handles.push(thread::spawn(move || {
+        let backend = backend_addr as *mut DgBackend;
+        let input_ptr = input_addr as *const DgTensor;
+        barrier.wait();
+        for _ in 0..32 {
+            let mut output = ptr::null_mut();
+            let mut count = 0;
+            unsafe {
+                assert_eq!(
+                    dg_backend_run(
+                        backend,
+                        &input_ptr,
+                        1,
+                        &mut output,
+                        1,
+                        &mut count,
+                        ptr::null_mut(),
+                    ),
+                    DgStatus::Ok
+                );
+                assert_eq!(count, 1);
+
+                let mut owned = ptr::null_mut();
+                assert_eq!(
+                    dg_tensor_data(output, &mut owned, ptr::null_mut()),
+                    DgStatus::Ok
+                );
+                let data = dg_owned_bytes_data(owned);
+                let len = dg_owned_bytes_len(owned);
+                assert_eq!(
+                    std::slice::from_raw_parts(data, len),
+                    input_bytes_for_run.as_slice()
+                );
+                dg_owned_bytes_free(owned);
+                dg_tensor_free(output);
+            }
+        }
+    }));
+
+    for handle in handles {
+        handle.join().expect("thread joined");
+    }
+
+    unsafe {
+        dg_tensor_free(input);
+        dg_backend_free(backend);
     }
 }
