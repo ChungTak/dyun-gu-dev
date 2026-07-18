@@ -1559,9 +1559,6 @@ pub unsafe extern "C" fn dg_engine_diff_string(
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
-        if engine.is_null() {
-            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
-        }
         prepare_diff_outputs(
             out_added_nodes,
             out_removed_nodes,
@@ -1569,6 +1566,9 @@ pub unsafe extern "C" fn dg_engine_diff_string(
             out_added_connections,
             out_removed_connections,
         )?;
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+        }
         let content = unsafe { c_string(content)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
@@ -1605,9 +1605,6 @@ pub unsafe extern "C" fn dg_engine_diff_file(
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
-        if engine.is_null() {
-            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
-        }
         prepare_diff_outputs(
             out_added_nodes,
             out_removed_nodes,
@@ -1615,6 +1612,9 @@ pub unsafe extern "C" fn dg_engine_diff_file(
             out_added_connections,
             out_removed_connections,
         )?;
+        if engine.is_null() {
+            return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
+        }
         let path = unsafe { c_string(path)? }
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
