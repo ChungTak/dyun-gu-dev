@@ -351,7 +351,7 @@ fn lock_backend(backend: &DgBackend) -> std::sync::MutexGuard<'_, Box<dyn InferB
 }
 
 #[allow(dead_code)]
-const MAX_VIEW_LEN: usize = 1 << 40;
+const MAX_VIEW_LEN: u64 = 1u64 << 40;
 #[allow(dead_code)]
 const MAX_SHAPE_RANK: usize = 8;
 /// Maximum number of bytes (including the terminating NUL) scanned from a
@@ -521,7 +521,7 @@ fn build_external_handle(
 impl DgStringView {
     #[allow(dead_code)]
     fn as_str(&self) -> Result<&str, (DgStatus, String)> {
-        if self.len > MAX_VIEW_LEN {
+        if self.len as u64 > MAX_VIEW_LEN {
             return Err((
                 DgStatus::InvalidArgument,
                 "string view length exceeds maximum".to_string(),
@@ -549,7 +549,7 @@ impl DgStringView {
 impl DgByteView {
     #[allow(dead_code)]
     fn as_bytes(&self) -> Result<&[u8], (DgStatus, String)> {
-        if self.len > MAX_VIEW_LEN {
+        if self.len as u64 > MAX_VIEW_LEN {
             return Err((
                 DgStatus::InvalidArgument,
                 "byte view length exceeds maximum".to_string(),
@@ -1300,7 +1300,7 @@ fn c_device(device: DeviceKind) -> DgDeviceKind {
 }
 
 unsafe fn bytes<'a>(data: *const u8, length: usize) -> Result<&'a [u8], (DgStatus, String)> {
-    if length > MAX_VIEW_LEN {
+    if length as u64 > MAX_VIEW_LEN {
         return Err((
             DgStatus::InvalidArgument,
             "data length exceeds the C ABI view limit".to_string(),
