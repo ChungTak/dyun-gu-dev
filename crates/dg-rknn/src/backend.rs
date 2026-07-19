@@ -694,8 +694,12 @@ fn shape_from_attr(attr: &sys::rknn_tensor_attr) -> Result<Shape> {
         .iter()
         .take(rank)
         .copied()
-        .map(|dim| dim as usize)
-        .collect::<Vec<_>>();
+        .map(|dim| {
+            usize::try_from(dim).map_err(|_| {
+                Error::Backend(format!("rknn tensor dim {dim} is negative or out of range"))
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Shape::new(dims))
 }
 
