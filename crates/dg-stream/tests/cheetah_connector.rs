@@ -10,7 +10,8 @@ use dg_media::{
 };
 use dg_stream::{
     cheetah_avframe_to_media_frame, CheetahPublisherSinkAdapter, CheetahRuntimeConnector,
-    EmbeddedCheetahRuntimeConnector, PublisherSink, StreamProtocol, TrackInfo as StreamTrackInfo,
+    CheetahSubscriberSourceAdapter, EmbeddedCheetahRuntimeConnector, PublisherSink, ReceiveOutcome,
+    StreamProtocol, SubscriberSource, TrackInfo as StreamTrackInfo,
 };
 use dg_stream_cheetah::cheetah_connector::{
     ConnectorBuilder, LoopbackLayer, LoopbackOptions, LoopbackTopology, Protocol,
@@ -259,4 +260,61 @@ fn engine_only_loopback_roundtrips_h264_without_sockets() {
             Ok::<(), Box<dyn std::error::Error>>(())
         })
         .expect("engine-only loopback");
+}
+
+#[test]
+fn cheetah_adapter_recv_timeout_uses_native_async_timer() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .expect("test runtime");
+    runtime
+        .block_on(async {
+            let runtime_api =
+                Arc::new(TokioRuntime::new()) as Arc<dyn dg_stream_cheetah::RuntimeApi>;
+            let connector = ConnectorBuilder::new(runtime_api)
+                .without_default_modules()
+                .build()?;
+            connector.start().await?;
+
+            let mut track =
+                CheetahTrackInfo::new(TrackId(0), MediaKind::Video, CodecId::H264, 90_000);
+            track.readiness = TrackReadiness::Ready;
+            track.extradata = dg_stream_cheetah::CodecExtradata::H264 {
+                sps: vec![Bytes::from_static(&[0x67, 0x42, 0x00, 0x1f])],
+                pps: vec![Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80])],
+                avcc: None,
+            };
+
+            let options = LoopbackOptions {
+                stream_name: "dg_stream_timeout".to_string(),
+                topology: LoopbackTopology::SameProtocol {
+                    protocol: Protocol::Rtmp,
+                },
+                preferred_layer: LoopbackLayer::EngineOnlyBypassWire,
+                tracks: vec![track],
+                ..Default::default()
+            };
+
+            let pair = connector.open_in_memory_loopback(options).await?;
+            pair.publisher.wait_ready().await?;
+
+            let mut adapter =
+                CheetahSubscriberSourceAdapter::new(Box::new(pair.subscriber), "rtmp");
+            let start = std::time::Instant::now();
+            let outcome = adapter.recv_timeout(Duration::from_millis(100)).await?;
+            let elapsed = start.elapsed();
+            assert!(matches!(outcome, ReceiveOutcome::TimedOut), "{outcome:?}");
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "timeout took {elapsed:?}"
+            );
+
+            pair.publisher.close()?;
+            adapter.close().await?;
+            connector.stop().await;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .expect("adapter timeout");
 }

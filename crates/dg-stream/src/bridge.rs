@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "cheetah")]
 use bytes::Bytes;
-#[cfg(feature = "cheetah")]
-use futures::{channel::oneshot, future, pin_mut};
+
 #[cfg(feature = "cheetah")]
 use std::collections::HashMap;
 #[cfg(feature = "cheetah")]
@@ -645,34 +644,11 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
     }
 
     async fn recv_timeout(&mut self, timeout: Duration) -> Result<ReceiveOutcome> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            return match handle.block_on(tokio::time::timeout(timeout, self.recv_inner())) {
-                Ok(Some(frame)) => Ok(ReceiveOutcome::Frame(frame)),
-                Ok(None) => Ok(ReceiveOutcome::EndOfStream),
-                Err(_) => Ok(ReceiveOutcome::TimedOut),
-            };
-        }
-
-        let (tx, rx) = oneshot::channel();
-        let _ = std::thread::Builder::new()
-            .name("dg-stream-cheetah-timeout".to_string())
-            .spawn(move || {
-                std::thread::sleep(timeout);
-                let _ = tx.send(());
-            });
-
-        let recv_fut = self.recv_inner();
-        pin_mut!(recv_fut);
-        let timeout_fut = rx;
-        pin_mut!(timeout_fut);
-
-        match future::select(recv_fut, timeout_fut).await {
-            future::Either::Left((result, _)) => match result {
-                Ok(Some(frame)) => Ok(ReceiveOutcome::Frame(frame)),
-                Ok(None) => Ok(ReceiveOutcome::EndOfStream),
-                Err(err) => Err(err),
-            },
-            future::Either::Right(_) => Ok(ReceiveOutcome::TimedOut),
+        match tokio::time::timeout(timeout, self.recv_inner()).await {
+            Ok(Ok(Some(frame))) => Ok(ReceiveOutcome::Frame(frame)),
+            Ok(Ok(None)) => Ok(ReceiveOutcome::EndOfStream),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Ok(ReceiveOutcome::TimedOut),
         }
     }
 
@@ -686,7 +662,10 @@ impl SubscriberSource for CheetahSubscriberSourceAdapter {
     fn id(&self) -> SubscriberId {
         SubscriberId(self.inner.id().0)
     }
+}
 
+#[cfg(feature = "cheetah")]
+impl CheetahSubscriberSourceAdapter {
     async fn recv_inner(&mut self) -> Result<Option<Arc<MediaFrame>>> {
         let next = self
             .inner
