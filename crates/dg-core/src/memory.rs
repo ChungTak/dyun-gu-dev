@@ -6,6 +6,8 @@ use std::{
     },
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{Buffer, BufferDesc, DeviceKind, Error, Result};
 
 type ReleaseFn = Box<dyn FnMut() + Send + 'static>;
@@ -121,7 +123,8 @@ impl Allocator for CpuAllocator {
 ///
 /// Limits apply only to buffers retained in the pool after `deallocate`. Different
 /// `(size_bytes, align)` descriptors never share slots.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct MemoryPoolConfig {
     /// Maximum total cached host bytes across all descriptors.
     pub max_cached_bytes: usize,

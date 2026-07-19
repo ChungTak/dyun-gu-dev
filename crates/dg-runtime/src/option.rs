@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 pub use dg_core::CoreSelection;
-use dg_core::{DataType, DeployMode, DeviceKind, StreamKind};
+use dg_core::{DataType, DeployMode, DeviceKind, ProcessRuntimePolicy, StreamKind};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -172,6 +172,7 @@ impl BackendConfig {
             dynamic_shape: false,
             external_stream: None,
             backend_options,
+            process_policy: ProcessRuntimePolicy::default(),
         }
     }
 }
@@ -292,6 +293,8 @@ pub struct RuntimeOption {
     pub dynamic_shape: bool,
     pub external_stream: Option<ExternalStreamHandle>,
     pub backend_options: BackendOptions,
+    /// Process-wide policy applied to this runtime instance.
+    pub process_policy: ProcessRuntimePolicy,
 }
 
 impl RuntimeOption {
@@ -315,6 +318,7 @@ impl RuntimeOption {
             dynamic_shape: false,
             external_stream: None,
             backend_options,
+            process_policy: ProcessRuntimePolicy::default(),
         }
     }
 
@@ -370,6 +374,11 @@ impl RuntimeOption {
 
     pub fn with_external_stream(mut self, external_stream: ExternalStreamHandle) -> Self {
         self.external_stream = Some(external_stream);
+        self
+    }
+
+    pub fn with_process_policy(mut self, process_policy: ProcessRuntimePolicy) -> Self {
+        self.process_policy = process_policy;
         self
     }
 }
