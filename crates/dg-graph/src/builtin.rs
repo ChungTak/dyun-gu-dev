@@ -317,6 +317,14 @@ fn parse_source(node: &NodeSpec) -> Result<SourceElement> {
     })
 }
 
+/// Returns the per-tensor byte size produced by a `source` node.
+pub(crate) fn source_output_tensor_bytes(node: &NodeSpec) -> Result<usize> {
+    let params = params_object(node)?;
+    let shape = read_shape(params, "shape", &[1, 4])?;
+    let dtype = read_dtype(params, "dtype")?.unwrap_or(DataType::F32);
+    Ok(dtype.storage_bytes_for_shape(&shape)?)
+}
+
 fn create_input(node: &NodeSpec) -> Result<CreatedElement> {
     validate_empty_params(node)?;
     let queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -383,6 +391,22 @@ fn parse_mock_inference(node: &NodeSpec) -> Result<MockInferenceConfig> {
         echo_inputs,
         fill_value,
     })
+}
+
+/// Returns the per-tensor output byte size produced by a `mock_inference` node.
+///
+/// When `echo_inputs` is true the output is a copy of the input tensor, so its
+/// size is not known until runtime and is validated by the input checks there.
+pub(crate) fn mock_inference_output_tensor_bytes(node: &NodeSpec) -> Result<usize> {
+    let params = params_object(node)?;
+    let shape = read_shape(params, "shape", &[1, 4])?;
+    let output_shape = read_shape(params, "output_shape", shape.dims())?;
+    let dtype = read_dtype(params, "dtype")?.unwrap_or(DataType::F32);
+    let output_dtype = read_dtype(params, "output_dtype")?.unwrap_or(dtype);
+    if read_bool(params, "echo_inputs", true)? {
+        return Ok(0);
+    }
+    Ok(output_dtype.storage_bytes_for_shape(&output_shape)?)
 }
 
 fn create_sink(node: &NodeSpec) -> Result<CreatedElement> {
