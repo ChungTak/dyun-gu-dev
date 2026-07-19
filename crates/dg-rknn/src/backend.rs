@@ -306,6 +306,9 @@ impl RknnBackend {
 
         let context = self.context()?;
         let mut attrs = self.input_attrs.clone();
+        let attr_count = u32::try_from(attrs.len()).map_err(|_| {
+            Error::InvalidOption("rknn input attribute count exceeds u32".to_string())
+        })?;
         for (attr, shape) in attrs.iter_mut().zip(input_shapes.iter()) {
             if !self.options.dynamic_shape && shape != &shape_from_attr(attr)? {
                 return Err(Error::InvalidOption(
@@ -315,8 +318,7 @@ impl RknnBackend {
             update_attr_shape(attr, shape)?;
         }
 
-        let status =
-            unsafe { sys::rknn_set_input_shapes(context, attrs.len() as u32, attrs.as_mut_ptr()) };
+        let status = unsafe { sys::rknn_set_input_shapes(context, attr_count, attrs.as_mut_ptr()) };
         check_status(status, "rknn_set_input_shapes")?;
         self.input_attrs = attrs;
         self.refresh_io_info()?;
@@ -398,6 +400,8 @@ impl RknnBackend {
 
     fn run_staging(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>> {
         let context = self.context()?;
+        let input_count = u32::try_from(inputs.len())
+            .map_err(|_| Error::InvalidOption("rknn input count exceeds u32".to_string()))?;
         let input_buffers: Vec<Vec<u8>> = inputs
             .iter()
             .map(|tensor| tensor.buffer().read_bytes())
@@ -417,14 +421,14 @@ impl RknnBackend {
             });
         }
 
-        let status = unsafe {
-            sys::rknn_inputs_set(context, inputs_set.len() as u32, inputs_set.as_mut_ptr())
-        };
+        let status = unsafe { sys::rknn_inputs_set(context, input_count, inputs_set.as_mut_ptr()) };
         check_status(status, "rknn_inputs_set")?;
 
         let status = unsafe { sys::rknn_run(context, ptr::null_mut()) };
         check_status(status, "rknn_run")?;
 
+        let output_count = u32::try_from(self.output_infos.len())
+            .map_err(|_| Error::InvalidOption("rknn output count exceeds u32".to_string()))?;
         let mut outputs = Vec::with_capacity(self.output_infos.len());
         for index in 0..self.output_infos.len() {
             outputs.push(sys::rknn_output {
@@ -437,12 +441,7 @@ impl RknnBackend {
         }
 
         let status = unsafe {
-            sys::rknn_outputs_get(
-                context,
-                outputs.len() as u32,
-                outputs.as_mut_ptr(),
-                ptr::null_mut(),
-            )
+            sys::rknn_outputs_get(context, output_count, outputs.as_mut_ptr(), ptr::null_mut())
         };
         check_status(status, "rknn_outputs_get")?;
 
@@ -782,8 +781,9 @@ fn layout_from_rknn(fmt: sys::rknn_tensor_format) -> Option<DataFormat> {
 }
 
 fn release_outputs(context: sys::rknn_context, outputs: &mut [sys::rknn_output]) -> Result<()> {
-    let status =
-        unsafe { sys::rknn_outputs_release(context, outputs.len() as u32, outputs.as_mut_ptr()) };
+    let output_count = u32::try_from(outputs.len())
+        .map_err(|_| Error::InvalidOption("rknn output count exceeds u32".to_string()))?;
+    let status = unsafe { sys::rknn_outputs_release(context, output_count, outputs.as_mut_ptr()) };
     check_status(status, "rknn_outputs_release")
 }
 
