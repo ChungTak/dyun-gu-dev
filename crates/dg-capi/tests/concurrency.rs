@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::ptr;
 use std::sync::{Arc, Barrier};
@@ -6,12 +6,13 @@ use std::thread;
 
 use dg_capi::{
     dg_backend_capabilities, dg_backend_create, dg_backend_free, dg_backend_io_counts,
-    dg_backend_run, dg_backend_tensor_info, dg_buffer_import_external, dg_engine_build,
-    dg_engine_create, dg_engine_destroy, dg_engine_init, dg_engine_load_string, dg_engine_metrics,
-    dg_engine_status, dg_owned_bytes_data, dg_owned_bytes_free, dg_owned_bytes_len,
-    dg_tensor_create, dg_tensor_data, dg_tensor_free, DgBackend, DgBackendCapabilities,
-    DgBackendKind, DgDataFormat, DgDataType, DgDeviceKind, DgEngine, DgExternalMemoryV2,
-    DgGraphFormat, DgGraphStatus, DgOwnedBytes, DgStatus, DgTensor, DgTensorInfo,
+    dg_backend_run, dg_backend_tensor_info, dg_buffer_free, dg_buffer_import_external,
+    dg_buffer_size, dg_engine_build, dg_engine_create, dg_engine_destroy, dg_engine_init,
+    dg_engine_load_string, dg_engine_metrics, dg_engine_status, dg_owned_bytes_data,
+    dg_owned_bytes_free, dg_owned_bytes_len, dg_tensor_create, dg_tensor_data, dg_tensor_free,
+    DgBackend, DgBackendCapabilities, DgBackendKind, DgBuffer, DgDataFormat, DgDataType,
+    DgDeviceKind, DgEngine, DgExternalMemoryV2, DgGraphFormat, DgGraphStatus, DgOwnedBytes,
+    DgStatus, DgTensor, DgTensorInfo,
 };
 
 const BASE_SPEC: &str = r#"apiVersion: dg/v1
@@ -319,4 +320,121 @@ fn concurrent_backend_queries_and_run_do_not_race() {
         dg_tensor_free(input);
         dg_backend_free(backend);
     }
+}
+
+#[test]
+fn concurrent_tensor_data_reads_are_safe() {
+    let data: Vec<u8> = [1.0_f32, 2.0, 3.0, 4.0]
+        .into_iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let shape = [1usize, 4];
+    let mut tensor = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            dg_tensor_create(
+                data.as_ptr(),
+                data.len(),
+                shape.as_ptr(),
+                shape.len(),
+                DgDataType::F32 as i32,
+                DgDataFormat::Nc as i32,
+                DgDeviceKind::Cpu as i32,
+                &mut tensor,
+                ptr::null_mut(),
+            ),
+            DgStatus::Ok
+        );
+    }
+    assert!(!tensor.is_null());
+
+    let tensor_addr = tensor as usize;
+    let barrier = Arc::new(Barrier::new(4));
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let expected = data.clone();
+            thread::spawn(move || {
+                let tensor = tensor_addr as *const DgTensor;
+                barrier.wait();
+                for _ in 0..100 {
+                    let mut owned = ptr::null_mut();
+                    assert_eq!(
+                        unsafe { dg_tensor_data(tensor, &mut owned, ptr::null_mut()) },
+                        DgStatus::Ok
+                    );
+                    assert!(!owned.is_null());
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            dg_owned_bytes_data(owned),
+                            dg_owned_bytes_len(owned),
+                        )
+                    };
+                    assert_eq!(bytes, expected.as_slice());
+                    unsafe { dg_owned_bytes_free(owned) };
+                }
+            })
+        })
+        .collect();
+
+    barrier.wait();
+
+    for handle in handles {
+        handle.join().expect("thread joined");
+    }
+
+    unsafe { dg_tensor_free(tensor) };
+}
+
+unsafe extern "C" fn noop_release(_user_data: *mut c_void) {}
+
+#[test]
+fn concurrent_buffer_size_reads_are_safe() {
+    let desc = DgExternalMemoryV2 {
+        struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+        struct_version: 0,
+        fd: -1,
+        raw: 1,
+        domain: 0, // Host
+        device: 0, // Cpu
+        size_bytes: 4096,
+        release: Some(noop_release),
+        user_data: ptr::null_mut(),
+    };
+    let mut buffer = ptr::null_mut();
+    unsafe {
+        assert_eq!(
+            dg_buffer_import_external(&desc, &mut buffer, ptr::null_mut()),
+            DgStatus::Ok
+        );
+    }
+    assert!(!buffer.is_null());
+
+    let buffer_addr = buffer as usize;
+    let barrier = Arc::new(Barrier::new(4));
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let buffer = buffer_addr as *const DgBuffer;
+                barrier.wait();
+                for _ in 0..100 {
+                    let mut size = 0usize;
+                    assert_eq!(
+                        unsafe { dg_buffer_size(buffer, &mut size, ptr::null_mut()) },
+                        DgStatus::Ok
+                    );
+                    assert_eq!(size, 4096);
+                }
+            })
+        })
+        .collect();
+
+    barrier.wait();
+
+    for handle in handles {
+        handle.join().expect("thread joined");
+    }
+
+    unsafe { dg_buffer_free(buffer) };
 }
