@@ -1327,6 +1327,9 @@ fn tensor_from_bytes(
     let expected = desc
         .storage_bytes()
         .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+    ResourcePolicy::default()
+        .check_tensor_bytes(expected)
+        .map_err(|error| (map_core_error(&error), error.to_string()))?;
     if expected != data.len() {
         return Err((
             DgStatus::InvalidArgument,
@@ -2454,6 +2457,9 @@ pub unsafe extern "C" fn dg_tensor_create_external(
         let expected = tensor_desc
             .storage_bytes()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        ResourcePolicy::default()
+            .check_tensor_bytes(expected)
+            .map_err(|error| (map_core_error(&error), error.to_string()))?;
         if expected != size_bytes {
             return Err((
                 DgStatus::InvalidArgument,
@@ -2615,6 +2621,9 @@ pub unsafe extern "C" fn dg_buffer_import_external(
     ffi_result_with_out(out, out_error, || {
         let (device, domain, size_bytes, fd, raw, release, user_data) =
             parse_external_memory_descriptor(desc)?;
+        ResourcePolicy::default()
+            .check_buffer_bytes(size_bytes)
+            .map_err(|error| (map_core_error(&error), error.to_string()))?;
         let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
         let buffer = Buffer::from_external(
             device,
@@ -2665,6 +2674,7 @@ mod tests {
     use super::*;
     use std::ffi::CString;
     use std::fs;
+    use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -4514,5 +4524,88 @@ connections:
         assert!(output.is_null());
 
         unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn tensor_create_rejects_oversized_host_tensor() {
+        let oversized = ResourcePolicy::DEFAULT_MAX_TENSOR_BYTES + 1;
+        let shape = [oversized];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    ptr::null(),
+                    0,
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::U8 as i32,
+                    DgDataFormat::N as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+        assert!(tensor.is_null());
+    }
+
+    #[test]
+    fn tensor_create_external_rejects_oversized_external_tensor() {
+        let oversized = ResourcePolicy::DEFAULT_MAX_TENSOR_BYTES + 1;
+        let file = fs::File::open("/dev/null").expect("open /dev/null");
+        let fd = file.as_raw_fd();
+        let desc = DgExternalMemoryV2 {
+            struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+            struct_version: 0,
+            fd,
+            raw: 0,
+            domain: DgMemoryDomain::Host as i32,
+            device: DgDeviceKind::Cpu as i32,
+            size_bytes: oversized,
+            release: None,
+            user_data: ptr::null_mut(),
+        };
+        let shape = [oversized];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create_external(
+                    &desc,
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::U8 as i32,
+                    DgDataFormat::N as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+        assert!(tensor.is_null());
+    }
+
+    #[test]
+    fn buffer_import_external_rejects_oversized_buffer() {
+        let oversized = ResourcePolicy::DEFAULT_MAX_BUFFER_BYTES + 1;
+        let file = fs::File::open("/dev/null").expect("open /dev/null");
+        let fd = file.as_raw_fd();
+        let desc = DgExternalMemoryV2 {
+            struct_size: std::mem::size_of::<DgExternalMemoryV2>() as u32,
+            struct_version: 0,
+            fd,
+            raw: 0,
+            domain: DgMemoryDomain::Host as i32,
+            device: DgDeviceKind::Cpu as i32,
+            size_bytes: oversized,
+            release: None,
+            user_data: ptr::null_mut(),
+        };
+        let mut buffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_buffer_import_external(&desc, &mut buffer, ptr::null_mut()) },
+            DgStatus::InvalidArgument
+        );
+        assert!(buffer.is_null());
     }
 }
