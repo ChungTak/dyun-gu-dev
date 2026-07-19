@@ -849,6 +849,28 @@ impl GraphSpec {
             }
         }
 
+        // Pre-validate per-node output tensor sizes so a graph cannot request
+        // tensors larger than the effective ResourcePolicy before execution.
+        for node in &self.nodes {
+            let output_bytes = match node.kind.as_str() {
+                "source" => Some(crate::builtin::source_output_tensor_bytes(node)),
+                "mock_inference" => Some(crate::builtin::mock_inference_output_tensor_bytes(node)),
+                _ => None,
+            };
+            if let Some(output_bytes) = output_bytes {
+                let output_bytes = output_bytes.map_err(|err| Error::Validation {
+                    path: format!("nodes[{}].params", node.name),
+                    message: err.to_string(),
+                })?;
+                policy
+                    .check_tensor_bytes(output_bytes)
+                    .map_err(|err| Error::Validation {
+                        path: format!("nodes[{}].params", node.name),
+                        message: err.to_string(),
+                    })?;
+            }
+        }
+
         let mut node_kinds = BTreeMap::new();
         for node in &self.nodes {
             node_kinds.insert(node.name.as_str(), node.kind.as_str());

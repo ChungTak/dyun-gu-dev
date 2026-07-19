@@ -311,3 +311,69 @@ fn graph_new_enforces_model_size_against_max_model_bytes() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+fn source_with_dtype(name: &str, shape: &[usize], dtype: &str) -> NodeSpec {
+    NodeSpec {
+        name: name.into(),
+        kind: "source".into(),
+        params: json!({"count": 1, "shape": shape, "dtype": dtype}),
+        ..NodeSpec::default()
+    }
+}
+
+fn source_with_shape(name: &str, shape: &[usize]) -> NodeSpec {
+    source_with_dtype(name, shape, "f32")
+}
+
+fn mock_inference_node(
+    name: &str,
+    shape: &[usize],
+    output_shape: &[usize],
+    dtype: &str,
+    echo_inputs: bool,
+) -> NodeSpec {
+    NodeSpec {
+        name: name.into(),
+        kind: "mock_inference".into(),
+        params: json!({
+            "shape": shape,
+            "output_shape": output_shape,
+            "dtype": dtype,
+            "echo_inputs": echo_inputs,
+        }),
+        ..NodeSpec::default()
+    }
+}
+
+#[test]
+fn graph_new_enforces_source_output_size_against_max_tensor_bytes() {
+    let mut spec = GraphSpec::default();
+    spec.limits.max_tensor_bytes = 1;
+    spec.nodes.push(source_with_shape("src", &[2]));
+    spec.nodes.push(sink("snk"));
+    spec.connections.push("src.out -> snk.in".into());
+
+    let err = Graph::new(spec)
+        .err()
+        .expect("source output size should exceed max_tensor_bytes");
+    assert!(err.to_string().contains("tensor bytes"), "{err}");
+}
+
+#[test]
+fn graph_new_enforces_mock_inference_output_size_against_max_tensor_bytes() {
+    let mut spec = GraphSpec::default();
+    spec.limits.max_tensor_bytes = 1;
+    // Source produces 1 byte (u8 [1]) and fits the limit.
+    spec.nodes.push(source_with_dtype("src", &[1], "u8"));
+    // Non-echo mock inference produces 2 bytes (u8 [2]) and exceeds the limit.
+    spec.nodes
+        .push(mock_inference_node("infer", &[1], &[2], "u8", false));
+    spec.nodes.push(sink("snk"));
+    spec.connections.push("src.out -> infer.in".into());
+    spec.connections.push("infer.out -> snk.in".into());
+
+    let err = Graph::new(spec)
+        .err()
+        .expect("mock inference output size should exceed max_tensor_bytes");
+    assert!(err.to_string().contains("tensor bytes"), "{err}");
+}
