@@ -128,15 +128,16 @@ struct ZeroCopyBinding {
 #[derive(Debug)]
 struct ModelBuffer {
     data: Vec<u8>,
+    size: u32,
 }
 
 impl ModelBuffer {
     fn new(data: Vec<u8>) -> Result<Self> {
-        let _size: u32 = data
+        let size: u32 = data
             .len()
             .try_into()
             .map_err(|_| Error::InvalidOption("rknn model is too large".to_string()))?;
-        Ok(Self { data })
+        Ok(Self { data, size })
     }
 
     fn as_ptr(&self) -> *mut c_void {
@@ -144,7 +145,7 @@ impl ModelBuffer {
     }
 
     fn len(&self) -> u32 {
-        self.data.len() as u32
+        self.size
     }
 }
 
@@ -408,8 +409,11 @@ impl RknnBackend {
             .collect::<std::result::Result<Vec<_>, dg_core::Error>>()?;
         let mut inputs_set = Vec::with_capacity(input_buffers.len());
         for (index, buffer) in input_buffers.iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| {
+                Error::InvalidOption("rknn input index does not fit in u32".to_string())
+            })?;
             inputs_set.push(sys::rknn_input {
-                index: index as u32,
+                index,
                 buf: buffer.as_ptr() as *mut c_void,
                 size: buffer
                     .len()
@@ -431,10 +435,13 @@ impl RknnBackend {
             .map_err(|_| Error::InvalidOption("rknn output count exceeds u32".to_string()))?;
         let mut outputs = Vec::with_capacity(self.output_infos.len());
         for index in 0..self.output_infos.len() {
+            let index = u32::try_from(index).map_err(|_| {
+                Error::InvalidOption("rknn output index does not fit in u32".to_string())
+            })?;
             outputs.push(sys::rknn_output {
                 want_float: 0,
                 is_prealloc: 0,
-                index: index as u32,
+                index,
                 buf: ptr::null_mut(),
                 size: 0,
             });
@@ -681,7 +688,8 @@ fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
 }
 
 fn shape_from_attr(attr: &sys::rknn_tensor_attr) -> Result<Shape> {
-    let rank = attr.n_dims as usize;
+    let rank = usize::try_from(attr.n_dims)
+        .map_err(|_| Error::Backend("rknn n_dims is negative or out of range".to_string()))?;
     if rank > attr.dims.len() {
         return Err(Error::Backend(format!(
             "rknn tensor attr claims rank {rank} but max is {}",
@@ -710,7 +718,10 @@ fn update_attr_shape(attr: &mut sys::rknn_tensor_attr, shape: &Shape) -> Result<
             attr.dims.len()
         )));
     }
-    attr.n_dims = shape.rank() as u32;
+    attr.n_dims = shape
+        .rank()
+        .try_into()
+        .map_err(|_| Error::InvalidOption("shape rank overflows RKNN attr".to_string()))?;
     for slot in &mut attr.dims {
         *slot = 0;
     }
@@ -723,9 +734,12 @@ fn update_attr_shape(attr: &mut sys::rknn_tensor_attr, shape: &Shape) -> Result<
         .element_count()?
         .try_into()
         .map_err(|_| Error::InvalidOption("shape element count overflows RKNN attr".to_string()))?;
+    let bytes_per_element: u32 = bytes_per_element_for_rknn(attr.type_)?
+        .try_into()
+        .map_err(|_| Error::InvalidOption("bytes per element overflows RKNN attr".to_string()))?;
     attr.size = attr
         .n_elems
-        .checked_mul(bytes_per_element_for_rknn(attr.type_)? as u32)
+        .checked_mul(bytes_per_element)
         .ok_or_else(|| Error::InvalidOption("shape byte size overflow".to_string()))?;
     Ok(())
 }
