@@ -307,7 +307,7 @@ impl RknnBackend {
         let context = self.context()?;
         let mut attrs = self.input_attrs.clone();
         for (attr, shape) in attrs.iter_mut().zip(input_shapes.iter()) {
-            if !self.options.dynamic_shape && shape != &shape_from_attr(attr) {
+            if !self.options.dynamic_shape && shape != &shape_from_attr(attr)? {
                 return Err(Error::InvalidOption(
                     "rknn model does not permit dynamic reshape".to_string(),
                 ));
@@ -645,16 +645,19 @@ fn map_core_mask(mask: u32) -> Result<sys::rknn_core_mask> {
 }
 
 fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
-    let shape = shape_from_attr(attr);
+    let shape = shape_from_attr(attr)?;
     let dtype = dtype_from_rknn(attr.type_)?;
     let mut info = TensorInfo::new(shape, dtype);
     if !attr.name.iter().all(|&byte| byte == 0) {
-        // SAFETY: `attr.name` is a fixed-size buffer with at least one NUL
-        // byte written by rknn_query.
-        let name = unsafe { CStr::from_ptr(attr.name.as_ptr()) };
-        if let Ok(name) = name.to_str() {
-            if !name.is_empty() {
-                info = info.with_name(name.to_string());
+        // SAFETY: `attr.name` is a fixed-size array; we only read its own bytes
+        // and stop at the first NUL.
+        let name_bytes =
+            unsafe { std::slice::from_raw_parts(attr.name.as_ptr() as *const u8, attr.name.len()) };
+        if let Ok(name) = CStr::from_bytes_until_nul(name_bytes) {
+            if let Ok(name) = name.to_str() {
+                if !name.is_empty() {
+                    info = info.with_name(name.to_string());
+                }
             }
         }
     }
@@ -681,15 +684,22 @@ fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
     Ok(info)
 }
 
-fn shape_from_attr(attr: &sys::rknn_tensor_attr) -> Shape {
+fn shape_from_attr(attr: &sys::rknn_tensor_attr) -> Result<Shape> {
+    let rank = attr.n_dims as usize;
+    if rank > attr.dims.len() {
+        return Err(Error::Backend(format!(
+            "rknn tensor attr claims rank {rank} but max is {}",
+            attr.dims.len()
+        )));
+    }
     let dims = attr
         .dims
         .iter()
+        .take(rank)
         .copied()
-        .take(attr.n_dims as usize)
         .map(|dim| dim as usize)
         .collect::<Vec<_>>();
-    Shape::new(dims)
+    Ok(Shape::new(dims))
 }
 
 fn update_attr_shape(attr: &mut sys::rknn_tensor_attr, shape: &Shape) -> Result<()> {
