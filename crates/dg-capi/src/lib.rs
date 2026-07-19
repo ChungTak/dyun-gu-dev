@@ -2625,7 +2625,7 @@ pub unsafe extern "C" fn dg_engine_poll(
     unsafe { out.write(ptr::null_mut()) };
 
     enum PollResult {
-        Tensor(usize),
+        Tensor(*mut DgTensor),
         Again,
         EndOfStream,
         Error(DgStatus, String),
@@ -2639,7 +2639,7 @@ pub unsafe extern "C" fn dg_engine_poll(
         let result = match lock_engine_write(&engine_arc) {
             Ok(mut engine) => match engine.poll_output() {
                 Ok(EnginePollOutput::Tensor(tensor)) => {
-                    PollResult::Tensor(Arc::into_raw(Arc::new(DgTensor { tensor })) as usize)
+                    PollResult::Tensor(Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor)
                 }
                 Ok(EnginePollOutput::Pending) => PollResult::Again,
                 Ok(EnginePollOutput::EndOfStream) => PollResult::EndOfStream,
@@ -2656,8 +2656,8 @@ pub unsafe extern "C" fn dg_engine_poll(
         result
     })) {
         Ok(PollResult::Tensor(tensor)) => {
-            // SAFETY: `out` was checked non-null above and `tensor` came from `Box::into_raw`.
-            unsafe { out.write(tensor as *mut DgTensor) };
+            // SAFETY: `out` was checked non-null above and `tensor` came from `Arc::into_raw`.
+            unsafe { out.write(tensor) };
             DgStatus::Ok
         }
         Ok(PollResult::Again) => DgStatus::Again,
