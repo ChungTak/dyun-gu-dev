@@ -880,6 +880,13 @@ impl Engine {
             let poll_result = running.poll();
             let sink_tensors = running.drain_sinks();
             self.outputs.extend(sink_tensors);
+
+            // Return any outputs that were already produced before propagating a
+            // graph failure, so tensors computed up to the failure are not lost.
+            if let Some(tensor) = self.outputs.pop_front() {
+                return Ok(EnginePollOutput::Tensor(tensor));
+            }
+
             poll_result?;
         }
         if let Some(tensor) = self.outputs.pop_front() {
