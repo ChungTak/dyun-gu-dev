@@ -850,7 +850,10 @@ impl Engine {
 
     fn poll_output(&mut self) -> dg_graph::Result<EnginePollOutput> {
         if let Some(running) = self.running.as_mut() {
-            running.poll()?;
+            let poll_result = running.poll();
+            let sink_tensors = running.drain_sinks();
+            self.outputs.extend(sink_tensors);
+            poll_result?;
         }
         if let Some(tensor) = self.outputs.pop_front() {
             return Ok(EnginePollOutput::Tensor(tensor));
@@ -2826,6 +2829,35 @@ connections:
         .expect("valid graph spec")
     }
 
+    fn streaming_graph_spec() -> CString {
+        CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 1
+      shape: [1, 4]
+      dtype: f32
+      format: nc
+      start: 0.0
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#,
+        )
+        .expect("valid graph spec")
+    }
+
     #[cfg(feature = "stream")]
     fn media_stream_graph_spec() -> CString {
         CString::new(
@@ -3146,6 +3178,69 @@ connections:
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert_eq!(
+            last_status,
+            DgStatus::EndOfStream,
+            "dg_engine_poll must report EndOfStream after the streaming graph stops"
+        );
+        assert!(output.is_null());
+        assert!(error.is_null(), "EndOfStream must not allocate a DgError");
+
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn engine_poll_drains_streaming_sink_tensors_before_end_of_stream() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = streaming_graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let mut saw_tensor = false;
+        let mut last_status = DgStatus::Again;
+        while std::time::Instant::now() < deadline {
+            last_status = unsafe { dg_engine_poll(engine, &mut output, &mut error) };
+            if last_status == DgStatus::Ok {
+                saw_tensor = true;
+                assert!(!output.is_null());
+                unsafe { dg_tensor_free(output) };
+                output = ptr::null_mut();
+            } else if last_status == DgStatus::EndOfStream {
+                break;
+            } else {
+                assert!(output.is_null());
+                assert!(error.is_null(), "Again must not allocate a DgError");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            saw_tensor,
+            "dg_engine_poll must return the streaming sink tensor"
+        );
         assert_eq!(
             last_status,
             DgStatus::EndOfStream,
