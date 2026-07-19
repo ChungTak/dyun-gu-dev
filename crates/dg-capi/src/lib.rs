@@ -713,6 +713,40 @@ impl Engine {
                 "engine must be built before pushing input".to_string(),
             ));
         }
+
+        // Bound pending inputs so a caller cannot exhaust memory by pushing an
+        // unbounded number of tensors before calling run.
+        let limits = &self.spec.limits;
+        let new_bytes = tensor.desc().storage_bytes()?;
+        let (pending_packets, pending_bytes) =
+            self.pending_inputs
+                .values()
+                .fold((0usize, 0usize), |(packets, bytes), tensors| {
+                    (
+                        packets.saturating_add(tensors.len()),
+                        bytes.saturating_add(
+                            tensors
+                                .iter()
+                                .map(|t| t.desc().storage_bytes().unwrap_or(usize::MAX))
+                                .fold(0usize, |acc, b| acc.saturating_add(b)),
+                        ),
+                    )
+                });
+        let total_packets = pending_packets.saturating_add(1);
+        let total_bytes = pending_bytes.saturating_add(new_bytes);
+        if total_packets > limits.max_buffer_packets {
+            return Err(dg_graph::Error::InvalidState(format!(
+                "pending input count {} would exceed max_buffer_packets {}",
+                total_packets, limits.max_buffer_packets
+            )));
+        }
+        if total_bytes > limits.max_buffer_bytes {
+            return Err(dg_graph::Error::InvalidState(format!(
+                "pending input bytes {} would exceed max_buffer_bytes {}",
+                total_bytes, limits.max_buffer_bytes
+            )));
+        }
+
         let input_name = self.input_node_name()?;
         self.pending_inputs
             .entry(input_name)
@@ -2868,6 +2902,94 @@ connections:
         unsafe { dg_owned_bytes_free(output_owned) };
         unsafe {
             dg_tensor_free(output);
+            dg_tensor_free(tensor);
+            dg_engine_destroy(engine, 5000, ptr::null_mut());
+        }
+    }
+
+    fn graph_spec_with_tight_limits() -> CString {
+        CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+limits:
+  max_buffer_packets: 1
+  max_buffer_bytes: 1
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> infer.in
+  - infer.out -> sink.in
+"#,
+        )
+        .expect("valid graph spec")
+    }
+
+    #[test]
+    fn push_rejects_exceeding_pending_input_limits() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = graph_spec_with_tight_limits();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let input = [1.0_f32, 2.0, 3.0, 4.0];
+        let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
+        let shape = [1_usize, 4];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    input_bytes.as_ptr(),
+                    input_bytes.len(),
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+
+        // First push is within the packet limit (1) but exceeds the byte limit (1).
+        let mut error = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_push(engine, tensor, &mut error) },
+            DgStatus::RuntimeError
+        );
+        if !error.is_null() {
+            unsafe { dg_error_free(error) };
+        }
+
+        unsafe {
             dg_tensor_free(tensor);
             dg_engine_destroy(engine, 5000, ptr::null_mut());
         }
