@@ -1853,6 +1853,7 @@ pub unsafe extern "C" fn dg_engine_diff_file(
             .to_str()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        spec.validate().map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let engine = lock_engine_read(&engine_arc)?;
         let diff = Graph::diff(&engine.spec, &spec);
@@ -3681,6 +3682,60 @@ connections: []
             DgStatus::ParseError
         );
         assert!(!error.is_null());
+        unsafe { dg_error_free(error) };
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+        fs::remove_file(path).expect("remove invalid graph");
+    }
+
+    #[test]
+    fn diff_file_rejects_invalid_spec() {
+        let path = unique_temp_path();
+        fs::write(
+            &path,
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: duplicate
+    kind: source
+    params: {count: 0}
+  - name: duplicate
+    kind: sink
+    params: {}
+connections: []
+"#,
+        )
+        .expect("write invalid graph");
+        let path_string =
+            CString::new(path.to_str().expect("temp path is utf8")).expect("temp path has no nul");
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        let mut updated = 0usize;
+        let mut added_conn = 0usize;
+        let mut removed_conn = 0usize;
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            dg_engine_diff_file(
+                engine,
+                path_string.as_ptr(),
+                &mut added,
+                &mut removed,
+                &mut updated,
+                &mut added_conn,
+                &mut removed_conn,
+                &mut error,
+            )
+        };
+        assert_eq!(status, DgStatus::ParseError);
+        assert!(!error.is_null());
+        assert_eq!(
+            (added, removed, updated, added_conn, removed_conn),
+            (0, 0, 0, 0, 0)
+        );
         unsafe { dg_error_free(error) };
         unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
         fs::remove_file(path).expect("remove invalid graph");
