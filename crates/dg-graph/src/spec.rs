@@ -813,18 +813,16 @@ impl GraphSpec {
                     message: "threads must be >= 1".to_string(),
                 });
             }
-            if node
-                .threads
-                .is_some_and(|threads| threads > policy.max_nodes)
-            {
-                return Err(Error::Validation {
-                    path: format!("nodes[{}].threads", node.name),
-                    message: format!(
-                        "threads {} exceeds node limit {}",
-                        node.threads.unwrap(),
-                        policy.max_nodes
-                    ),
-                });
+            if let Some(threads) = node.threads {
+                if threads > policy.max_nodes {
+                    return Err(Error::Validation {
+                        path: format!("nodes[{}].threads", node.name),
+                        message: format!(
+                            "threads {threads} exceeds node limit {}",
+                            policy.max_nodes
+                        ),
+                    });
+                }
             }
             if self.execution.parallel != ParallelType::Pipeline
                 && node.threads.is_some_and(|threads| threads > 1)
