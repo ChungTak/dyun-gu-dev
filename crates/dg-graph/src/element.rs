@@ -99,6 +99,17 @@ impl SinkCollector {
             + self.tracks.len()
             + self.ocr.len()
     }
+
+    /// Removes and returns all collected tensors, updating the byte budget.
+    pub(crate) fn drain_tensors(&mut self) -> Vec<Tensor> {
+        let drained = std::mem::take(&mut self.tensors);
+        for tensor in &drained {
+            if let Ok(bytes) = tensor.desc().storage_bytes() {
+                self.current_bytes = self.current_bytes.saturating_sub(bytes);
+            }
+        }
+        drained
+    }
 }
 
 pub struct CreatedElement {
