@@ -405,16 +405,34 @@ fn parse_external_memory_descriptor(
             "external memory descriptor is null".to_string(),
         ));
     }
-    // SAFETY: `desc` is a valid pointer to a `DgExternalMemoryV2`.
-    let desc = unsafe { &*desc };
+    // Read the version fields first, then the rest of the descriptor field by
+    // field through raw pointers. This avoids creating a Rust reference to a
+    // potentially uninitialized C struct (including padding bytes).
+    let (struct_size, struct_version) = unsafe {
+        (
+            std::ptr::addr_of!((*desc).struct_size).read(),
+            std::ptr::addr_of!((*desc).struct_version).read(),
+        )
+    };
     check_struct_version(
         "DgExternalMemoryV2",
-        desc.struct_size,
-        desc.struct_version,
+        struct_size,
+        struct_version,
         std::mem::size_of::<DgExternalMemoryV2>(),
     )?;
-    let fd_valid = desc.fd >= 0;
-    let raw_valid = desc.raw != 0;
+    let (fd, raw, domain, device, size_bytes, release, user_data) = unsafe {
+        (
+            std::ptr::addr_of!((*desc).fd).read(),
+            std::ptr::addr_of!((*desc).raw).read(),
+            std::ptr::addr_of!((*desc).domain).read(),
+            std::ptr::addr_of!((*desc).device).read(),
+            std::ptr::addr_of!((*desc).size_bytes).read(),
+            std::ptr::addr_of!((*desc).release).read(),
+            std::ptr::addr_of!((*desc).user_data).read(),
+        )
+    };
+    let fd_valid = fd >= 0;
+    let raw_valid = raw != 0;
     if fd_valid && raw_valid {
         return Err((
             DgStatus::InvalidArgument,
@@ -428,23 +446,15 @@ fn parse_external_memory_descriptor(
             "external memory descriptor has neither fd nor raw set".to_string(),
         ));
     }
-    let domain = domain_from_c(desc.domain)?;
-    let device = device_from_c(desc.device)?;
-    if desc.size_bytes == 0 {
+    let domain = domain_from_c(domain)?;
+    let device = device_from_c(device)?;
+    if size_bytes == 0 {
         return Err((
             DgStatus::InvalidArgument,
             "external memory size must be non-zero".to_string(),
         ));
     }
-    Ok((
-        device,
-        domain,
-        desc.size_bytes,
-        desc.fd,
-        desc.raw,
-        desc.release,
-        desc.user_data,
-    ))
+    Ok((device, domain, size_bytes, fd, raw, release, user_data))
 }
 
 /// Takes ownership of an already validated external memory handle and builds the
