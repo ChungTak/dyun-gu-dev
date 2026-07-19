@@ -2294,6 +2294,13 @@ pub unsafe extern "C" fn dg_backend_run(
         }
         let backend_arc = unsafe { clone_backend_arc(backend as *const DgBackend) };
         let mut backend = lock_backend(&backend_arc);
+        let expected_inputs = backend.input_count();
+        if input_count > expected_inputs {
+            return Err((
+                DgStatus::InvalidArgument,
+                format!("input_count {input_count} exceeds backend input count {expected_inputs}"),
+            ));
+        }
         let input_handles = if input_count == 0 {
             &[][..]
         } else {
