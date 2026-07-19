@@ -11,7 +11,8 @@ use dg_media::{MediaFrame, MediaFrameKind};
 use dg_stream::{
     open_pull, open_push, BackpressurePolicy, CodecExtradata, CodecId, DispatchResult, Error,
     MediaKind, MemoryStreamHub, PublisherOptions, PublisherSink, StreamProtocol, SubscriberOptions,
-    SubscriberSourceSyncExt, TrackInfo, TrackReadiness, KEYFRAME_TAG, MEDIA_TAG,
+    SubscriberSourceSyncExt, TrackInfo, TrackReadiness, KEYFRAME_TAG, MAX_RETRY_BACKOFF_MS,
+    MEDIA_TAG,
 };
 
 fn video_frame(pts: i64, keyframe: bool, payload: &[u8]) -> Arc<MediaFrame> {
@@ -356,6 +357,14 @@ fn stream_element_parameters_are_validated_at_load_time() {
                 )).expect("serialize track")]
             }),
             "missing required codec config",
+        ),
+        (
+            "rtmp_sink",
+            serde_json::json!({
+                "url": "rtmp://server/live",
+                "retry_max_backoff_ms": MAX_RETRY_BACKOFF_MS + 1
+            }),
+            "field retry_max_backoff_ms must be <=",
         ),
     ];
 

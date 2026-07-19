@@ -9,6 +9,10 @@ use crate::ids::{PublishLease, StreamId, StreamKey, SubscriberId};
 use crate::track::TrackInfo;
 use dg_media::MediaFrame;
 
+/// Maximum retry backoff (24 hours). Prevents a misconfigured or malicious
+/// `retry_max_backoff_ms` from causing an unbounded sleep in `sleep_with_stop`.
+pub const MAX_RETRY_BACKOFF_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Retry policy for stream connect/reconnect attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -40,10 +44,12 @@ impl RetryConfig {
     /// Computes the backoff for the given attempt number (1-indexed).
     pub fn backoff(&self, attempt: u64) -> std::time::Duration {
         let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
-        let base = self
-            .initial_backoff_ms
-            .saturating_mul(self.multiplier.saturating_pow(exponent));
-        let clamped = base.min(self.max_backoff_ms);
+        // Clamp each input independently so a `RetryConfig` constructed directly
+        // cannot produce a `Duration::MAX`-sized retry interval.
+        let initial_backoff_ms = self.initial_backoff_ms.min(MAX_RETRY_BACKOFF_MS);
+        let max_backoff_ms = self.max_backoff_ms.min(MAX_RETRY_BACKOFF_MS);
+        let base = initial_backoff_ms.saturating_mul(self.multiplier.saturating_pow(exponent));
+        let clamped = base.min(max_backoff_ms);
         let jitter = if self.jitter_percent == 0 {
             0
         } else {
@@ -54,7 +60,8 @@ impl RetryConfig {
                 rand::random::<u64>() % max_delta
             }
         };
-        std::time::Duration::from_millis(clamped.saturating_add(jitter))
+        let ms = clamped.saturating_add(jitter).min(MAX_RETRY_BACKOFF_MS);
+        std::time::Duration::from_millis(ms)
     }
 }
 
@@ -341,5 +348,24 @@ mod tests {
         assert_eq!(config.backoff(7), Duration::from_millis(6_400));
         assert_eq!(config.backoff(8), Duration::from_millis(10_000));
         assert_eq!(config.backoff(100), Duration::from_millis(10_000));
+    }
+
+    #[test]
+    fn backoff_clamps_to_max_retry_backoff() {
+        let config = RetryConfig {
+            initial_backoff_ms: u64::MAX,
+            max_backoff_ms: u64::MAX,
+            multiplier: 2,
+            jitter_percent: 0,
+            max_attempts: 0,
+        };
+        assert_eq!(
+            config.backoff(1),
+            Duration::from_millis(MAX_RETRY_BACKOFF_MS)
+        );
+        assert_eq!(
+            config.backoff(100),
+            Duration::from_millis(MAX_RETRY_BACKOFF_MS)
+        );
     }
 }

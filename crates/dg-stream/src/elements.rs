@@ -26,7 +26,7 @@ use crate::hub::{KEYFRAME_TAG, MEDIA_TAG};
 use crate::stream::SubscriberSourceSyncExt;
 use crate::stream::{
     BackpressurePolicy, BootstrapPolicy, DispatchResult, MediaFilter, PublisherOptions,
-    PublisherSink, ReceiveOutcome, RetryConfig, SubscriberOptions,
+    PublisherSink, ReceiveOutcome, RetryConfig, SubscriberOptions, MAX_RETRY_BACKOFF_MS,
 };
 use crate::track::{CodecExtradata, CodecId as TrackCodec, TrackInfo, TrackReadiness};
 use dg_media::{MediaFrame, MediaFrameKind};
@@ -559,7 +559,9 @@ fn sleep_with_stop(duration: Duration, io: &ElementIo) -> Result<(), crate::erro
         if io.should_stop() {
             return Err(crate::error::Error::Closed);
         }
-        let remaining = duration - start.elapsed();
+        // Use `saturating_sub` so a small `duration` cannot underflow between
+        // the loop condition and the `elapsed()` call used for subtraction.
+        let remaining = duration.saturating_sub(start.elapsed());
         std::thread::sleep(Duration::from_millis(50).min(remaining));
     }
     Ok(())
@@ -1080,6 +1082,16 @@ fn read_u64(params: &Map<String, Value>, key: &str, default: u64) -> dg_graph::R
 fn read_retry_config(params: &Map<String, Value>) -> dg_graph::Result<RetryConfig> {
     let initial_backoff_ms = read_u64(params, "retry_initial_backoff_ms", 250)?;
     let max_backoff_ms = read_u64(params, "retry_max_backoff_ms", 30_000)?;
+    if initial_backoff_ms > MAX_RETRY_BACKOFF_MS {
+        return Err(dg_graph::Error::Config(format!(
+            "field retry_initial_backoff_ms must be <= {MAX_RETRY_BACKOFF_MS}"
+        )));
+    }
+    if max_backoff_ms > MAX_RETRY_BACKOFF_MS {
+        return Err(dg_graph::Error::Config(format!(
+            "field retry_max_backoff_ms must be <= {MAX_RETRY_BACKOFF_MS}"
+        )));
+    }
     if max_backoff_ms < initial_backoff_ms {
         return Err(dg_graph::Error::Config(
             "field retry_max_backoff_ms must be >= retry_initial_backoff_ms".to_string(),

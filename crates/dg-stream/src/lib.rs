@@ -26,6 +26,7 @@ pub use stream::{
     BackpressurePolicy, BootstrapMode, BootstrapPolicy, CoreAdaptersApi, DispatchResult,
     MediaFilter, PublisherApi, PublisherOptions, PublisherSink, ReceiveOutcome, StreamManagerApi,
     StreamSnapshot, SubscriberApi, SubscriberOptions, SubscriberSource, SubscriberSourceSyncExt,
+    MAX_RETRY_BACKOFF_MS,
 };
 pub use track::{
     AacRtpPacketization, CodecConfigError, CodecConfigPayload, CodecConfigRequirement,
