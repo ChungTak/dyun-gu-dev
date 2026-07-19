@@ -26,6 +26,11 @@ pub struct CancelReport {
     /// Number of in-flight submissions the backend could not cancel but
     /// disowned from its own tracking.
     pub abandoned: u64,
+    /// Number of in-flight submissions the backend explicitly failed to cancel.
+    pub failed: u64,
+    /// Number of in-flight submissions for which the backend does not support
+    /// cancel, allowing the runtime to escalate to graph-level quiesce/shutdown.
+    pub unsupported: u64,
 }
 
 /// A backend implementation.
@@ -105,6 +110,7 @@ pub trait InferBackend: Send {
                 device_count: 0,
                 precisions: Vec::new(),
                 deploy_modes: Vec::new(),
+                execution_mode: crate::ExecutionMode::NonInterruptible,
                 device_records: Vec::new(),
             }))
     }

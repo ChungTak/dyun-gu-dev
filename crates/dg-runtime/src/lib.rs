@@ -21,7 +21,7 @@ pub use backend::{
 };
 pub use capabilities::{
     backend_capabilities, supports_deployment, supports_device, supports_precision,
-    BackendCapabilities, RuntimeCapabilities, RuntimeDeviceCapabilities,
+    BackendCapabilities, ExecutionMode, RuntimeCapabilities, RuntimeDeviceCapabilities,
 };
 pub use error::{Error, Result};
 pub use metrics::{BackendMetrics, BackendMetricsSnapshot, LatencyPercentiles};

@@ -191,6 +191,7 @@ impl Runtime {
                 device_count: 0,
                 precisions: Vec::new(),
                 deploy_modes: Vec::new(),
+                execution_mode: crate::ExecutionMode::NonInterruptible,
                 device_records: Vec::new(),
             },
             next_sequence: 0,
@@ -344,8 +345,7 @@ impl Runtime {
             for _ in 0..released {
                 self.metrics.finish_in_flight();
             }
-            let failed = report.requested.saturating_sub(released);
-            for _ in 0..failed {
+            for _ in 0..report.failed {
                 self.metrics.record_backend_error();
             }
             self.metrics.record_cancel();
@@ -355,8 +355,10 @@ impl Runtime {
             self.metrics.record_cancel();
             Ok(CancelReport {
                 requested: 1,
-                completed: 1,
+                completed: 0,
                 abandoned: 0,
+                failed: 0,
+                unsupported: 1,
             })
         } else {
             Ok(CancelReport::default())

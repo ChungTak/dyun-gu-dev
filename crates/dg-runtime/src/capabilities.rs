@@ -1,4 +1,5 @@
 use dg_core::{DataType, DeployMode, DeviceKind};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::BackendKind;
 
@@ -25,6 +26,18 @@ impl BackendCapabilities {
     }
 }
 
+/// Execution mode advertised by a backend device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionMode {
+    /// True async submit/poll contract with non-blocking inference.
+    NativeAsync,
+    /// Synchronous inference executed under a bounded blocking worker.
+    BoundedSync,
+    /// Synchronous inference that cannot be interrupted within a deadline.
+    #[default]
+    NonInterruptible,
+}
+
 /// Per-device capabilities observed from a live backend probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeDeviceCapabilities {
@@ -34,6 +47,7 @@ pub struct RuntimeDeviceCapabilities {
     pub async_capable: bool,
     pub external_memory: bool,
     pub remote_tensor: bool,
+    pub execution_mode: ExecutionMode,
     pub verified_precisions: Vec<DataType>,
 }
 
@@ -45,6 +59,7 @@ pub struct RuntimeCapabilities {
     pub device_count: usize,
     pub precisions: Vec<DataType>,
     pub deploy_modes: Vec<DeployMode>,
+    pub execution_mode: ExecutionMode,
     pub device_records: Vec<RuntimeDeviceCapabilities>,
 }
 
@@ -57,6 +72,7 @@ impl RuntimeCapabilities {
             device_count: capabilities.devices.len(),
             precisions: capabilities.precisions.to_vec(),
             deploy_modes: capabilities.deploy_modes.to_vec(),
+            execution_mode: ExecutionMode::NonInterruptible,
             device_records: Vec::new(),
         }
     }

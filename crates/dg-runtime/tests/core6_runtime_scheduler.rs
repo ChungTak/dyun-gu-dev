@@ -58,6 +58,8 @@ fn cancel_report_releases_in_flight_and_records_cancel() {
             requested: 2,
             completed: 2,
             abandoned: 0,
+            failed: 0,
+            unsupported: 0,
         }
     );
     assert_eq!(runtime.in_flight(), 0);
