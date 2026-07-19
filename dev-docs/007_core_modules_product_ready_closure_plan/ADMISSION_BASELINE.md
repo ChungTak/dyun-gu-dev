@@ -7,7 +7,8 @@
 | 字段 | 值 |
 |---|---|
 | 日期 | 2026-07-19 |
-| HEAD | `feddd3add23ec8647f91b61fd3c15837342b790a` |
+| 创建基线 HEAD | `feddd3add23ec8647f91b61fd3c15837342b790a` |
+| 审计基线 HEAD | `f6d6cb06e07b8dde332ed585a8250207501898dc` |
 | 分支 | `main` |
 | 工作树 | clean |
 | Rust/Cargo | `1.94.1` |

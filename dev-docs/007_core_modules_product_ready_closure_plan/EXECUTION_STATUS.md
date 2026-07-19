@@ -6,6 +6,7 @@
 |---|---|
 | 计划创建日期 | 2026-07-19 |
 | 计划创建基线 | `main@feddd3add23ec8647f91b61fd3c15837342b790a` |
+| 当前审计 HEAD | `f6d6cb06e07b8dde332ed585a8250207501898dc` |
 | 工作树 | clean |
 | 范围 | core product-ready closure；不新增 vendor capability |
 | GraphSpec | 保持 `dg/v1`，process policy 为可信外层 |
@@ -16,7 +17,7 @@
 
 | ID | 状态 | PR/Commit | Evidence | Blocker |
 |---|---|---|---|---|
-| CORE7-01 | Not Started | - | `PLAN6_GAP_MATRIX.md` 初始审计 | owner/失败基线待确认 |
+| CORE7-01 | In Progress | devin/1784469684-core7-01-audit | `PLAN6_GAP_MATRIX.md` 已复核；基线脚本 `tools/core7_baseline.sh` | devin |
 | CORE7-02 | Not Started | - | - | R7-001 |
 | CORE7-03 | Not Started | - | - | R7-002/R7-003 |
 | CORE7-04 | Not Started | - | - | R7-005 |
