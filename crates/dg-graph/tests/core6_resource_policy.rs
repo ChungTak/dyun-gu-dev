@@ -304,7 +304,9 @@ fn graph_new_enforces_model_size_against_max_model_bytes() {
     spec.connections.push("src.out -> infer.in".into());
     spec.connections.push("infer.out -> snk.in".into());
 
-    let err = Graph::new(spec).err().expect("model size should exceed limit");
+    let err = Graph::new(spec)
+        .err()
+        .expect("model size should exceed limit");
     assert!(err.to_string().contains("model bytes"), "{err}");
 
     let _ = fs::remove_dir_all(&dir);
