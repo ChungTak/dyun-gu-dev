@@ -12,7 +12,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr;
 
-use dg_core::{CpuDevice, Shape, Tensor};
+use dg_core::{CpuDevice, DeviceKind, Shape, Tensor};
 use dg_runtime::{
     backend_capabilities, supports_precision, BackendConfig, BackendDescriptor, BackendKind,
     BackendOptions, Error, InferBackend, ModelSource, Result, RuntimeCapabilities, RuntimeOption,
@@ -449,7 +449,8 @@ impl InferBackend for SophonBackend {
             let mut host = vec![0u8; size];
             output_mems[index].download(&mut host)?;
 
-            let mut info = TensorInfo::new(shape, dtype.to_data_type());
+            let mut info =
+                TensorInfo::new(shape, dtype.to_data_type()).with_device(DeviceKind::SophonTpu);
             if let Some(name) = &self.output_infos[index].name {
                 info = info.with_name(name.clone());
             }
@@ -502,7 +503,8 @@ fn collect_infos(
         // SAFETY: shape array holds `count` valid entries.
         let bm_shape = unsafe { &*shapes.add(index) };
         let shape = convert::shape_from_bm(bm_shape.num_dims, &bm_shape.dims)?;
-        let mut info = TensorInfo::new(shape, dtype.to_data_type());
+        let mut info =
+            TensorInfo::new(shape, dtype.to_data_type()).with_device(DeviceKind::SophonTpu);
         if !names.is_null() {
             // SAFETY: name array (when present) holds `count` C-string pointers.
             let name_ptr = unsafe { *names.add(index) };

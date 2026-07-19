@@ -361,8 +361,12 @@ fn parse_mock_inference(node: &NodeSpec) -> Result<MockInferenceConfig> {
     let echo_inputs = read_bool(params, "echo_inputs", true)?;
     let fill_value = read_u8(params, "fill_value", 0)?;
 
-    let input_info = TensorInfo::new(shape.clone(), dtype).with_layout(DataFormat::NC);
-    let output_info = TensorInfo::new(output_shape, output_dtype).with_layout(DataFormat::NC);
+    let input_info = TensorInfo::new(shape.clone(), dtype)
+        .with_layout(DataFormat::NC)
+        .with_device(DeviceKind::Cpu);
+    let output_info = TensorInfo::new(output_shape, output_dtype)
+        .with_layout(DataFormat::NC)
+        .with_device(DeviceKind::Cpu);
     let option = RuntimeOption::new(
         BackendKind::Mock,
         ModelSource::Bytes(Vec::new()),
