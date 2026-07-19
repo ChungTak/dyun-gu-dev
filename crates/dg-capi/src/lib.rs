@@ -1709,7 +1709,7 @@ pub unsafe extern "C" fn dg_engine_diff_string(
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
-        let engine = lock_engine_write(&engine_arc)?;
+        let engine = lock_engine_read(&engine_arc)?;
         let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
@@ -1753,7 +1753,7 @@ pub unsafe extern "C" fn dg_engine_diff_file(
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
         let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
-        let engine = lock_engine_write(&engine_arc)?;
+        let engine = lock_engine_read(&engine_arc)?;
         let diff = Graph::diff(&engine.spec, &spec);
         write_diff_counts(
             &diff,
