@@ -1492,11 +1492,18 @@ pub unsafe extern "C" fn dg_runtime_init(
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if !options.is_null() {
-            let opts = unsafe { &*options };
+            // Read only the version fields through a raw pointer to avoid creating
+            // a reference to a potentially uninitialized C struct.
+            let (struct_size, struct_version) = unsafe {
+                (
+                    std::ptr::addr_of!((*options).struct_size).read(),
+                    std::ptr::addr_of!((*options).struct_version).read(),
+                )
+            };
             check_struct_version(
                 "DgRuntimeInitOptions",
-                opts.struct_size,
-                opts.struct_version,
+                struct_size,
+                struct_version,
                 std::mem::size_of::<DgRuntimeInitOptions>(),
             )?;
         }
@@ -2264,11 +2271,18 @@ pub unsafe extern "C" fn dg_backend_capabilities(
                 "backend or capabilities output pointer is null".to_string(),
             ));
         }
-        let out_ref = unsafe { &*out };
+        // Read only the version fields through a raw pointer to avoid creating a
+        // reference to a potentially uninitialized C struct.
+        let (struct_size, struct_version) = unsafe {
+            (
+                std::ptr::addr_of!((*out).struct_size).read(),
+                std::ptr::addr_of!((*out).struct_version).read(),
+            )
+        };
         check_struct_version(
             "DgBackendCapabilities",
-            out_ref.struct_size,
-            out_ref.struct_version,
+            struct_size,
+            struct_version,
             std::mem::size_of::<DgBackendCapabilities>(),
         )?;
         let backend_arc = unsafe { clone_backend_arc(backend) };
@@ -2324,11 +2338,18 @@ pub unsafe extern "C" fn dg_backend_tensor_info(
                 "backend or tensor-info output pointer is null".to_string(),
             ));
         }
-        let out_ref = unsafe { &*out };
+        // Read only the version fields through a raw pointer to avoid creating a
+        // reference to a potentially uninitialized C struct.
+        let (struct_size, struct_version) = unsafe {
+            (
+                std::ptr::addr_of!((*out).struct_size).read(),
+                std::ptr::addr_of!((*out).struct_version).read(),
+            )
+        };
         check_struct_version(
             "DgTensorInfo",
-            out_ref.struct_size,
-            out_ref.struct_version,
+            struct_size,
+            struct_version,
             std::mem::size_of::<DgTensorInfo>(),
         )?;
         let backend_arc = unsafe { clone_backend_arc(backend) };
