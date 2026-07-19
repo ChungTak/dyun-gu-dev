@@ -168,7 +168,8 @@ pub fn run_demo(path: &Path) -> Result<DemoSummary> {
         .into_iter()
         .filter_map(|name| report.element_metrics.get(name))
         .map(|metrics| metrics.packets_processed)
-        .sum::<u64>() as usize;
+        .sum::<u64>();
+    let frames = usize::try_from(frames).context("demo frame count exceeds usize")?;
     Ok(DemoSummary {
         streams: DEMO_INPUTS.len(),
         frames,
