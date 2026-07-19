@@ -373,7 +373,7 @@ fn check_struct_version(
             format!("{name} expected struct size {expected_size} exceeds u32"),
         )
     })?;
-    if struct_size != 0 && struct_size != expected {
+    if struct_size != expected {
         return Err((
             DgStatus::InvalidArgument,
             format!("{name}.struct_size mismatch: got {struct_size}, expected {expected}"),
@@ -3594,7 +3594,7 @@ connections: []
         );
         assert_eq!((input_count, output_count), (1, 1));
         let mut capabilities = DgBackendCapabilities {
-            struct_size: 0,
+            struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
             struct_version: 0,
             device_count: 0,
             devices: [DgDeviceKind::Cpu; 8],
@@ -3609,7 +3609,7 @@ connections: []
         assert_eq!(capabilities.devices[0], DgDeviceKind::Cpu);
         assert!(capabilities.precision_count > 0);
         let mut info = DgTensorInfo {
-            struct_size: 0,
+            struct_size: std::mem::size_of::<DgTensorInfo>() as u32,
             struct_version: 0,
             dtype: DgDataType::U8,
             format: DgDataFormat::Auto,
@@ -3817,6 +3817,59 @@ connections: []
             unsafe { dg_engine_destroy(engine, 0, ptr::null_mut()) },
             DgStatus::Ok
         );
+    }
+
+    #[test]
+    fn zero_struct_size_is_rejected_for_output_structs() {
+        // A zero struct_size used to be accepted, which would cause the C ABI
+        // to write past a caller-allocated buffer that is smaller than the
+        // Rust struct. Verify that all output structs now require an exact size.
+        let mut backend = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_backend_create(
+                    DgBackendKind::Mock as i32,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    &mut backend,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert!(!backend.is_null());
+
+        let mut capabilities = DgBackendCapabilities {
+            struct_size: 0,
+            struct_version: 0,
+            device_count: 0,
+            devices: [DgDeviceKind::Cpu; 8],
+            precision_count: 0,
+            precisions: [DgDataType::U8; 16],
+        };
+        assert_eq!(
+            unsafe { dg_backend_capabilities(backend, &mut capabilities, ptr::null_mut()) },
+            DgStatus::InvalidArgument
+        );
+
+        let mut info = DgTensorInfo {
+            struct_size: 0,
+            struct_version: 0,
+            dtype: DgDataType::U8,
+            format: DgDataFormat::Auto,
+            device: DgDeviceKind::Cpu,
+            rank: 0,
+            shape: [0; 8],
+        };
+        assert_eq!(
+            unsafe { dg_backend_tensor_info(backend, false, 0, &mut info, ptr::null_mut()) },
+            DgStatus::InvalidArgument
+        );
+
+        unsafe {
+            dg_backend_free(backend);
+        }
     }
 
     #[test]

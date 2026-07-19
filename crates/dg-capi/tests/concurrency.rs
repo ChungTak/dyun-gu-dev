@@ -243,7 +243,7 @@ fn concurrent_backend_queries_and_run_do_not_race() {
                 assert_eq!((inputs, outputs), (1, 1));
 
                 let mut capabilities = DgBackendCapabilities {
-                    struct_size: 0,
+                    struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
                     struct_version: 0,
                     device_count: 0,
                     devices: [DgDeviceKind::Cpu; 8],
@@ -256,7 +256,7 @@ fn concurrent_backend_queries_and_run_do_not_race() {
                 );
 
                 let mut info = DgTensorInfo {
-                    struct_size: 0,
+                    struct_size: std::mem::size_of::<DgTensorInfo>() as u32,
                     struct_version: 0,
                     dtype: DgDataType::U8,
                     format: DgDataFormat::Auto,
