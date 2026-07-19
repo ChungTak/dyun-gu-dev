@@ -2428,10 +2428,12 @@ pub unsafe extern "C" fn dg_backend_run(
         let backend_arc = unsafe { clone_backend_arc(backend as *const DgBackend) };
         let mut backend = lock_backend(&backend_arc);
         let expected_inputs = backend.input_count();
-        if input_count > expected_inputs {
+        if input_count != expected_inputs {
             return Err((
                 DgStatus::InvalidArgument,
-                format!("input_count {input_count} exceeds backend input count {expected_inputs}"),
+                format!(
+                    "input_count {input_count} does not match backend input count {expected_inputs}"
+                ),
             ));
         }
         let input_handles = if input_count == 0 {
@@ -3873,6 +3875,69 @@ connections: []
         unsafe { dg_owned_bytes_free(output_owned) };
         unsafe {
             dg_tensor_free(output);
+            dg_tensor_free(input);
+            dg_backend_free(backend);
+        }
+    }
+
+    #[test]
+    fn backend_run_rejects_wrong_input_count() {
+        let options = CString::new(r#"{"shape":[1,4],"echo_inputs":true}"#).expect("options");
+        let mut backend = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_backend_create(
+                    DgBackendKind::Mock as i32,
+                    ptr::null(),
+                    0,
+                    options.as_ptr(),
+                    &mut backend,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        let input_bytes = [1.0_f32, 2.0, 3.0, 4.0]
+            .into_iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect::<Vec<_>>();
+        let shape = [1_usize, 4];
+        let mut input = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    input_bytes.as_ptr(),
+                    input_bytes.len(),
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut input,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        let input_ptr = input as *const DgTensor;
+        let mut output = ptr::null_mut();
+        let mut output_count = 0;
+        assert_eq!(
+            unsafe {
+                dg_backend_run(
+                    backend,
+                    &input_ptr,
+                    0,
+                    &mut output,
+                    1,
+                    &mut output_count,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+        assert_eq!(output_count, 0);
+        unsafe {
             dg_tensor_free(input);
             dg_backend_free(backend);
         }
