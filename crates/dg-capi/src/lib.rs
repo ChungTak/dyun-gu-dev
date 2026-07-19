@@ -844,11 +844,14 @@ impl Engine {
             if let Err(error) = running.shutdown(timeout) {
                 // Only timeouts are retryable; keep the running graph so the
                 // caller can call shutdown/destroy again with a larger timeout.
-                // Permanent failures (worker panic/element error) consume the
-                // running graph so the engine handle can still be destroyed.
                 if matches!(error, dg_graph::Error::Timeout(_)) {
                     self.running = Some(running);
+                    return Err(error);
                 }
+                // Permanent failures (worker panic/element error) consume the
+                // running graph. Mark the stream as ended so `poll_output` does
+                // not continue returning `Pending` after the graph has stopped.
+                self.stream_ended = true;
                 return Err(error);
             }
         }
@@ -4416,6 +4419,15 @@ connections:
         if !error.is_null() {
             unsafe { dg_error_free(error) };
         }
+
+        // Polling after a permanent shutdown failure must report EndOfStream,
+        // not spin on Again, because the running graph has already stopped.
+        let mut output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::EndOfStream
+        );
+        assert!(output.is_null());
 
         // After a permanent failure, destroy should still be able to free the handle.
         assert_eq!(
