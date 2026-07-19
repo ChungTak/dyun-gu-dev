@@ -354,6 +354,10 @@ fn lock_backend(backend: &DgBackend) -> std::sync::MutexGuard<'_, Box<dyn InferB
 const MAX_VIEW_LEN: usize = 1 << 40;
 #[allow(dead_code)]
 const MAX_SHAPE_RANK: usize = 8;
+/// Maximum number of bytes (including the terminating NUL) scanned from a
+/// `*const c_char` argument. This prevents unbounded reads when a caller passes
+/// a non-NUL-terminated or extremely long C string.
+const MAX_CSTRING_SCAN: usize = dg_core::ResourcePolicy::DEFAULT_MAX_CONFIG_BYTES.saturating_add(1);
 
 fn check_struct_version(
     name: &str,
@@ -1314,11 +1318,36 @@ unsafe fn dims<'a>(values: *const usize, rank: usize) -> Result<&'a [usize], (Dg
 }
 
 unsafe fn c_string<'a>(value: *const c_char) -> Result<&'a CStr, (DgStatus, String)> {
+    unsafe { c_string_bounded(value, MAX_CSTRING_SCAN) }
+}
+
+unsafe fn c_string_bounded<'a>(
+    value: *const c_char,
+    max_len: usize,
+) -> Result<&'a CStr, (DgStatus, String)> {
     if value.is_null() {
         return Err((DgStatus::NullPointer, "string pointer is null".to_string()));
     }
-    // SAFETY: the caller must provide a valid NUL-terminated C string.
-    Ok(unsafe { CStr::from_ptr(value) })
+    if max_len == 0 {
+        return Err((
+            DgStatus::InvalidArgument,
+            "string max length is zero".to_string(),
+        ));
+    }
+    // Scan for the NUL terminator up front so a dirty/non-NUL-terminated
+    // pointer cannot force an unbounded read. The actual C string is then
+    // reconstructed with `CStr::from_ptr`, which is safe because the NUL has
+    // been located within the scanned region.
+    for i in 0..max_len {
+        if unsafe { *value.add(i) } == 0 {
+            // SAFETY: `value` points to a NUL-terminated C string of length `i`.
+            return Ok(unsafe { CStr::from_ptr(value) });
+        }
+    }
+    Err((
+        DgStatus::InvalidArgument,
+        format!("string exceeds maximum length {max_len}"),
+    ))
 }
 
 fn tensor_from_bytes(
@@ -4638,5 +4667,29 @@ connections:
             DgStatus::InvalidArgument
         );
         assert!(buffer.is_null());
+    }
+
+    #[test]
+    fn c_string_bounded_rejects_null_and_missing_terminator() {
+        assert!(matches!(
+            unsafe { c_string_bounded(ptr::null(), 4) },
+            Err((DgStatus::NullPointer, _))
+        ));
+
+        let valid = CString::new("hi").unwrap();
+        let result = unsafe { c_string_bounded(valid.as_ptr(), 4) };
+        assert!(result.is_ok(), "{result:?}");
+
+        assert!(matches!(
+            unsafe { c_string_bounded(valid.as_ptr(), 0) },
+            Err((DgStatus::InvalidArgument, _))
+        ));
+
+        let non_terminated: Vec<u8> = vec![b'a'; 4];
+        let result = unsafe { c_string_bounded(non_terminated.as_ptr().cast::<c_char>(), 4) };
+        assert!(
+            matches!(result, Err((DgStatus::InvalidArgument, _))),
+            "{result:?}"
+        );
     }
 }
