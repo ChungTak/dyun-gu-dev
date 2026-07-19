@@ -4,7 +4,7 @@ use std::ffi::CString;
 
 use dg_capi::{
     dg_engine_build, dg_engine_create, dg_engine_destroy, dg_engine_init, dg_engine_load_string,
-    dg_engine_reload_string, DgEngine, DgGraphFormat,
+    dg_engine_reload_string, dg_engine_stop, DgEngine, DgGraphFormat, DgStatus,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -62,5 +62,16 @@ fuzz_target!(|data: &[u8]| {
         };
     }
 
-    let _ = unsafe { dg_engine_destroy(engine, 0, std::ptr::null_mut()) };
+    // Cooperative stop followed by a finite destroy deadline with retry on Busy.
+    // This prevents leaked workers/engines across fuzz iterations.
+    let _ = unsafe { dg_engine_stop(engine, std::ptr::null_mut()) };
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    for _ in 0..4 {
+        let status = unsafe { dg_engine_destroy(engine, 5000, std::ptr::null_mut()) };
+        if status == DgStatus::Busy {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            continue;
+        }
+        break;
+    }
 });

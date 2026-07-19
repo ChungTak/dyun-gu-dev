@@ -21,7 +21,7 @@
 | R7-006 | P1 | 多个 algorithm 数据错误仍可终止整个 graph | frame-local continuation + fatal classification tests | In Progress | devin |
 | R7-007 | P1 | pool/affinity/registry/resource/shutdown metrics 与 readiness 不完整 | ops golden、slow scrape、state matrix | In Progress | devin |
 | R7-008 | P0 | C ABI view 未接线、runtime options 空、制品 ABI 未验证 | C11/C++17 + symbol/SONAME/view/fuzz/sanitizer | In Progress | devin |
-| R7-009 | P0 | 最近 nightly `reload-transitions` fuzz 失败且当前 SHA 未重跑 | minimized corpus + fix + candidate nightly green | Open | devin |
+| R7-009 | P0 | 最近 nightly `reload-transitions` fuzz 失败且当前 SHA 未重跑 | minimized corpus + fix + candidate nightly green | In Progress | devin |
 | R7-010 | P0 | 无 Miri、ASan/LSan/TSan 和并发模型 release gate | workflow artifacts 无 report | Open | devin |
 | R7-011 | P0 | soak 仅重复 workspace tests，无24h资源/性能证据 | real workload 2h/24h + threshold summary | Open | devin |
 | R7-012 | P1 | release package 未验证 `.so.2`、symlink、symbols、C examples | unpacked artifact smoke + manifest/rollback | Open | devin |
