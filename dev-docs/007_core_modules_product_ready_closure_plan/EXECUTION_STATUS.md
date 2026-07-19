@@ -26,7 +26,7 @@
 | CORE7-07 | In Progress | devin/1784473631-core7-07-cabi-v2-abi-version | DgAbiVersion struct replaces C-string ABI version; header/examples regenerated | R7-008 |
 | CORE7-08 | In Progress | devin/1784473631-core7-08-fuzz-reload-cleanup | `reload-transitions` fuzz cleanup with stop + finite destroy retry | R7-009/R7-010 |
 | CORE7-09 | In Progress | devin/1784473631-core7-09-soak-driver | tools/soak.sh supports candidate/spec/baseline/profile + machine summary | R7-011、fixed runner |
-| CORE7-10 | Not Started | - | - | R7-012 |
+| CORE7-10 | In Progress | devin/1784473631-core7-10-release-package | release.yml package produces .so.2 + symlink + C examples + pkg-config + manifest; docs/support-matrix.md added | R7-012 |
 | CORE7-11 | Not Started | - | `CORE7_PRODUCT_ACCEPTANCE.md` Pending | 前置 CORE7 全部 |
 
 ## 风险摘要

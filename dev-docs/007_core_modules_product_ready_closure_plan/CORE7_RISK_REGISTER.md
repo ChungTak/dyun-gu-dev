@@ -24,7 +24,7 @@
 | R7-009 | P0 | 最近 nightly `reload-transitions` fuzz 失败且当前 SHA 未重跑 | minimized corpus + fix + candidate nightly green | In Progress | devin |
 | R7-010 | P0 | 无 Miri、ASan/LSan/TSan 和并发模型 release gate | workflow artifacts 无 report | Open | devin |
 | R7-011 | P0 | soak 仅重复 workspace tests，无24h资源/性能证据 | real workload 2h/24h + threshold summary | In Progress | devin |
-| R7-012 | P1 | release package 未验证 `.so.2`、symlink、symbols、C examples | unpacked artifact smoke + manifest/rollback | Open | devin |
+| R7-012 | P1 | release package 未验证 `.so.2`、symlink、symbols、C examples | unpacked artifact smoke + manifest/rollback | In Progress | devin |
 | R7-013 | P2 | Plan 6 status/acceptance SHA 与当前 main 不一致 | Plan 7 handoff、候选身份与状态规则一致 | Open | devin |
 
 初始统计：P0 8、P1 4、P2 1。
