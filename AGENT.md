@@ -139,7 +139,7 @@
 ## 10. FFI 与 C ABI
 
 - `unsafe` 集中在 `-sys` 与 FFI adapter；每个 `unsafe` 块须有注释说明其安全前提（invariant）。
-- `dg-capi` 导出的 C ABI：句柄用不透明指针 + 显式 `*_free`，跨 ABI 不暴露 Rust 类型；错误以整型 code + 线程局部 `dg_last_error()` 返回；头文件由 `cbindgen` 生成，作为一等交付物随接口变更同步更新。
+- `dg-capi` 导出的 C ABI：句柄用不透明指针 + 显式 `*_free`，跨 ABI 不暴露 Rust 类型；错误以 `DgStatus` 整型返回，失败详情通过可选的 `DgError **out_error` 不透明句柄输出；字符串/字节输出通过 `DgOwnedBytes **out` 不透明句柄输出。不再使用线程局部 `dg_last_error()`。头文件由 `cbindgen` 生成，作为一等交付物随接口变更同步更新。
 - 修改 C ABI 属于破坏性变更，须在 PR 中显著标注并更新示例与头文件。
 
 ---
