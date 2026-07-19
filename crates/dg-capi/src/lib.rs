@@ -4420,6 +4420,15 @@ connections:
             unsafe { dg_error_free(error) };
         }
 
+        // Polling after a permanent shutdown failure must report EndOfStream,
+        // not spin on Again, because the running graph has already stopped.
+        let mut output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::EndOfStream
+        );
+        assert!(output.is_null());
+
         // After a permanent failure, destroy should still be able to free the handle.
         assert_eq!(
             unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) },
