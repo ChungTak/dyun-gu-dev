@@ -644,6 +644,9 @@ struct Engine {
     running: Option<RunningGraph>,
     outputs: VecDeque<Tensor>,
     pending_inputs: BTreeMap<String, Vec<Tensor>>,
+    /// Set when a one-shot run completes or a streaming graph is shut down,
+    /// so `poll_output` can report `EndOfStream` after the queue is drained.
+    stream_ended: bool,
 }
 
 impl Engine {
@@ -654,6 +657,7 @@ impl Engine {
             running: None,
             outputs: VecDeque::new(),
             pending_inputs: BTreeMap::new(),
+            stream_ended: false,
         }
     }
 
@@ -662,6 +666,7 @@ impl Engine {
         self.running = None;
         self.outputs.clear();
         self.pending_inputs.clear();
+        self.stream_ended = false;
     }
 
     fn reload(&mut self, spec: GraphSpec) -> dg_graph::Result<GraphDiff> {
@@ -670,6 +675,7 @@ impl Engine {
                 "cannot reload while inputs are pending; run them before reloading".to_string(),
             ));
         }
+        self.stream_ended = false;
         spec.validate()?;
 
         // Live path: apply the full candidate to the RunningGraph so workers
@@ -784,14 +790,16 @@ impl Engine {
             .iter()
             .map(|(name, tensors)| (name.clone(), tensors.clone()))
             .collect();
+        // A previous one-shot run may have left un-polled outputs; clear them
+        // before starting the next execution so failure does not return stale tensors.
+        self.outputs.clear();
+        self.stream_ended = false;
         let report = graph.run_with_inputs(inputs)?;
         self.pending_inputs.clear();
-        // A previous one-shot run may have left un-polled outputs; replace them
-        // rather than appending, so the next poll never returns stale tensors.
-        self.outputs.clear();
         for tensors in report.sinks.into_values() {
             self.outputs.extend(tensors);
         }
+        self.stream_ended = true;
         Ok(())
     }
 
@@ -817,6 +825,7 @@ impl Engine {
             .ok_or_else(|| dg_graph::Error::NotBuilt("engine must be built first".to_string()))?;
         self.running = Some(graph.start(HashMap::new())?);
         self.outputs.clear();
+        self.stream_ended = false;
         Ok(())
     }
 
@@ -845,6 +854,7 @@ impl Engine {
         }
         // No running graph or shutdown completed; the built graph is kept so
         // `dg_engine_run` can still be used for a final one-shot execution.
+        self.stream_ended = true;
         Ok(())
     }
 
@@ -866,6 +876,9 @@ impl Engine {
             if status == GraphStatus::Stopped {
                 return Ok(EnginePollOutput::EndOfStream);
             }
+        }
+        if self.stream_ended {
+            return Ok(EnginePollOutput::EndOfStream);
         }
         Ok(EnginePollOutput::Pending)
     }
@@ -2042,6 +2055,7 @@ pub unsafe extern "C" fn dg_engine_build(
         engine.spec.validate().map_err(map_graph_error)?;
         engine.graph = Some(Graph::new(engine.spec.clone()).map_err(map_graph_error)?);
         engine.outputs.clear();
+        engine.stream_ended = false;
         Ok(())
     }) {
         Ok(()) => DgStatus::Ok,
@@ -3190,6 +3204,92 @@ connections:
     }
 
     #[test]
+    fn engine_poll_reports_end_of_stream_after_shutdown() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 0
+      shape: [1, 4]
+      dtype: f32
+      format: nc
+      start: 0.0
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#,
+        )
+        .expect("valid streaming spec");
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        // Shut the stream down before the graph stops on its own; polling after
+        // shutdown must still reach EndOfStream rather than spinning on Again.
+        assert_eq!(
+            unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let mut last_status = DgStatus::Again;
+        while std::time::Instant::now() < deadline {
+            last_status = unsafe { dg_engine_poll(engine, &mut output, &mut error) };
+            if last_status == DgStatus::EndOfStream {
+                break;
+            }
+            if last_status == DgStatus::Ok && !output.is_null() {
+                unsafe { dg_tensor_free(output) };
+                output = ptr::null_mut();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            last_status,
+            DgStatus::EndOfStream,
+            "dg_engine_poll must report EndOfStream after shutdown"
+        );
+        assert!(output.is_null());
+        assert!(error.is_null(), "EndOfStream must not allocate a DgError");
+
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
     fn engine_poll_drains_streaming_sink_tensors_before_end_of_stream() {
         let mut engine = ptr::null_mut();
         assert_eq!(
@@ -3350,18 +3450,16 @@ connections:
         );
         unsafe { dg_owned_bytes_free(output_owned) };
 
-        // There should be no further output left from the first run.
+        // One-shot execution completes after the run, so the next poll reports
+        // EndOfStream once all outputs have been consumed.
         output = ptr::null_mut();
         assert_eq!(
             unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
-            DgStatus::Again
+            DgStatus::EndOfStream
         );
         assert!(output.is_null());
 
-        unsafe {
-            dg_tensor_free(output);
-            dg_engine_destroy(engine, 5000, ptr::null_mut());
-        }
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
     }
 
     #[test]
@@ -4670,11 +4768,12 @@ connections:
             dg_tensor_free(output);
         }
 
-        // The first run's unpolled output must have been dropped, not returned now.
+        // One-shot execution completes after the run, so the next poll reports
+        // EndOfStream once all outputs have been consumed.
         output = ptr::null_mut();
         assert_eq!(
             unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
-            DgStatus::Again
+            DgStatus::EndOfStream
         );
         assert!(output.is_null());
 
