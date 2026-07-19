@@ -300,7 +300,27 @@ impl Element for StreamPullElement {
                         }
                         needs_keyframe = false;
                     }
-                    let mut packet = media_frame_to_packet(&frame, sequence, &tracks_by_id)?;
+                    // Oversized frames are policy violations: fail the node/graph.
+                    io.policy()
+                        .check_frame_bytes(frame.buffer.len())
+                        .map_err(|_| dg_graph::Error::ResourceLimit {
+                            resource: "frame_bytes".to_string(),
+                            requested: frame.buffer.len(),
+                            limit: io.policy().max_frame_bytes,
+                        })?;
+                    // Metadata/conversion errors are frame-local: drop and continue.
+                    let mut packet = match media_frame_to_packet(&frame, sequence, &tracks_by_id) {
+                        Ok(packet) => packet,
+                        Err(err) => {
+                            warn!(
+                                node = %io.name,
+                                error = %err,
+                                "dropping frame after media conversion failure"
+                            );
+                            io.record_drop();
+                            continue;
+                        }
+                    };
                     if is_resumed {
                         packet
                             .meta

@@ -805,6 +805,7 @@ impl RunningGraph {
                 prepared.insert(node.name.clone(), PreparedNode::new(node)?);
             }
         }
+        crate::fault::check(crate::fault::HotUpdateFaultPoint::AfterPrepare)?;
 
         // Quiesce and join affected workers *before* switching routes so a join
         // failure can re-spawn previous workers on the still-intact routes.
@@ -835,6 +836,19 @@ impl RunningGraph {
                 self.metrics.remove(name);
                 self.sinks.remove(name);
             }
+        }
+        if crate::fault::take(crate::fault::HotUpdateFaultPoint::AfterQuiesce) {
+            // Pre-switch failure: routes are intact; restore joined workers.
+            if let Err(restore_error) = self.respawn_nodes_from_spec(&previous_spec, &joined) {
+                self.set_root_cause(&restore_error);
+                self.set_status(GraphStatus::Failed);
+                return Err(Error::Runtime(
+                    "injected hot-update fault at AfterQuiesce; restore failed".to_string(),
+                ));
+            }
+            return Err(Error::Runtime(
+                "injected hot-update fault at AfterQuiesce".to_string(),
+            ));
         }
 
         let mut next_edges = BTreeMap::new();
@@ -903,9 +917,56 @@ impl RunningGraph {
         self.routes.inputs = next_inputs.clone();
         self.routes.outputs = next_outputs;
 
+        if let Err(error) = crate::fault::check(crate::fault::HotUpdateFaultPoint::AfterSwitch) {
+            // Post-switch boundary: cannot roll routes back safely.
+            self.set_root_cause(&error);
+            self.set_status(GraphStatus::Failed);
+            return Err(error);
+        }
+
         // Spawn replacement workers using the switched routes (inline path
         // matches the pre-restore implementation for success-path stability).
+        // Post-switch failures cannot safely roll routes back; mark Failed.
         let max_packet_starts = candidate.execution.queue_capacity.max(1);
+        if let Err(error) = self.spawn_hot_update_workers(
+            &candidate,
+            &affected,
+            &mut prepared,
+            &next_inputs,
+            &effective,
+            max_packet_starts,
+        ) {
+            self.set_root_cause(&error);
+            self.set_status(GraphStatus::Failed);
+            return Err(error);
+        }
+
+        let drain_timeout = if crate::fault::take(crate::fault::HotUpdateFaultPoint::DrainTimeout) {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(5000)
+        };
+        if let Err(error) = self.drain_routes(drain_routes, drain_timeout) {
+            // Post-switch failure: fail-closed. Full route rollback is unsafe
+            // while Arc-shared output tables may already advertise new senders.
+            self.set_root_cause(&error);
+            self.set_status(GraphStatus::Failed);
+            return Err(error);
+        }
+
+        self.spec = candidate;
+        Ok(())
+    }
+
+    fn spawn_hot_update_workers(
+        &mut self,
+        candidate: &GraphSpec,
+        affected: &BTreeSet<String>,
+        prepared: &mut BTreeMap<String, PreparedNode>,
+        next_inputs: &BTreeMap<(String, String), Arc<Mutex<PipeReceiver>>>,
+        effective: &Arc<ResourcePolicy>,
+        max_packet_starts: usize,
+    ) -> Result<()> {
         for node in &candidate.nodes {
             if !affected.contains(&node.name) {
                 continue;
@@ -957,7 +1018,7 @@ impl RunningGraph {
                     metrics: node_metrics.clone(),
                     packet_starts: std::cell::RefCell::new(VecDeque::new()),
                     max_packet_starts,
-                    policy: Arc::clone(&effective),
+                    policy: Arc::clone(effective),
                 };
                 let stop = self.stop.clone();
                 let node_name = node.name.clone();
@@ -986,17 +1047,6 @@ impl RunningGraph {
                 self.sinks.insert(node.name.clone(), collector);
             }
         }
-
-        const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_millis(5000);
-        if let Err(error) = self.drain_routes(drain_routes, DEFAULT_DRAIN_TIMEOUT) {
-            // Post-switch failure: fail-closed. Full route rollback is unsafe
-            // while Arc-shared output tables may already advertise new senders.
-            self.set_root_cause(&error);
-            self.set_status(GraphStatus::Failed);
-            return Err(error);
-        }
-
-        self.spec = candidate;
         Ok(())
     }
 

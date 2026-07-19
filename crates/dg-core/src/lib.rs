@@ -46,6 +46,7 @@ pub use media::{
 };
 pub use memory::{
     Allocator, CpuAllocator, ExternalDropGuard, ExternalHandle, MemoryDomain, MemoryPool,
+    MemoryPoolConfig, MemoryPoolMetrics,
 };
 pub use quantization::{Quantization, QuantizationScheme};
 pub use resource::ResourcePolicy;

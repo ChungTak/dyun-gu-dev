@@ -107,6 +107,20 @@ impl Tensor {
         Ok(Self { desc, buffer })
     }
 
+    /// Allocates a tensor after enforcing the process/effective tensor byte limit.
+    ///
+    /// The limit check runs before device allocation so oversized shapes never
+    /// reach the allocator (R6-002).
+    pub fn allocate_with_policy(
+        device: &dyn Device,
+        desc: TensorDesc,
+        policy: &crate::ResourcePolicy,
+    ) -> Result<Self> {
+        let bytes = desc.storage_bytes()?;
+        policy.check_tensor_bytes(bytes)?;
+        Self::allocate(device, desc)
+    }
+
     pub fn from_buffer(desc: TensorDesc, buffer: Buffer) -> Result<Self> {
         if buffer.len() != desc.storage_bytes()? {
             return Err(Error::Tensor(

@@ -12,8 +12,8 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | ID | 等级 | 模块/证据 | 当前事实 | 目标与关闭证据 | 状态 | Owner |
 |---|---|---|---|---|---|---|
 | R6-001 | P1 | `dg-graph/src/spec.rs` | string 入口无 config bytes 检查；configured include depth 未执行 | process policy + 累计限长读取 + boundary tests | Closed | John Doe |
-| R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | In Progress | John Doe
-| | | | | 进展：host allocation/read/copy 已 fallible；runtime/scheduler metrics 已落地；graph source/sink/input 队列 packets/bytes 预算已生效；`dg-elements` 预处理/后处理/NMS/PPOCR/ByteTrack/OSD 已加 tensor/output 字节与候选上限；device/policy 计数与 `MemoryPool` cache eviction 仍需 09/11 | | |
+| R6-002 | P0 | `dg-graph::ResourceLimits` 横向路径 | tensor/frame/model limits 未进入真实消费边界 | allocate/copy/read/import 前统一拒绝，计数 allocator 证明 | Mitigated | John Doe
+| | | | | 进展：host allocation/read/copy 已 fallible；`Tensor::allocate_with_policy` 在分配前 `check_tensor_bytes`；source/yolo/resnet 输出分配走 policy；graph source/sink/input 预算与 elements 候选上限已落地；`MemoryPool` 容量/驱逐已落地；frame pre-copy limit 已落地；**设备侧 allocator 计数与 GPU/NPU 路径仍待硬件 runner** | | |
 | R6-003 | P0 | `dg-stream/src/elements.rs`, `stream.rs` | pull 用 `recv_blocking()`，真实 recv 可无限 pending | timeout outcome + close wakeup + deadline shutdown test | Mitigated | John Doe |
 | R6-004 | P1 | `dg-graph/src/inference.rs` | pool 只 attach 首 Runtime metrics | 全 pool 共享 metrics，2/4/8 实例对账 | Closed | John Doe |
 | R6-005 | P1 | `dg-runtime/src/metrics.rs` | latency 保存到无界 `Vec<u64>` | 固定 buckets，百万观测常量内存 | Closed | John Doe |
@@ -22,15 +22,15 @@ Closed 必须引用修复 commit、自动回归和必要的 soak/sanitizer artif
 | R6-008 | P2 | `dg-graph/src/pipe.rs::try_recv` | route drain 不递减 depth | depth invariant/golden tests | Closed | John Doe |
 | R6-009 | P1 | `dg-core/src/buffer.rs::read_bytes` | external-only buffer 静默返回空 Vec | 只保留 fallible/staging API，backend tests | Closed | John Doe |
 | R6-010 | P0 | `dg-core/src/tensor.rs`, `shape.rs` | physical stride bytes 未完整计算，stride 乘法 saturating | checked physical span + padded/packed tests | Closed | John Doe |
-| R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Open | John Doe |
+| R6-011 | P1 | `dg-core/src/buffer.rs`, `memory.rs` | host allocation和MemoryPool cache缺少统一失败/容量合同 | fallible alloc + cache bytes/eviction soak | Closed | John Doe |
 | R6-012 | P0 | `dg-capi/src/lib.rs` external imports | C 导入使用空 drop guard，可 UAF | v2 release callback exactly-once + ASan | Closed | John Doe |
 | R6-013 | P0 | `dg-capi/src/lib.rs` enum parameters | C 未知判别值先形成 Rust enum，存在 UB | v2 `int32_t` 输入 + fuzz/ABI tests | Closed | John Doe |
 | R6-014 | P1 | `dg-capi` `LAST_DATA/LAST_ERROR` | pointer 被后续 ABI 调用覆盖 | owned bytes/error handle 跨调用稳定 | Closed | John Doe |
 | R6-015 | P0 | `dg-capi` shape/length helpers | rank/length未在构造slice前统一受硬上限 | v2 views先验limit/null/overflow | Closed | John Doe |
 | R6-016 | P1 | `dg-runtime::Runtime` | sync submit 可阻塞；cancel无失败报告 | capability诚实 + cancel report + pending shutdown | Closed | John Doe |
 | R6-017 | P1 | `dg-scheduler::Lease` | poisoned state getter使用`expect` panic | immutable placement/no getter lock + poison tests | Closed | John Doe |
-| R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Mitigated | John Doe |
-| R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Mitigated | John Doe |
+| R6-018 | P1 | `dg-graph` reload drain | drain无独立绝对deadline，部分阶段fail-closed边界不完整 | injected phase failures + bounded drain | Closed | John Doe |
+| R6-019 | P1 | `dg-stream/src/bridge.rs` | 复制前无统一frame limit；饱和ID和metadata吞错 | pre-copy limit + typed conversion golden | Closed | John Doe |
 | R6-020 | P1 | `dg-elements` | NMS/anchors/OCR/track state/output缺统一预算 | worst-case complexity/state limit tests | Closed | John Doe |
 | R6-021 | P2 | `dg-cli/src/ops.rs` | metrics渲染持snapshot锁；livez语义弱 | clone snapshot、slow-client和ops failure tests | Closed | John Doe |
 | R6-022 | P2 | 横向 error paths | timeout/retry等部分路径依赖字符串判断 | typed taxonomy matrix | Closed | John Doe |
@@ -346,3 +346,43 @@ Closed commit/date:
 - Residual risk: 真实 ASan/LSan/TSan/Miri 与 2h/24h 硬件 soak 证据仍待目标 runner；nightly workflow 已提供可追踪入口。
 - Reviewer: self-review
 - Closed commit/date: (待 PR 合入后回填)
+
+## 14. CORE6 residual closure（软件侧补齐）
+
+**R6-011**
+- Owner: Grok
+- Branch/PR: local review pass on plan 006
+- Reproduction: `MemoryPool` 无 max cached bytes/entries/per-descriptor；`try_reserve_exact` 失败仅返回无请求字节信息的 `OutOfMemory`；`ExternalDropGuard` 回调 panic 未吸收。
+- Root cause: cache 无容量合同；host 分配错误上下文不足；callback panic 可能影响所有权诊断。
+- Chosen fix: 引入 `MemoryPoolConfig`/`MemoryPoolMetrics` 与 LRU/per-key 驱逐；host 分配失败映射为 `Error::ResourceExhausted`（含 requested bytes）；callback 在 lock 外 `catch_unwind` 且 exactly-once take。
+- Public compatibility impact: 新增 `MemoryPoolConfig`、`MemoryPoolMetrics`、`MemoryPool::with_config`/`metrics_snapshot`/`cached_bytes`；`Error::ResourceExhausted`；C ABI 将 `ResourceExhausted` 映射为 `RuntimeError`。
+- Tests: `dg-core` memory unit tests + `core6_baseline::memory_pool_cache_capacity_is_bounded`。
+- Residual risk: 真实内存压力 soak 与 device allocator 计数仍需 constrained-memory/GPU runner。
+- Closed commit/date: (待合入后回填)
+
+**R6-019**
+- Owner: Grok
+- Branch/PR: local review pass on plan 006
+- Reproduction: `cheetah_avframe_to_media_frame_with_transfer` 在 `payload.to_vec()` 前无 frame 字节检查；`StreamPullElement` 未按 effective policy 拒绝超大帧。
+- Chosen fix: bridge 在 host 拷贝前调用 `ResourcePolicy::default().check_frame_bytes`；pull element 在组包前调用 `io.policy().check_frame_bytes`，超限返回 `Error::ResourceLimit { resource: frame_bytes, ... }`。
+- Tests: `core6_baseline::resource_policy_frame_bytes_boundary`；既有 stream/media bridge 回归。
+- Residual risk: 真实 Cheetah 网络超大帧 pre-copy 拒绝需 Cheetah runner 证据。
+- Closed commit/date: (待合入后回填)
+
+**R6-018**
+- Owner: Grok
+- Branch/PR: local review pass on plan 006
+- Root cause: drain 缺绝对 deadline；prepare/quiesce/switch/drain 阶段 fail-closed 边界缺少可注入自动测试；post-switch spawn 失败未置 Failed。
+- Chosen fix:
+  - `drain_routes` 使用绝对 deadline；
+  - post-switch spawn 失败统一 `set_root_cause` + `GraphStatus::Failed`；
+  - 新增 `dg_graph::fault`：`HotUpdateFaultPoint::{AfterPrepare,AfterQuiesce,AfterSwitch,DrainTimeout}` 一次性注入 + 进程互斥；
+  - AfterPrepare/AfterQuiesce 保持/恢复 `Running`；AfterSwitch/drain 超时 fail-closed `Failed`。
+- Tests: `core6_graph_execution.rs::{hot_update_prepare_fault_keeps_running,hot_update_quiesce_fault_restores_and_keeps_running,hot_update_switch_fault_fails_closed,hot_update_drain_timeout_fault_is_deterministic}`；pipeline prepare 非法 diff 保持 Running。
+- Residual risk: 真实长队列 drain 压力与 SIGTERM 并发仍建议 fault-injection runner 复测。
+
+**R6-002 / R6-003 软件侧追加**
+- Owner: Grok
+- R6-002: `Tensor::allocate_with_policy`；`filled_tensor`/yolo/resnet 分配前 policy；host MemoryPool 有界。
+- R6-003: `MemoryStreamHub` 原子 `get_or_create`；`tracks`/`subscriber_count` 不创建幽灵 stream；publisher/subscriber 关闭后 `try_reap` 回收 registry；`stream_count()` + URL churn 回归；publisher `close` 幂等。
+- Residual: 真实 RTSP/Cheetah 网络 pending 与 device allocator 仍 Mitigated。

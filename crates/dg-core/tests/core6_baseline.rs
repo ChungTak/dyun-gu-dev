@@ -4,9 +4,11 @@
 //! 安全行为。
 
 use dg_core::{
-    Buffer, BufferDesc, DataFormat, DataType, DeviceKind, ExternalDropGuard, ExternalHandle,
-    MemoryDomain, Shape, Strides, Tensor, TensorDesc,
+    Allocator, Buffer, BufferDesc, DataFormat, DataType, DeviceKind, ExternalDropGuard,
+    ExternalHandle, MemoryDomain, MemoryPool, MemoryPoolConfig, ResourcePolicy, Shape, Strides,
+    Tensor, TensorDesc,
 };
+use std::sync::Arc;
 
 #[test]
 fn external_only_buffer_read_bytes_is_not_silent_empty() {
@@ -43,4 +45,58 @@ fn tensor_from_buffer_accepts_physical_stride_span() {
     let buffer = Buffer::allocate_host(DeviceKind::Cpu, 12000).expect("allocate 12000 bytes");
     Tensor::from_buffer(desc, buffer)
         .expect("physical stride span (12000 bytes) must be accepted over logical bytes (8000)");
+}
+
+#[test]
+fn resource_policy_frame_bytes_boundary() {
+    let policy = ResourcePolicy {
+        max_frame_bytes: 8,
+        ..ResourcePolicy::default()
+    };
+    policy.check_frame_bytes(7).expect("limit-1");
+    policy.check_frame_bytes(8).expect("limit");
+    assert!(policy.check_frame_bytes(9).is_err(), "limit+1");
+}
+
+#[test]
+fn tensor_allocate_with_policy_rejects_before_allocation() {
+    let policy = ResourcePolicy {
+        max_tensor_bytes: 16,
+        ..ResourcePolicy::default()
+    };
+    let device = dg_core::CpuDevice::new();
+    let ok_desc = TensorDesc::new(
+        Shape::new([4]),
+        DataType::U8,
+        DataFormat::Auto,
+        DeviceKind::Cpu,
+    );
+    Tensor::allocate_with_policy(&device, ok_desc, &policy).expect("16 bytes at limit");
+
+    let over = TensorDesc::new(
+        Shape::new([17]),
+        DataType::U8,
+        DataFormat::Auto,
+        DeviceKind::Cpu,
+    );
+    assert!(
+        Tensor::allocate_with_policy(&device, over, &policy).is_err(),
+        "limit+1 must fail before allocate"
+    );
+}
+
+#[test]
+fn memory_pool_cache_capacity_is_bounded() {
+    let config = MemoryPoolConfig::new(128, 3, 2).expect("config");
+    let pool = MemoryPool::with_config(Arc::new(dg_core::CpuAllocator), config);
+    for size in [16usize, 32, 48, 64] {
+        let buffer = pool
+            .allocate(dg_core::BufferDesc::new(size, 1))
+            .expect("allocate");
+        pool.deallocate(buffer).expect("return");
+    }
+    assert!(pool.cached_buffer_count() <= 3);
+    assert!(pool.cached_bytes() <= 128);
+    let metrics = pool.metrics_snapshot();
+    assert!(metrics.evictions >= 1 || metrics.rejected_returns >= 1);
 }

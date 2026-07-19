@@ -58,11 +58,10 @@
 
 | 阻塞项 | 等级 | 需要的证据 | 建议 runner |
 |---|---|---|---|
-| R6-002 tensor/frame/model 真实消费边界 | P0 | `MemoryPool`/device allocator 计数 +  soak 无泄漏 | GPU/NPU runner with `dg-elements` end-to-end |
+| R6-002 tensor/frame/model 真实消费边界（device 路径） | P0 | device allocator 计数 + soak 无泄漏 | GPU/NPU runner with `dg-elements` end-to-end |
 | R6-003 stream 真实网络 long pending | P0 | Cheetah/real-RTSP 网络断开/重连 soak | Cheetah runner |
-| R6-011 host allocation 与 cache 容量合同 | P1 | allocator failure + cache eviction soak | constrained-memory runner |
-| R6-018 reload drain phase failure 注入 | P1 | injected phase failures + rollback proof | fault-injection runner |
-| R6-019 bridge frame limit + typed conversion | P1 | real stream frame pre-copy rejection | Cheetah runner |
+| R6-011 host allocation / MemoryPool（软件已关，缺压力 soak） | P1 | constrained-memory eviction soak | constrained-memory runner |
+| R6-019 bridge frame limit（软件已关，缺实流证据） | P1 | real stream frame pre-copy rejection | Cheetah runner |
 | Miri `dg-core` buffer/tensor/external guard | P0/P1 | `cargo +nightly miri test -p dg-core` 无 UB | nightly runner |
 | ASan/LSan/TSan C ABI + scheduler/graph | P0/P1 | sanitizer build 无 report | nightly/sanitizer runner |
 | Nightly 2h / Release 24h soak | P0 | 资源曲线 + 性能阈值 | fixed performance runner |

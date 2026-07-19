@@ -114,3 +114,34 @@ fn hub_stream_and_subscriber_limits_are_enforced() {
         )
         .is_err());
 }
+
+#[test]
+fn hub_registry_reaps_and_does_not_grow_with_url_churn() {
+    let hub = MemoryStreamHub::with_limits(4, 4);
+    for i in 0..20 {
+        let url = format!("mock://churn-{i}");
+        let publisher = hub
+            .publish(&url, PublisherOptions::default())
+            .expect("publish");
+        let mut subscriber = hub
+            .subscribe(
+                &url,
+                subscriber_options(2, BackpressurePolicy::DropDroppableFirst),
+            )
+            .expect("subscribe");
+        publisher
+            .push_frame(video_frame(0, true, b"x"))
+            .expect("push");
+        let _ = subscriber
+            .recv_blocking_timeout(Duration::from_millis(50))
+            .expect("recv");
+        subscriber.close_blocking().expect("close sub");
+        drop(publisher);
+        assert!(
+            hub.stream_count() <= 4,
+            "registry must stay within capacity after reap, got {}",
+            hub.stream_count()
+        );
+    }
+    assert_eq!(hub.stream_count(), 0);
+}

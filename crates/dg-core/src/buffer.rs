@@ -102,9 +102,12 @@ impl Buffer {
             ));
         }
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(desc.size_bytes)
-            .map_err(|_| Error::OutOfMemory)?;
+        bytes.try_reserve_exact(desc.size_bytes).map_err(|_| {
+            Error::ResourceExhausted(format!(
+                "host allocation failed for {} bytes",
+                desc.size_bytes
+            ))
+        })?;
         bytes.resize(desc.size_bytes, 0);
         Ok(Self {
             device,

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,8 @@ struct SubscriberQueue {
 struct StreamState {
     tracks: Vec<TrackInfo>,
     subscribers: HashMap<SubscriberId, SubscriberQueue>,
+    /// Live [`HubPublisher`] handles for this stream.
+    publishers: usize,
     publisher_closed: bool,
     keyframe_requests: u64,
 }
@@ -70,28 +72,103 @@ impl StreamCore {
     }
 }
 
-/// In-process stream hub backing the `mock://` scheme of the stream elements.
-///
-/// The hub is a Sans-I/O test double for a real media server: publishers and
-/// subscribers exchange frames through bounded per-subscriber queues with the
-/// configured [`BackpressurePolicy`], and publisher close is propagated to all
-/// subscribers as a clean end of stream.
-#[derive(Debug)]
-pub struct MemoryStreamHub {
+struct HubInner {
     streams: Mutex<HashMap<String, Arc<StreamCore>>>,
     next_subscriber: AtomicU64,
     max_streams: usize,
     max_subscribers_per_stream: usize,
 }
 
+impl HubInner {
+    fn stream_count(&self) -> usize {
+        match self.streams.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+
+    fn try_get_stream(&self, url: &str) -> Option<Arc<StreamCore>> {
+        let guard = self
+            .streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(url).map(Arc::clone)
+    }
+
+    /// Atomically creates a stream entry if missing, enforcing `max_streams`.
+    fn get_or_create_stream(&self, url: &str) -> Result<Arc<StreamCore>> {
+        let mut guard = self
+            .streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = guard.get(url) {
+            return Ok(Arc::clone(existing));
+        }
+        if guard.len() >= self.max_streams {
+            return Err(Error::Overflow(format!(
+                "stream registry limit {} reached",
+                self.max_streams
+            )));
+        }
+        let core = Arc::new(StreamCore::default());
+        guard.insert(url.to_string(), Arc::clone(&core));
+        Ok(core)
+    }
+
+    /// Drops a stream registry entry when no publishers or subscribers remain.
+    fn try_reap(&self, url: &str, core: &Arc<StreamCore>) {
+        {
+            let state = core.lock();
+            if state.publishers > 0 || !state.subscribers.is_empty() {
+                return;
+            }
+        }
+        let mut streams = self
+            .streams
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = streams.get(url) {
+            if Arc::ptr_eq(existing, core) {
+                let state = existing.lock();
+                if state.publishers == 0 && state.subscribers.is_empty() {
+                    drop(state);
+                    streams.remove(url);
+                }
+            }
+        }
+    }
+}
+
+/// In-process stream hub backing the `mock://` scheme of the stream elements.
+///
+/// The hub is a Sans-I/O test double for a real media server: publishers and
+/// subscribers exchange frames through bounded per-subscriber queues with the
+/// configured [`BackpressurePolicy`], and publisher close is propagated to all
+/// subscribers as a clean end of stream.
+///
+/// Stream registry entries are reaped when the last publisher and subscriber
+/// leave, so unique URL churn cannot grow without bound.
+#[derive(Clone)]
+pub struct MemoryStreamHub {
+    inner: Arc<HubInner>,
+}
+
+impl core::fmt::Debug for MemoryStreamHub {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MemoryStreamHub")
+            .field("stream_count", &self.stream_count())
+            .field("max_streams", &self.inner.max_streams)
+            .field(
+                "max_subscribers_per_stream",
+                &self.inner.max_subscribers_per_stream,
+            )
+            .finish()
+    }
+}
+
 impl Default for MemoryStreamHub {
     fn default() -> Self {
-        Self {
-            streams: Mutex::new(HashMap::new()),
-            next_subscriber: AtomicU64::new(0),
-            max_streams: 10_000,
-            max_subscribers_per_stream: 1_000,
-        }
+        Self::with_limits(10_000, 1_000)
     }
 }
 
@@ -104,10 +181,12 @@ impl MemoryStreamHub {
 
     pub fn with_limits(max_streams: usize, max_subscribers_per_stream: usize) -> Self {
         Self {
-            streams: Mutex::new(HashMap::new()),
-            next_subscriber: AtomicU64::new(0),
-            max_streams,
-            max_subscribers_per_stream,
+            inner: Arc::new(HubInner {
+                streams: Mutex::new(HashMap::new()),
+                next_subscriber: AtomicU64::new(0),
+                max_streams,
+                max_subscribers_per_stream,
+            }),
         }
     }
 
@@ -116,60 +195,54 @@ impl MemoryStreamHub {
         GLOBAL_HUB.get_or_init(Self::new)
     }
 
-    fn stream(&self, url: &str) -> Arc<StreamCore> {
-        let mut guard = self
-            .streams
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Arc::clone(guard.entry(url.to_string()).or_default())
-    }
-
-    fn check_stream_limit(&self, url: &str) -> Result<()> {
-        let guard = self
-            .streams
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !guard.contains_key(url) && guard.len() >= self.max_streams {
-            return Err(Error::Overflow(format!(
-                "stream registry limit {} reached",
-                self.max_streams
-            )));
-        }
-        Ok(())
+    /// Number of stream registry entries currently retained.
+    pub fn stream_count(&self) -> usize {
+        self.inner.stream_count()
     }
 
     /// Opens a publisher for the stream at `url`.
     pub fn publish(&self, url: &str, _options: PublisherOptions) -> Result<HubPublisher> {
-        self.check_stream_limit(url)?;
-        let core = self.stream(url);
+        let core = self.inner.get_or_create_stream(url)?;
         {
             let mut state = core.lock();
+            state.publishers = state.publishers.saturating_add(1);
             state.publisher_closed = false;
         }
-        Ok(HubPublisher { core })
+        Ok(HubPublisher {
+            hub: Arc::clone(&self.inner),
+            url: url.to_string(),
+            core,
+            closed: AtomicBool::new(false),
+        })
     }
 
     /// Opens a subscriber for the stream at `url`.
     pub fn subscribe(&self, url: &str, options: SubscriberOptions) -> Result<HubSubscriber> {
-        self.check_stream_limit(url)?;
         if options.queue_capacity == 0 {
             return Err(Error::InvalidArgument(
                 "subscriber queue_capacity must be greater than zero".to_string(),
             ));
         }
-        if self.max_subscribers_per_stream == 0 {
+        if self.inner.max_subscribers_per_stream == 0 {
             return Err(Error::Overflow(
                 "subscriber limit for stream is zero".to_string(),
             ));
         }
-        let core = self.stream(url);
-        let id = SubscriberId(self.next_subscriber.fetch_add(1, Ordering::Relaxed));
+        let core = self.inner.get_or_create_stream(url)?;
+        let id = SubscriberId(self.inner.next_subscriber.fetch_add(1, Ordering::Relaxed));
         {
             let mut state = core.lock();
-            if state.subscribers.len() >= self.max_subscribers_per_stream {
+            if state.subscribers.len() >= self.inner.max_subscribers_per_stream {
+                // Undo a just-created empty stream so limit failures do not leak
+                // registry slots.
+                let empty = state.publishers == 0 && state.subscribers.is_empty();
+                drop(state);
+                if empty {
+                    self.inner.try_reap(url, &core);
+                }
                 return Err(Error::Overflow(format!(
                     "subscriber limit {} reached for stream {url}",
-                    self.max_subscribers_per_stream
+                    self.inner.max_subscribers_per_stream
                 )));
             }
             state.subscribers.insert(
@@ -185,6 +258,8 @@ impl MemoryStreamHub {
             );
         }
         Ok(HubSubscriber {
+            hub: Arc::clone(&self.inner),
+            url: url.to_string(),
             core,
             id,
             closed: false,
@@ -192,18 +267,31 @@ impl MemoryStreamHub {
     }
 
     /// Current track metadata announced on the stream at `url`.
+    ///
+    /// Does not create a registry entry for unknown URLs.
     pub fn tracks(&self, url: &str) -> Vec<TrackInfo> {
-        self.stream(url).lock().tracks.clone()
+        self.inner
+            .try_get_stream(url)
+            .map(|core| core.lock().tracks.clone())
+            .unwrap_or_default()
     }
 
     /// Number of active subscribers on the stream at `url`.
+    ///
+    /// Does not create a registry entry for unknown URLs.
     pub fn subscriber_count(&self, url: &str) -> usize {
-        self.stream(url).lock().subscribers.len()
+        self.inner
+            .try_get_stream(url)
+            .map(|core| core.lock().subscribers.len())
+            .unwrap_or(0)
     }
 
     /// Requests a keyframe from the publisher of the stream at `url`.
+    ///
+    /// If the stream does not exist yet, creates it (subject to registry limits)
+    /// so a late publisher can observe the request via [`PublisherSink::take_keyframe_requests`].
     pub fn request_keyframe(&self, url: &str) -> Result<()> {
-        let core = self.stream(url);
+        let core = self.inner.get_or_create_stream(url)?;
         let mut state = core.lock();
         state.keyframe_requests = state.keyframe_requests.saturating_add(1);
         Ok(())
@@ -212,7 +300,10 @@ impl MemoryStreamHub {
 
 /// Publisher endpoint of the in-memory hub.
 pub struct HubPublisher {
+    hub: Arc<HubInner>,
+    url: String,
     core: Arc<StreamCore>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl PublisherSink for HubPublisher {
@@ -225,7 +316,7 @@ impl PublisherSink for HubPublisher {
             }
         }
         let mut state = self.core.lock();
-        if state.publisher_closed {
+        if state.publisher_closed || self.closed.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
         state.tracks = tracks;
@@ -234,7 +325,7 @@ impl PublisherSink for HubPublisher {
 
     fn push_frame(&self, frame: Arc<MediaFrame>) -> Result<DispatchResult> {
         let mut state = self.core.lock();
-        if state.publisher_closed {
+        if state.publisher_closed || self.closed.load(Ordering::Acquire) {
             return Ok(DispatchResult::RejectedClosed);
         }
         let mut enqueued = false;
@@ -302,10 +393,21 @@ impl PublisherSink for HubPublisher {
     }
 
     fn close(&self) -> Result<()> {
-        let mut state = self.core.lock();
-        state.publisher_closed = true;
-        drop(state);
+        // Idempotent: Drop and explicit close must not double-decrement publishers.
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        {
+            let mut state = self.core.lock();
+            if state.publishers > 0 {
+                state.publishers = state.publishers.saturating_sub(1);
+            }
+            if state.publishers == 0 {
+                state.publisher_closed = true;
+            }
+        }
         self.core.frame_ready.notify_all();
+        self.hub.try_reap(&self.url, &self.core);
         Ok(())
     }
 
@@ -326,6 +428,8 @@ impl Drop for HubPublisher {
 /// Subscriber endpoint of the in-memory hub.
 #[derive(Clone)]
 pub struct HubSubscriber {
+    hub: Arc<HubInner>,
+    url: String,
     core: Arc<StreamCore>,
     id: SubscriberId,
     closed: bool,
@@ -354,11 +458,15 @@ impl SubscriberSource for HubSubscriber {
         loop {
             let Some(subscriber) = state.subscribers.get_mut(&self.id) else {
                 self.closed = true;
+                drop(state);
+                self.hub.try_reap(&self.url, &self.core);
                 return Ok(ReceiveOutcome::EndOfStream);
             };
             if subscriber.overflowed {
                 state.subscribers.remove(&self.id);
                 self.closed = true;
+                drop(state);
+                self.hub.try_reap(&self.url, &self.core);
                 return Err(Error::Overflow(
                     "subscriber disconnected: queue overflow".to_string(),
                 ));
@@ -389,15 +497,72 @@ impl SubscriberSource for HubSubscriber {
     async fn close(&mut self) -> Result<()> {
         if !self.closed {
             self.closed = true;
-            let mut state = self.core.lock();
-            state.subscribers.remove(&self.id);
-            drop(state);
+            {
+                let mut state = self.core.lock();
+                state.subscribers.remove(&self.id);
+            }
             self.core.frame_ready.notify_all();
+            self.hub.try_reap(&self.url, &self.core);
         }
         Ok(())
     }
 
     fn id(&self) -> SubscriberId {
         self.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::{BackpressurePolicy, SubscriberOptions, SubscriberSourceSyncExt};
+
+    #[test]
+    fn registry_reaps_stream_when_last_handles_close() {
+        let hub = MemoryStreamHub::with_limits(8, 8);
+        assert_eq!(hub.stream_count(), 0);
+        {
+            let publisher = hub
+                .publish("mock://reap", PublisherOptions::default())
+                .expect("publish");
+            let mut subscriber = hub
+                .subscribe(
+                    "mock://reap",
+                    SubscriberOptions {
+                        queue_capacity: 2,
+                        backpressure: BackpressurePolicy::DropDroppableFirst,
+                        ..SubscriberOptions::default()
+                    },
+                )
+                .expect("subscribe");
+            assert_eq!(hub.stream_count(), 1);
+            subscriber.close_blocking().expect("close sub");
+            assert_eq!(hub.stream_count(), 1, "publisher still holds stream");
+            drop(publisher);
+        }
+        assert_eq!(hub.stream_count(), 0, "empty stream must be reaped");
+    }
+
+    #[test]
+    fn tracks_on_unknown_url_does_not_create_stream() {
+        let hub = MemoryStreamHub::with_limits(1, 1);
+        assert!(hub.tracks("mock://missing").is_empty());
+        assert_eq!(hub.stream_count(), 0);
+        assert_eq!(hub.subscriber_count("mock://missing"), 0);
+    }
+
+    #[test]
+    fn stream_limit_is_enforced_atomically_and_slots_free_after_reap() {
+        let hub = MemoryStreamHub::with_limits(1, 2);
+        let first = hub
+            .publish("mock://a", PublisherOptions::default())
+            .expect("first");
+        assert!(hub
+            .publish("mock://b", PublisherOptions::default())
+            .is_err());
+        drop(first);
+        assert_eq!(hub.stream_count(), 0);
+        hub.publish("mock://b", PublisherOptions::default())
+            .expect("slot freed after reap");
     }
 }

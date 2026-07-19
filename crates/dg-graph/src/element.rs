@@ -159,6 +159,16 @@ impl ElementIo {
         self.metrics.record_reconnect();
     }
 
+    /// Records a frame-local drop (bad payload / conversion) without failing the graph.
+    pub fn record_drop(&self) {
+        self.metrics.record_drop();
+    }
+
+    /// Snapshot of element metrics for diagnostics (e.g. drop counts after frame-local errors).
+    pub fn metrics_snapshot(&self) -> crate::metrics::ElementMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
     pub fn recv(&self, port: &str) -> Result<Option<Packet>> {
         let receiver = self.inputs.get(port).ok_or_else(|| Error::UnknownPort {
             node: self.name.clone(),

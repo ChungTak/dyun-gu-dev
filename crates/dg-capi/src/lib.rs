@@ -1008,8 +1008,8 @@ fn map_core_error(error: &dg_core::Error) -> DgStatus {
         E::InvalidArgument(_) | E::Config(_) => DgStatus::InvalidArgument,
         E::Unsupported(_) | E::UnsupportedDevice(_) => DgStatus::Unsupported,
         E::Timeout(_) | E::Busy(_) => DgStatus::Busy,
-        E::OutOfMemory
-        | E::Io(_)
+        E::OutOfMemory | E::ResourceExhausted(_) => DgStatus::RuntimeError,
+        E::Io(_)
         | E::Device(_)
         | E::Backend(_)
         | E::Media(_)

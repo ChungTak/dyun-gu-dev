@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use dg_core::{CpuDevice, DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
-use dg_graph::{ExecutionSpec, Graph, GraphDiff, GraphSpecBuilder, NodeSpec, ParallelType};
+use dg_graph::{
+    ExecutionSpec, Graph, GraphDiff, GraphSpecBuilder, GraphStatus, NodeSpec, ParallelType,
+};
 use serde_json::json;
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
@@ -298,6 +300,13 @@ fn running_graph_replaces_only_affected_worker_and_rejects_invalid_diff_atomical
         ..GraphDiff::default()
     };
     assert!(running.apply_hot_update(invalid).is_err());
+    // Prepare-phase failure must fail-closed without touching live workers.
+    let (status, _) = running.status();
+    assert_eq!(
+        status,
+        GraphStatus::Running,
+        "invalid prepare must leave graph Running"
+    );
 
     // Config-only hot update (limits) should succeed without topology changes.
     // Rebuild a full candidate from the original builder template + updated limits.

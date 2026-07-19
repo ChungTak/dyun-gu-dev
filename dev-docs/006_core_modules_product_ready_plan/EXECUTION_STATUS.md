@@ -10,7 +10,7 @@
 | GraphSpec | 保持 `dg/v1`，资源语义安全收紧 |
 | C ABI 目标 | v2；v1 立即停止发布 |
 | 默认门禁 | fmt/clippy/workspace tests/deny 全绿（见 `ADMISSION_BASELINE.md`） |
-| 状态 | CORE6-05 PR #18 merged, CORE6-06 PR #19 merged, CORE6-07 PR #20 merged, CORE6-08 PR #22-24 merged, CORE6-09 PR #25 merged, CORE6-10 PR #26 merged, CORE6-11 final acceptance/handoff PR #27 已创建；`CORE_PRODUCT_ACCEPTANCE.md` 为 Pending（硬件/Miri/sanitizer/soak 证据缺失） |
+| 状态 | CORE6-01～11 代码路径 Done；软件 residual 已补齐（MemoryPool、frame limit、hot-update fault injection、hub registry reap、allocate_with_policy、frame-local drop）；R6-002/R6-003 仍 Mitigated（device/网络证据）；acceptance Pending |
 
 ## CORE6 状态
 
@@ -32,9 +32,11 @@
 
 | 等级 | Open | Reproduced | In Progress | Closed | Exception |
 |---|---:|---:|---:|---:|---:|
-| P0 | 0 | 0 | 2 | 4 | 0 |
-| P1 | 1 | 0 | 2 | 10 | 0 |
+| P0 | 0 | 0 | 0 | 4 | 0 |
+| P1 | 0 | 0 | 0 | 13 | 0 |
 | P2 | 0 | 0 | 0 | 3 | 0 |
+
+> 注：R6-002 / R6-003 为 **Mitigated**（软件合同已落地，硬件/网络 soak 证据仍阻塞 Accepted）；R6-018 已以 phase fault injection 关闭。
 
 统计必须与 `CORE_RISK_REGISTER.md` 同步更新。
 

@@ -34,6 +34,8 @@ pub enum Error {
     Event(String),
     #[error("out of memory")]
     OutOfMemory,
+    #[error("resource exhausted: {0}")]
+    ResourceExhausted(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
     #[error("unsupported device: {0:?}")]

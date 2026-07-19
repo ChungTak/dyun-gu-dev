@@ -116,6 +116,11 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
             "stream frame track id {track_id} exceeds u32 range"
         ))
     })?;
+    // Reject oversized frames before host copy (R6-019 / process hard frame limit).
+    let payload_len = frame.payload.len();
+    dg_core::ResourcePolicy::default()
+        .check_frame_bytes(payload_len)
+        .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     let bytes = frame.payload.clone().to_vec();
     // Compressed stream frames are Tensor payloads; Image is reserved for decoded pixels.
     let kind = MediaFrameKind::Tensor;
@@ -228,6 +233,9 @@ pub fn media_frame_to_cheetah_avframe_with_transfer(
         Err(frame) => frame.as_ref().clone(),
     };
     let source_domain = frame.domain;
+    dg_core::ResourcePolicy::default()
+        .check_frame_bytes(frame.buffer.len())
+        .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     let payload = Bytes::from(frame.buffer.try_read_bytes()?);
     let track_id = u32::try_from(metadata.track_id).map_err(|_| {
         Error::InvalidArgument(format!(

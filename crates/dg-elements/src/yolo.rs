@@ -136,6 +136,7 @@ impl Element for Preprocess {
                 })?,
                 self.target_width,
                 self.target_height,
+                io.policy(),
             )?;
             let mut meta = packet.meta.clone();
             meta.tags
@@ -260,6 +261,7 @@ fn preprocess_tensor(
     input: &Tensor,
     target_width: usize,
     target_height: usize,
+    policy: &dg_core::ResourcePolicy,
 ) -> Result<(Tensor, Letterbox)> {
     let dims = input.desc().shape().dims();
     let (channels, source_height, source_width, channel_first) = match (input.desc().format(), dims)
@@ -319,7 +321,7 @@ fn preprocess_tensor(
         DataFormat::NCHW,
         DeviceKind::Cpu,
     );
-    let output = Tensor::allocate(&device, output_desc)?;
+    let output = Tensor::allocate_with_policy(&device, output_desc, policy)?;
     let count = target_width
         .checked_mul(target_height)
         .and_then(|size| size.checked_mul(channels))

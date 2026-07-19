@@ -280,6 +280,7 @@ impl Element for ResnetPreprocess {
                 self.height,
                 self.mean,
                 self.std,
+                io.policy(),
             )?;
             io.send("out", Packet::tensor(tensor).with_meta(packet.meta))?;
         }
@@ -749,6 +750,7 @@ fn resnet_preprocess_tensor(
     height: usize,
     mean: [f32; 3],
     std: [f32; 3],
+    policy: &dg_core::ResourcePolicy,
 ) -> Result<Tensor> {
     let dims = input.desc().shape().dims();
     let (channels, source_height, source_width) = match (input.desc().format(), dims) {
@@ -784,7 +786,7 @@ fn resnet_preprocess_tensor(
         0.0,
     )?;
     let device = dg_core::CpuDevice::new();
-    let output = Tensor::allocate(
+    let output = Tensor::allocate_with_policy(
         &device,
         TensorDesc::new(
             Shape::new([1, 3, height, width]),
@@ -792,6 +794,7 @@ fn resnet_preprocess_tensor(
             DataFormat::NCHW,
             DeviceKind::Cpu,
         ),
+        policy,
     )?;
     let mut bytes = Vec::new();
     for channel in 0..3 {

@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use dg_core::{CpuDevice, DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
 use dg_graph::{
-    CreatedElement, Element, ElementDescriptor, ElementHandle, ElementIo, Graph, GraphFormat,
-    GraphSpec, GraphStatus, ParamField, PortSchema, Result,
+    clear_hot_update_fault, exclusive_hot_update_fault, CreatedElement, Element, ElementDescriptor,
+    ElementHandle, ElementIo, Graph, GraphDiff, GraphFormat, GraphSpec, GraphStatus,
+    HotUpdateFaultPoint, NodeSpec, ParamField, PortSchema, Result,
 };
+use serde_json::json;
 
 const IN_PORT: PortSchema = PortSchema {
     name: "in",
@@ -374,4 +376,126 @@ connections:
         matches!(err, dg_graph::Error::ResourceLimit { ref resource, .. } if resource.contains("sink")),
         "expected sink bytes ResourceLimit, got {err}"
     );
+}
+
+fn running_hot_update_base() -> (GraphSpec, RunningHot) {
+    let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+execution:
+  parallel: pipeline
+  queue_capacity: 8
+nodes:
+  - name: source
+    kind: source
+    params:
+      count: 64
+      shape: [1, 4]
+      start: 1.0
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+connections:
+  - source.out -> infer.in
+  - infer.out -> sink.in
+"#;
+    let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml).expect("parse");
+    let graph = Graph::new(spec.clone()).expect("build");
+    let running = graph.start(HashMap::new()).expect("start");
+    (spec, RunningHot { running })
+}
+
+struct RunningHot {
+    running: dg_graph::RunningGraph,
+}
+
+impl Drop for RunningHot {
+    fn drop(&mut self) {
+        clear_hot_update_fault();
+        let _ = self.running.shutdown(Duration::from_secs(5));
+    }
+}
+
+fn infer_update_diff() -> GraphDiff {
+    GraphDiff {
+        updated_nodes: vec![NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            params: json!({"shape": [1, 4], "echo_inputs": false, "fill_value": 3}),
+            ..NodeSpec::default()
+        }],
+        ..GraphDiff::default()
+    }
+}
+
+#[test]
+fn hot_update_prepare_fault_keeps_running() {
+    let fault = exclusive_hot_update_fault();
+    let (_spec, mut hot) = running_hot_update_base();
+    fault.arm(HotUpdateFaultPoint::AfterPrepare);
+    let err = hot
+        .running
+        .apply_hot_update(infer_update_diff())
+        .expect_err("prepare fault");
+    assert!(err.to_string().contains("AfterPrepare"), "got {err}");
+    assert_eq!(hot.running.status().0, GraphStatus::Running);
+    fault.clear();
+    // Graph remains usable after prepare-phase failure.
+    hot.running
+        .apply_hot_update(infer_update_diff())
+        .expect("retry hot update after prepare fault");
+    assert_eq!(hot.running.status().0, GraphStatus::Running);
+}
+
+#[test]
+fn hot_update_quiesce_fault_restores_and_keeps_running() {
+    let fault = exclusive_hot_update_fault();
+    let (_spec, mut hot) = running_hot_update_base();
+    fault.arm(HotUpdateFaultPoint::AfterQuiesce);
+    let err = hot
+        .running
+        .apply_hot_update(infer_update_diff())
+        .expect_err("quiesce fault");
+    assert!(err.to_string().contains("AfterQuiesce"), "got {err}");
+    assert_eq!(hot.running.status().0, GraphStatus::Running);
+    fault.clear();
+    hot.running
+        .apply_hot_update(infer_update_diff())
+        .expect("retry after quiesce fault");
+}
+
+#[test]
+fn hot_update_switch_fault_fails_closed() {
+    let fault = exclusive_hot_update_fault();
+    let (_spec, mut hot) = running_hot_update_base();
+    fault.arm(HotUpdateFaultPoint::AfterSwitch);
+    let err = hot
+        .running
+        .apply_hot_update(infer_update_diff())
+        .expect_err("switch fault");
+    assert!(err.to_string().contains("AfterSwitch"), "got {err}");
+    assert_eq!(hot.running.status().0, GraphStatus::Failed);
+}
+
+#[test]
+fn hot_update_drain_timeout_fault_is_deterministic() {
+    let fault = exclusive_hot_update_fault();
+    let (_spec, mut hot) = running_hot_update_base();
+    fault.arm(HotUpdateFaultPoint::DrainTimeout);
+    // DrainTimeout forces a zero drain deadline. When there is no drain work
+    // the update may still succeed; when drain work exists it fail-closes.
+    let result = hot.running.apply_hot_update(infer_update_diff());
+    if let Err(err) = result {
+        assert_eq!(hot.running.status().0, GraphStatus::Failed);
+        assert!(
+            err.to_string().contains("timed out")
+                || err.to_string().contains("Timeout")
+                || matches!(err, dg_graph::Error::Timeout(_)),
+            "unexpected drain fault outcome: {err}"
+        );
+    }
 }

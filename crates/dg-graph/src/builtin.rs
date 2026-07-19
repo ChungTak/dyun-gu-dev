@@ -185,6 +185,7 @@ impl Element for SourceElement {
                 self.dtype,
                 self.format,
                 self.start + step,
+                io.policy(),
             )?;
             io.send("out", Packet::tensor(tensor))?;
         }
@@ -560,10 +561,16 @@ fn read_format(params: &Map<String, Value>, key: &str) -> Result<Option<DataForm
     Ok(Some(format))
 }
 
-fn filled_tensor(shape: Shape, dtype: DataType, format: DataFormat, value: f32) -> Result<Tensor> {
+fn filled_tensor(
+    shape: Shape,
+    dtype: DataType,
+    format: DataFormat,
+    value: f32,
+    policy: &dg_core::ResourcePolicy,
+) -> Result<Tensor> {
     let device = dg_core::CpuDevice::new();
     let desc = TensorDesc::new(shape.clone(), dtype, format, DeviceKind::Cpu);
-    let tensor = Tensor::allocate(&device, desc)?;
+    let tensor = Tensor::allocate_with_policy(&device, desc, policy)?;
     if dtype == DataType::F32 {
         let count = shape.element_count()?;
         let mut bytes = Vec::with_capacity(count * std::mem::size_of::<f32>());
@@ -658,12 +665,14 @@ mod tests {
     #[test]
     fn filled_tensor_rejects_u8_out_of_range_and_fractional_values() {
         let shape = Shape::new(vec![1]);
-        let out_of_range = filled_tensor(shape.clone(), DataType::U8, DataFormat::NC, 256.0);
+        let policy = dg_core::ResourcePolicy::default();
+        let out_of_range =
+            filled_tensor(shape.clone(), DataType::U8, DataFormat::NC, 256.0, &policy);
         assert!(
             matches!(out_of_range, Err(Error::Config(message)) if message.contains("cannot be represented as u8"))
         );
 
-        let fractional = filled_tensor(shape, DataType::U8, DataFormat::NC, 1.5);
+        let fractional = filled_tensor(shape, DataType::U8, DataFormat::NC, 1.5, &policy);
         assert!(
             matches!(fractional, Err(Error::Config(message)) if message.contains("cannot be represented as u8"))
         );
