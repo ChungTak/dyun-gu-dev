@@ -431,6 +431,63 @@ fn cfg08_validates_threads_and_sink_semantics() {
         .connect("infer.out -> terminal.in")
         .build()
         .expect("Pipeline multi-instancing with a terminal sink should validate");
+
+    let huge_threads = GraphSpecBuilder::new()
+        .execution(ExecutionSpec {
+            parallel: ParallelType::Pipeline,
+            ..ExecutionSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(usize::MAX),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .build()
+        .expect_err("huge threads should be rejected");
+    assert!(huge_threads.to_string().contains("threads"));
+
+    let huge_workers = GraphSpecBuilder::new()
+        .execution(ExecutionSpec {
+            parallel: ParallelType::Task,
+            workers: Some(usize::MAX),
+            ..ExecutionSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "infer".to_string(),
+            kind: "mock_inference".to_string(),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .build()
+        .expect_err("huge workers should be rejected");
+    assert!(huge_workers.to_string().contains("workers"));
+
+    let too_many_total_threads = GraphSpecBuilder::new()
+        .execution(ExecutionSpec {
+            parallel: ParallelType::Pipeline,
+            ..ExecutionSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "a".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(600),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .add_node(NodeSpec {
+            name: "b".to_string(),
+            kind: "mock_inference".to_string(),
+            threads: Some(600),
+            params: json!({"shape": [1, 4]}),
+            ..NodeSpec::default()
+        })
+        .build()
+        .expect_err("total threads exceeding max_nodes should be rejected");
+    assert!(too_many_total_threads
+        .to_string()
+        .contains("total worker threads"));
 }
 
 #[test]
