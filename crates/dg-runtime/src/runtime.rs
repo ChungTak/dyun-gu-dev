@@ -7,7 +7,8 @@ use dg_core::{
 
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
-    BackendMetrics, CancelReport, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
+    BackendMetrics, CancelReport, Error, ModelSource, Result, RuntimeCapabilities, RuntimeOption,
+    TensorInfo,
 };
 
 pub fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
@@ -151,10 +152,10 @@ impl Runtime {
 
     pub fn new_with_metrics(option: RuntimeOption, metrics: Arc<BackendMetrics>) -> Result<Self> {
         validate_runtime_option(&option)?;
-        option
-            .process_policy
-            .resource_policy()
-            .check_model_bytes(model_source_size(&option.model_source)?)?;
+        let mut option = option;
+        let max_model_bytes = option.process_policy.resource_policy().max_model_bytes;
+        let model = option.model_source.load_bounded(max_model_bytes)?;
+        option.model_source = ModelSource::Bytes(model.into_owned());
         let mut backend = create_backend(option.backend)?;
         backend.attach_metrics(Arc::clone(&metrics));
         backend.init(&option)?;

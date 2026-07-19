@@ -3,8 +3,6 @@
 //! All `unsafe` is confined to the RAII wrappers in [`ffi`]; the backend
 //! itself only manipulates safe handles.
 
-use std::fs;
-
 use dg_core::{CpuDevice, DataFormat, DataType, DeviceKind, Shape, Tensor};
 use dg_runtime::{
     backend_capabilities, BackendConfig, BackendDescriptor, BackendKind, BackendOptions, Error,
@@ -447,16 +445,8 @@ impl TensorRtBackend {
         }
     }
 
-    fn load_model(source: &ModelSource) -> Result<Vec<u8>> {
-        match source {
-            ModelSource::File(path) => fs::read(path).map_err(|err| {
-                Error::BackendUnavailable(format!(
-                    "failed to read TensorRT engine file {}: {err}",
-                    path.display()
-                ))
-            }),
-            ModelSource::Bytes(bytes) => Ok(bytes.clone()),
-        }
+    fn load_model(source: &ModelSource, max_model_bytes: usize) -> Result<Vec<u8>> {
+        Ok(source.load_bounded(max_model_bytes)?.into_owned())
     }
 
     fn select_device(options: &TensorRtOptions) -> Result<()> {
@@ -612,7 +602,10 @@ impl InferBackend for TensorRtBackend {
         Self::select_device(tensorrt)?;
         self.options = tensorrt.clone();
 
-        let model = Self::load_model(&option.model_source)?;
+        let model = Self::load_model(
+            &option.model_source,
+            option.process_policy.resource_policy().max_model_bytes,
+        )?;
         let runtime = Runtime::create()?;
         let engine = Engine::deserialize(&runtime, &model)?;
         let context = engine.create_context()?;

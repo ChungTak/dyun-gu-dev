@@ -19,7 +19,7 @@
 |---|---|---|---|---|
 | CORE7-01 | In Progress | devin/1784469684-core7-01-audit | `PLAN6_GAP_MATRIX.md` 已复核；基线脚本 `tools/core7_baseline.sh` | devin |
 | CORE7-02 | In Progress | devin/1784470201-core7-02-policy | `ProcessRuntimePolicy` + serde, Graph/Runtime/CLI bootstrap tests pass | R7-001 |
-| CORE7-03 | Not Started | - | - | R7-002/R7-003 |
+| CORE7-03 | In Progress | devin/1784473631-core7-03-bounded-model | `ModelSource::load_bounded`, Runtime pre-load, backend bounded reads | R7-002/R7-003 |
 | CORE7-04 | Not Started | - | - | R7-005 |
 | CORE7-05 | Not Started | - | - | R7-006/R7-007 |
 | CORE7-06 | Not Started | - | - | R7-004、UP7-001 |

@@ -170,32 +170,53 @@ impl OpenVINOBackend {
         Ok(info)
     }
 
-    fn read_model(core: &mut Core, source: &ModelSource) -> Result<Model> {
+    fn read_model(core: &mut Core, source: &ModelSource, max_model_bytes: usize) -> Result<Model> {
         match source {
-            ModelSource::Bytes(bytes) => core
-                .read_model_from_buffer(bytes, None)
-                .map_err(|err| Error::BackendUnavailable(err.to_string())),
+            ModelSource::Bytes(bytes) => {
+                if bytes.len() > max_model_bytes {
+                    return Err(Error::Core(dg_core::Error::Config(format!(
+                        "OpenVINO model bytes {} exceeds limit {}",
+                        bytes.len(),
+                        max_model_bytes
+                    ))));
+                }
+                core.read_model_from_buffer(bytes, None)
+                    .map_err(|err| Error::BackendUnavailable(err.to_string()))
+            }
             ModelSource::File(path) => {
-                let path = path.clone();
                 if path.extension().and_then(|ext| ext.to_str()) == Some("xml") {
                     let weights = path.with_extension("bin");
-                    if weights.exists() {
-                        let model_path = path.to_str().ok_or_else(|| {
-                            Error::UnsupportedModelSource("non-utf8 path".to_string())
-                        })?;
-                        let weights_path = weights.to_str().ok_or_else(|| {
-                            Error::UnsupportedModelSource("non-utf8 path".to_string())
-                        })?;
-                        return core
-                            .read_model_from_file(model_path, weights_path)
-                            .map_err(|err| Error::BackendUnavailable(err.to_string()));
+                    if !weights.exists() {
+                        return Err(Error::BackendUnavailable(format!(
+                            "OpenVINO IR weights file missing: {}",
+                            weights.display()
+                        )));
                     }
-                    return Err(Error::BackendUnavailable(format!(
-                        "OpenVINO IR weights file missing: {}",
-                        weights.display()
-                    )));
+                    let xml_len = std::fs::metadata(path)?.len();
+                    let bin_len = std::fs::metadata(&weights)?.len();
+                    let total = xml_len.saturating_add(bin_len);
+                    let total = usize::try_from(total).map_err(|_| {
+                        Error::Core(dg_core::Error::Config(
+                            "OpenVINO IR total size exceeds usize".to_string(),
+                        ))
+                    })?;
+                    if total > max_model_bytes {
+                        return Err(Error::Core(dg_core::Error::Config(format!(
+                            "OpenVINO IR total size {} exceeds limit {}",
+                            total, max_model_bytes
+                        ))));
+                    }
+                    let model_path = path.to_str().ok_or_else(|| {
+                        Error::UnsupportedModelSource("non-utf8 path".to_string())
+                    })?;
+                    let weights_path = weights.to_str().ok_or_else(|| {
+                        Error::UnsupportedModelSource("non-utf8 path".to_string())
+                    })?;
+                    return core
+                        .read_model_from_file(model_path, weights_path)
+                        .map_err(|err| Error::BackendUnavailable(err.to_string()));
                 }
-                let bytes = std::fs::read(path)?;
+                let bytes = source.load_bounded(max_model_bytes)?.into_owned();
                 core.read_model_from_buffer(&bytes, None)
                     .map_err(|err| Error::BackendUnavailable(err.to_string()))
             }
@@ -583,7 +604,11 @@ impl InferBackend for OpenVINOBackend {
         }
         self.capabilities = Some(capabilities);
 
-        let model = Self::read_model(&mut core, &option.model_source)?;
+        let model = Self::read_model(
+            &mut core,
+            &option.model_source,
+            option.process_policy.resource_policy().max_model_bytes,
+        )?;
         let compiled_model = core
             .compile_model(
                 &model,

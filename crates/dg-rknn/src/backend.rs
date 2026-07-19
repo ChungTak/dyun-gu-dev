@@ -1,5 +1,4 @@
 use std::ffi::CStr;
-use std::fs;
 use std::os::raw::c_void;
 use std::ptr;
 
@@ -179,19 +178,13 @@ impl RknnBackend {
         }
     }
 
-    fn load_model(&self, source: &dg_runtime::ModelSource) -> Result<ModelBuffer> {
-        match source {
-            dg_runtime::ModelSource::File(path) => {
-                let data = fs::read(path).map_err(|err| {
-                    Error::BackendUnavailable(format!(
-                        "failed to read RKNN model file {}: {err}",
-                        path.display()
-                    ))
-                })?;
-                ModelBuffer::new(data)
-            }
-            dg_runtime::ModelSource::Bytes(bytes) => ModelBuffer::new(bytes.clone()),
-        }
+    fn load_model(
+        &self,
+        source: &dg_runtime::ModelSource,
+        max_model_bytes: usize,
+    ) -> Result<ModelBuffer> {
+        let data = source.load_bounded(max_model_bytes)?.into_owned();
+        ModelBuffer::new(data)
     }
 
     fn init_context(&mut self, option: &RuntimeOption) -> Result<()> {
@@ -214,7 +207,10 @@ impl RknnBackend {
         };
         self.options = options.clone();
 
-        let model = self.load_model(&option.model_source)?;
+        let model = self.load_model(
+            &option.model_source,
+            option.process_policy.resource_policy().max_model_bytes,
+        )?;
         let model_ptr = model.as_ptr();
         let model_size = model.len();
         let mut context: sys::rknn_context = Default::default();
