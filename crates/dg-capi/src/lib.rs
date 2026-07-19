@@ -794,7 +794,16 @@ impl Engine {
         // before starting the next execution so failure does not return stale tensors.
         self.outputs.clear();
         self.stream_ended = false;
-        let report = graph.run_with_inputs(inputs)?;
+        let report = match graph.run_with_inputs(inputs) {
+            Ok(report) => report,
+            Err(error) => {
+                // The graph stopped before producing any new outputs; mark the
+                // stream as ended so `poll_output` reports EndOfStream instead
+                // of spinning on Pending/Again forever.
+                self.stream_ended = true;
+                return Err(error);
+            }
+        };
         self.pending_inputs.clear();
         for tensors in report.sinks.into_values() {
             self.outputs.extend(tensors);
@@ -823,7 +832,15 @@ impl Engine {
             .graph
             .as_ref()
             .ok_or_else(|| dg_graph::Error::NotBuilt("engine must be built first".to_string()))?;
-        self.running = Some(graph.start(HashMap::new())?);
+        self.running = match graph.start(HashMap::new()) {
+            Ok(running) => Some(running),
+            Err(error) => {
+                // The graph failed to start; there will be no outputs.
+                self.outputs.clear();
+                self.stream_ended = true;
+                return Err(error);
+            }
+        };
         self.outputs.clear();
         self.stream_ended = false;
         Ok(())
@@ -866,6 +883,13 @@ impl Engine {
             let poll_result = running.poll();
             let sink_tensors = running.drain_sinks();
             self.outputs.extend(sink_tensors);
+
+            // Return any outputs that were already produced before propagating a
+            // graph failure, so tensors computed up to the failure are not lost.
+            if let Some(tensor) = self.outputs.pop_front() {
+                return Ok(EnginePollOutput::Tensor(tensor));
+            }
+
             poll_result?;
         }
         if let Some(tensor) = self.outputs.pop_front() {
@@ -3290,6 +3314,97 @@ connections:
         assert!(error.is_null(), "EndOfStream must not allocate a DgError");
 
         unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn engine_poll_reports_end_of_stream_after_one_shot_run_failure() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = CString::new(
+            r#"apiVersion: dg/v1
+kind: Graph
+nodes:
+  - name: input
+    kind: input
+    params: {}
+  - name: panic
+    kind: capi_test_panic
+  - name: sink
+    kind: sink
+    params: {}
+connections:
+  - input.out -> panic.in
+  - panic.out -> sink.in
+"#,
+        )
+        .expect("valid one-shot panic spec");
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let input = [1.0_f32, 2.0, 3.0, 4.0];
+        let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
+        let shape = [1_usize, 4];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    input_bytes.as_ptr(),
+                    input_bytes.len(),
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::F32 as i32,
+                    DgDataFormat::Nc as i32,
+                    DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_push(engine, tensor, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        // The panic element stops before producing any output.
+        let mut error = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_run(engine, &mut error) },
+            DgStatus::RuntimeError
+        );
+        if !error.is_null() {
+            unsafe { dg_error_free(error) };
+        }
+
+        // Polling after a failed one-shot run must report EndOfStream, not spin
+        // on Again forever.
+        let mut output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::EndOfStream
+        );
+        assert!(output.is_null());
+
+        unsafe {
+            dg_tensor_free(tensor);
+            dg_engine_destroy(engine, 5000, ptr::null_mut());
+        }
     }
 
     #[test]
