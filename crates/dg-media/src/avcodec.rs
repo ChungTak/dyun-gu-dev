@@ -100,7 +100,7 @@ pub fn map_av_error_with_operation(error: AvError, operation: crate::MediaOperat
             ("Backend", format!("avcodec {kind:?}: {detail:?}"))
         }
         AvError::ExternalError(code) => ("Backend", format!("avcodec external error code {code}")),
-        AvError::WithContext { .. } => unreachable!("handled above"),
+        AvError::WithContext { .. } => ("Backend", "avcodec: nested error context".to_string()),
     };
 
     media_error_with_context(MediaErrorContext::new(kind, operation, detail))
