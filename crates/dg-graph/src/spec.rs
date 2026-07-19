@@ -735,11 +735,13 @@ impl GraphSpec {
                 ),
             });
         }
+        // Saturate the worker total so a malicious `threads` value cannot cause
+        // an add-overflow panic; the subsequent `> max_nodes` check will reject it.
         let total_workers: usize = self
             .nodes
             .iter()
             .map(|node| node.threads.unwrap_or(1))
-            .sum();
+            .fold(0usize, |acc, count| acc.saturating_add(count));
         if total_workers > policy.max_nodes {
             return Err(Error::Validation {
                 path: "nodes".to_string(),
@@ -777,6 +779,15 @@ impl GraphSpec {
                     message: "workers is only supported with task parallelism".to_string(),
                 });
             }
+            (ParallelType::Task, Some(workers)) if workers > policy.max_nodes => {
+                return Err(Error::Validation {
+                    path: "execution.workers".to_string(),
+                    message: format!(
+                        "workers {} exceeds node limit {}",
+                        workers, policy.max_nodes
+                    ),
+                });
+            }
             _ => {}
         }
         let mut seen = BTreeSet::new();
@@ -788,6 +799,19 @@ impl GraphSpec {
                 return Err(Error::Validation {
                     path: format!("nodes[{}].threads", node.name),
                     message: "threads must be >= 1".to_string(),
+                });
+            }
+            if node
+                .threads
+                .is_some_and(|threads| threads > policy.max_nodes)
+            {
+                return Err(Error::Validation {
+                    path: format!("nodes[{}].threads", node.name),
+                    message: format!(
+                        "threads {} exceeds node limit {}",
+                        node.threads.unwrap(),
+                        policy.max_nodes
+                    ),
                 });
             }
             if self.execution.parallel != ParallelType::Pipeline
