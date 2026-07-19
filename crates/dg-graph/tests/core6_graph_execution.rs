@@ -304,6 +304,39 @@ connections:
 }
 
 #[test]
+fn input_tensor_bytes_checked_per_tensor() {
+    let yaml = r#"
+apiVersion: dg/v1
+kind: Graph
+limits:
+  max_tensor_bytes: 1
+nodes:
+  - name: input
+    kind: input
+  - name: infer
+    kind: mock_inference
+    params:
+      shape: [1, 4]
+      echo_inputs: true
+  - name: sink
+    kind: sink
+connections:
+  - input.out -> infer.in
+  - infer.out -> sink.in
+"#;
+    let spec = GraphSpec::from_str_with_format(yaml, GraphFormat::Yaml).expect("parse spec");
+    let inputs = HashMap::from([("input".to_string(), vec![make_tensor()])]);
+    let err = Graph::new(spec)
+        .expect("build graph")
+        .run_with_inputs(inputs)
+        .expect_err("per-tensor byte limit must fail");
+    assert!(
+        err.to_string().contains("tensor bytes"),
+        "expected per-tensor byte limit error, got {err}"
+    );
+}
+
+#[test]
 fn large_packet_backpressure_is_bounded_by_sink_bytes() {
     let yaml = r#"
 apiVersion: dg/v1
