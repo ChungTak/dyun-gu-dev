@@ -13,7 +13,7 @@ const MAX_MOCK_DELAY: Duration = Duration::from_millis(MAX_MOCK_DELAY_MS);
 
 use crate::{
     backend::{BackendDescriptor, BackendKind, CancelReport, InferBackend},
-    capabilities::{supports_deployment, supports_device, supports_precision},
+    capabilities::{supports_deployment, supports_device, supports_precision, ExecutionMode},
     error::{Error, Result},
     metrics::BackendMetrics,
     option::{BackendConfig, BackendOptions, ModelSource, RuntimeOption},
@@ -293,6 +293,8 @@ impl InferBackend for MockBackend {
             requested,
             completed: requested,
             abandoned: 0,
+            failed: 0,
+            unsupported: 0,
         })
     }
 
@@ -301,19 +303,26 @@ impl InferBackend for MockBackend {
     }
 
     fn probe_capabilities(&self) -> Result<RuntimeCapabilities> {
+        let (execution_mode, async_capable) = if self.is_async() {
+            (ExecutionMode::NativeAsync, true)
+        } else {
+            (ExecutionMode::BoundedSync, false)
+        };
         Ok(RuntimeCapabilities {
             sdk_version: Some("mock-1".to_string()),
             devices: vec![dg_core::DeviceKind::Cpu],
             device_count: 1,
             precisions: vec![DataType::F32],
             deploy_modes: vec![dg_core::DeployMode::Host],
+            execution_mode,
             device_records: vec![RuntimeDeviceCapabilities {
                 kind: dg_core::DeviceKind::Cpu,
                 logical_id: "mock-0".to_string(),
                 runtime_name: "mock".to_string(),
-                async_capable: self.is_async(),
+                async_capable,
                 external_memory: false,
                 remote_tensor: false,
+                execution_mode,
                 verified_precisions: vec![DataType::F32],
             }],
         })

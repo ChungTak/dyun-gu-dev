@@ -10,8 +10,9 @@ use dg_openvino_sys::{
 };
 use dg_runtime::{
     backend_capabilities, supports_deployment, supports_device, supports_precision, BackendConfig,
-    BackendDescriptor, BackendKind, BackendMetrics, BackendOptions, Error, InferBackend, InferPoll,
-    ModelSource, Result, RuntimeCapabilities, RuntimeDeviceCapabilities, RuntimeOption, TensorInfo,
+    BackendDescriptor, BackendKind, BackendMetrics, BackendOptions, Error, ExecutionMode,
+    InferBackend, InferPoll, ModelSource, Result, RuntimeCapabilities, RuntimeDeviceCapabilities,
+    RuntimeOption, TensorInfo,
 };
 use serde::Deserialize;
 use tracing::{trace, warn};
@@ -322,6 +323,7 @@ impl OpenVINOBackend {
         let mut device_kinds = Vec::new();
         let mut all_precisions = Vec::new();
         let mut records = Vec::with_capacity(available.len());
+        let mut execution_modes = Vec::new();
 
         for device in available {
             let device = device.to_owned();
@@ -350,6 +352,11 @@ impl OpenVINOBackend {
 
             all_precisions.extend(verified_precisions.iter().cloned());
             device_kinds.push(kind);
+            let execution_mode = if async_capable {
+                ExecutionMode::NativeAsync
+            } else {
+                ExecutionMode::BoundedSync
+            };
             records.push(RuntimeDeviceCapabilities {
                 kind,
                 logical_id: name,
@@ -357,12 +364,22 @@ impl OpenVINOBackend {
                 async_capable,
                 external_memory: false,
                 remote_tensor: false,
+                execution_mode,
                 verified_precisions,
             });
+            execution_modes.push(execution_mode);
         }
 
         let unique_precisions: HashSet<DataType> = all_precisions.into_iter().collect();
         let device_count = device_kinds.len();
+        let execution_mode = execution_modes
+            .into_iter()
+            .max_by_key(|mode| match mode {
+                ExecutionMode::NonInterruptible => 2,
+                ExecutionMode::BoundedSync => 1,
+                ExecutionMode::NativeAsync => 0,
+            })
+            .unwrap_or(ExecutionMode::BoundedSync);
 
         Ok(RuntimeCapabilities {
             sdk_version: Some(version.build_number),
@@ -370,6 +387,7 @@ impl OpenVINOBackend {
             device_count,
             precisions: unique_precisions.into_iter().collect(),
             deploy_modes: vec![DeployMode::Host],
+            execution_mode,
             device_records: records,
         })
     }
@@ -900,17 +918,19 @@ impl InferBackend for OpenVINOBackend {
         use dg_runtime::CancelReport;
         let requested = u64::try_from(self.in_flight.len()).unwrap_or(u64::MAX);
         let mut completed = 0u64;
-        let mut abandoned = 0u64;
+        let mut failed = 0u64;
         for mut in_flight in self.in_flight.drain(..) {
             match in_flight.request.cancel() {
                 Ok(_) => completed += 1,
-                Err(_) => abandoned += 1,
+                Err(_) => failed += 1,
             }
         }
         Ok(CancelReport {
             requested,
             completed,
-            abandoned,
+            abandoned: 0,
+            failed,
+            unsupported: 0,
         })
     }
 }
