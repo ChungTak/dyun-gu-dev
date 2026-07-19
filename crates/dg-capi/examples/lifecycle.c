@@ -14,6 +14,7 @@ static void print_error(struct DgError *error) {
 }
 
 int main(void) {
+  struct DgAbiVersion abi = {sizeof(abi), 0, 0, 0};
   struct DgEngine *engine = NULL;
   struct DgError *error = NULL;
   const char *spec =
@@ -66,8 +67,12 @@ int main(void) {
     return 1;
   }
 
-  printf("abi_version=%s package_version=%s status=%d metrics_length=%zu\n",
-         dg_abi_version(), dg_version(), (int)status,
+  if (dg_abi_version(&abi, &error) != Ok) {
+    print_error(error);
+  }
+
+  printf("abi_version=%u.%u package_version=%s status=%d metrics_length=%zu\n",
+         (unsigned)abi.major, (unsigned)abi.minor, dg_version(), (int)status,
          dg_owned_bytes_len(metrics));
   if (cause) {
     dg_owned_bytes_free(cause);

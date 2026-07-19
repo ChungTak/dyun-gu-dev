@@ -83,7 +83,8 @@ fn status_enum_numeric_values_are_stable() {
 fn version_and_owned_handle_symbols_remain_exported() {
     let header = fs::read_to_string(header_path()).expect("read header");
     assert!(header.contains("const char *dg_version(void)"));
-    assert!(header.contains("const char *dg_abi_version(void)"));
+    assert!(header.contains("struct DgAbiVersion"));
+    assert!(header.contains("dg_abi_version("));
     for symbol in [
         "DgError",
         "DgOwnedBytes",
