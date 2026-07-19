@@ -4239,7 +4239,6 @@ connections:
         assert!(backend.is_null());
     }
 
-
     #[test]
     fn run_twice_without_poll_replaces_outputs() {
         let mut engine = ptr::null_mut();
