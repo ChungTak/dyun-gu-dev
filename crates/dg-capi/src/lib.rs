@@ -829,7 +829,7 @@ impl Engine {
     fn shutdown(&mut self, timeout_ms: u64) -> dg_graph::Result<()> {
         // `Duration::from_millis` panics on overflow; clamp to the largest
         // representable duration so malicious callers cannot crash the process.
-        let max_ms = std::time::Duration::MAX.as_millis() as u64;
+        let max_ms = u64::try_from(std::time::Duration::MAX.as_millis()).unwrap_or(u64::MAX);
         let timeout = std::time::Duration::from_millis(timeout_ms.min(max_ms));
         if let Some(mut running) = self.running.take() {
             if let Err(error) = running.shutdown(timeout) {

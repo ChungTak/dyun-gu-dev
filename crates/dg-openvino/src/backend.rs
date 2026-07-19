@@ -873,7 +873,7 @@ impl InferBackend for OpenVINOBackend {
 
     fn cancel(&mut self) -> dg_runtime::Result<dg_runtime::CancelReport> {
         use dg_runtime::CancelReport;
-        let requested = self.in_flight.len() as u64;
+        let requested = u64::try_from(self.in_flight.len()).unwrap_or(u64::MAX);
         let mut completed = 0u64;
         let mut abandoned = 0u64;
         for mut in_flight in self.in_flight.drain(..) {
