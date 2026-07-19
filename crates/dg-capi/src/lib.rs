@@ -738,6 +738,9 @@ impl Engine {
             .collect();
         let report = graph.run_with_inputs(inputs)?;
         self.pending_inputs.clear();
+        // A previous one-shot run may have left un-polled outputs; replace them
+        // so the next poll never returns stale tensors.
+        self.outputs.clear();
         for tensors in report.sinks.into_values() {
             self.outputs.extend(tensors);
         }
@@ -2901,6 +2904,103 @@ connections:
         assert!(error.is_null(), "Again must not allocate a DgError");
 
         unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
+    fn run_twice_without_poll_replaces_outputs() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let first = [1.0_f32, 2.0, 3.0, 4.0];
+        let second = [5.0_f32, 6.0, 7.0, 8.0];
+
+        let run_with_input = |input: [f32; 4]| {
+            let input_bytes: Vec<u8> = input.iter().flat_map(|value| value.to_ne_bytes()).collect();
+            let shape = [1_usize, 4];
+            let mut tensor = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    dg_tensor_create(
+                        input_bytes.as_ptr(),
+                        input_bytes.len(),
+                        shape.as_ptr(),
+                        shape.len(),
+                        DgDataType::F32 as i32,
+                        DgDataFormat::Nc as i32,
+                        DgDeviceKind::Cpu as i32,
+                        &mut tensor,
+                        ptr::null_mut(),
+                    )
+                },
+                DgStatus::Ok
+            );
+            assert_eq!(
+                unsafe { dg_engine_push(engine, tensor, ptr::null_mut()) },
+                DgStatus::Ok
+            );
+            let mut error = ptr::null_mut();
+            let run_status = unsafe { dg_engine_run(engine, &mut error) };
+            assert_eq!(run_status, DgStatus::Ok, "run failed");
+            unsafe { dg_tensor_free(tensor) };
+        };
+
+        run_with_input(first);
+        // Do NOT poll the first output; a second run must replace queued outputs.
+        run_with_input(second);
+
+        let mut output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let mut output_owned = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_tensor_data(output, &mut output_owned, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let output_data = unsafe { dg_owned_bytes_data(output_owned) };
+        let output_len = unsafe { dg_owned_bytes_len(output_owned) };
+        let second_bytes: Vec<u8> = second
+            .iter()
+            .flat_map(|value| value.to_ne_bytes())
+            .collect();
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(output_data, output_len) },
+            second_bytes.as_slice()
+        );
+        unsafe { dg_owned_bytes_free(output_owned) };
+
+        output = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
+            DgStatus::Again
+        );
+        assert!(output.is_null());
+
+        unsafe {
+            dg_tensor_free(output);
+            dg_engine_destroy(engine, 5000, ptr::null_mut());
+        }
     }
 
     #[test]
