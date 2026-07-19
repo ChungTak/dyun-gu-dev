@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
-    ExternalHandle, MemoryDomain, Shape, Tensor, TensorDesc, TypeCode,
+    ExternalHandle, MemoryDomain, ResourcePolicy, Shape, Tensor, TensorDesc, TypeCode,
 };
 use dg_graph::{
     ElementMetricsSnapshot, Graph, GraphDiff, GraphFormat, GraphSpec, GraphStatus, NodeSpec,
@@ -2174,6 +2174,9 @@ pub unsafe extern "C" fn dg_backend_create(
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     ffi_result_with_out(out, out_error, || {
+        ResourcePolicy::default()
+            .check_model_bytes(model_length)
+            .map_err(|error| (map_core_error(&error), error.to_string()))?;
         let model = unsafe { bytes(model_data, model_length)? }.to_vec();
         let options = if options_json.is_null() {
             Value::Object(Map::new())
@@ -4389,6 +4392,26 @@ connections:
             unsafe { dg_engine_destroy(engine, u64::MAX, ptr::null_mut()) },
             DgStatus::Ok
         );
+    }
+
+    #[test]
+    fn backend_create_rejects_oversized_model() {
+        let mut backend = ptr::null_mut();
+        let oversized = ResourcePolicy::DEFAULT_MAX_MODEL_BYTES + 1;
+        assert_eq!(
+            unsafe {
+                dg_backend_create(
+                    DgBackendKind::Mock as i32,
+                    ptr::null(),
+                    oversized,
+                    ptr::null(),
+                    &mut backend,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+        assert!(backend.is_null());
     }
 
     #[test]
