@@ -8,7 +8,7 @@ use crate::{
     BackendMetrics, CancelReport, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 
-fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
+pub fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
     match source {
         crate::ModelSource::File(path) => {
             let path: &PathBuf = path;

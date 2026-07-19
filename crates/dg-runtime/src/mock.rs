@@ -366,7 +366,11 @@ fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
             .collect(),
         max_in_flight: params.max_in_flight.unwrap_or(1).clamp(1, 64),
     });
-    Ok(config.into_runtime_option(BackendKind::Mock, ModelSource::Bytes(Vec::new()), options))
+    let model_source = config.model().map_or_else(
+        || ModelSource::Bytes(Vec::new()),
+        |path| ModelSource::File(path.to_path_buf()),
+    );
+    Ok(config.into_runtime_option(BackendKind::Mock, model_source, options))
 }
 
 fn parse_dtype(value: &str) -> Result<DataType> {

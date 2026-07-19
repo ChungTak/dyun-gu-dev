@@ -34,7 +34,7 @@ pub use regression::{
     RegressionCase, RegressionError, RegressionHarness, RegressionReport, RegressionTensor,
     RegressionTolerance,
 };
-pub use runtime::{validate_runtime_option, InferPoll, Runtime};
+pub use runtime::{model_source_size, validate_runtime_option, InferPoll, Runtime};
 pub use tensor_info::TensorInfo;
 
 inventory::collect!(BackendDescriptor);

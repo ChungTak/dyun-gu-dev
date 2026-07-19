@@ -277,3 +277,37 @@ fn load_from_path_rejects_directory_traversal_includes() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+fn inference_node(name: &str, model: &std::path::Path) -> NodeSpec {
+    NodeSpec {
+        name: name.into(),
+        kind: "inference".into(),
+        params: json!({"backend": "mock", "model": model}),
+        ..NodeSpec::default()
+    }
+}
+
+#[test]
+fn graph_new_enforces_model_size_against_max_model_bytes() {
+    let dir = temp_dir("dg-core6-model-size");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let model_path = dir.join("model.bin");
+    fs::write(&model_path, vec![0u8; 128]).expect("write model file");
+
+    let mut spec = GraphSpec::default();
+    spec.limits.max_model_bytes = 1;
+    spec.nodes.push(source("src"));
+    spec.nodes.push(inference_node("infer", &model_path));
+    spec.nodes.push(sink("snk"));
+    spec.connections.push("src.out -> infer.in".into());
+    spec.connections.push("infer.out -> snk.in".into());
+
+    let err = Graph::new(spec)
+        .err()
+        .expect("model size should exceed limit");
+    assert!(err.to_string().contains("model bytes"), "{err}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
