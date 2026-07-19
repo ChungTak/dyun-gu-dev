@@ -367,7 +367,12 @@ fn check_struct_version(
             format!("{name}.struct_version {struct_version} is not supported"),
         ));
     }
-    let expected = expected_size as u32;
+    let expected = u32::try_from(expected_size).map_err(|_| {
+        (
+            DgStatus::InternalError,
+            format!("{name} expected struct size {expected_size} exceeds u32"),
+        )
+    })?;
     if struct_size != 0 && struct_size != expected {
         return Err((
             DgStatus::InvalidArgument,
@@ -1187,8 +1192,14 @@ fn c_tensor_info(info: &dg_runtime::TensorInfo) -> Result<DgTensorInfo, (DgStatu
     }
     let mut shape = [0; 8];
     shape[..dims.len()].copy_from_slice(dims);
+    let struct_size = u32::try_from(std::mem::size_of::<DgTensorInfo>()).map_err(|_| {
+        (
+            DgStatus::InternalError,
+            "DgTensorInfo struct size exceeds u32".to_string(),
+        )
+    })?;
     Ok(DgTensorInfo {
-        struct_size: std::mem::size_of::<DgTensorInfo>() as u32,
+        struct_size,
         struct_version: 0,
         dtype: c_dtype(info.dtype)?,
         format: c_format(info.layout.unwrap_or(DataFormat::Auto)),
@@ -2224,8 +2235,15 @@ pub unsafe extern "C" fn dg_backend_capabilities(
         for (slot, precision) in capabilities.precisions.iter().copied().enumerate() {
             precisions[slot] = c_dtype(precision)?;
         }
+        let struct_size =
+            u32::try_from(std::mem::size_of::<DgBackendCapabilities>()).map_err(|_| {
+                (
+                    DgStatus::InternalError,
+                    "DgBackendCapabilities struct size exceeds u32".to_string(),
+                )
+            })?;
         Ok(DgBackendCapabilities {
-            struct_size: std::mem::size_of::<DgBackendCapabilities>() as u32,
+            struct_size,
             struct_version: 0,
             device_count: capabilities.devices.len(),
             devices,
