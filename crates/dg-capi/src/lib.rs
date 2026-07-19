@@ -1192,7 +1192,7 @@ fn c_tensor_info(info: &dg_runtime::TensorInfo) -> Result<DgTensorInfo, (DgStatu
         struct_version: 0,
         dtype: c_dtype(info.dtype)?,
         format: c_format(info.layout.unwrap_or(DataFormat::Auto)),
-        device: DgDeviceKind::Cpu,
+        device: c_device(info.device),
         rank: dims.len(),
         shape,
     })

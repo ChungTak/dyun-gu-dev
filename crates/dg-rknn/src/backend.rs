@@ -3,7 +3,7 @@ use std::fs;
 use std::os::raw::c_void;
 use std::ptr;
 
-use dg_core::{DataFormat, DataType, Shape, Tensor};
+use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor};
 use dg_runtime::{
     backend_capabilities, supports_deployment, supports_device, supports_precision, BackendConfig,
     BackendDescriptor, BackendKind, BackendOptions, Error, InferBackend, Result, RknnOptions,
@@ -644,7 +644,7 @@ fn map_core_mask(mask: u32) -> Result<sys::rknn_core_mask> {
 fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
     let shape = shape_from_attr(attr)?;
     let dtype = dtype_from_rknn(attr.type_)?;
-    let mut info = TensorInfo::new(shape, dtype);
+    let mut info = TensorInfo::new(shape, dtype).with_device(DeviceKind::RknnNpu);
     if !attr.name.iter().all(|&byte| byte == 0) {
         // SAFETY: `attr.name` is a fixed-size array; we only read its own bytes
         // and stop at the first NUL.

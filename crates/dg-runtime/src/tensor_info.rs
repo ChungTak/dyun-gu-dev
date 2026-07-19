@@ -10,6 +10,7 @@ pub struct TensorInfo {
     pub shape: Shape,
     pub dtype: DataType,
     pub layout: Option<DataFormat>,
+    pub device: DeviceKind,
     pub quant: Quantization,
     /// Element strides for padded layouts (e.g. RKNN `w_stride`).
     pub strides: Option<Strides>,
@@ -24,6 +25,7 @@ impl TensorInfo {
             shape,
             dtype,
             layout: None,
+            device: DeviceKind::Cpu,
             quant: Quantization::none(),
             strides: None,
             size_with_stride: None,
@@ -37,6 +39,11 @@ impl TensorInfo {
 
     pub fn with_layout(mut self, layout: DataFormat) -> Self {
         self.layout = Some(layout);
+        self
+    }
+
+    pub fn with_device(mut self, device: DeviceKind) -> Self {
+        self.device = device;
         self
     }
 

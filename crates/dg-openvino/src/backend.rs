@@ -119,7 +119,11 @@ impl OpenVINOBackend {
         }
     }
 
-    fn tensor_info_from_port(port: &Node) -> Result<TensorInfo> {
+    fn device_kind(&self) -> DeviceKind {
+        Self::device_kind_from_name(&self.device_string).unwrap_or(DeviceKind::Cpu)
+    }
+
+    fn tensor_info_from_port(port: &Node, device_kind: DeviceKind) -> Result<TensorInfo> {
         let dims = match port.get_shape() {
             Ok(shape) => shape
                 .get_dimensions()
@@ -156,7 +160,8 @@ impl OpenVINOBackend {
                     .map_err(|err| Error::Backend(err.to_string()))?,
             )?,
         )
-        .with_layout(DataFormat::Auto);
+        .with_layout(DataFormat::Auto)
+        .with_device(device_kind);
 
         if let Ok(name) = port.get_name() {
             info = info.with_name(name);
@@ -599,7 +604,7 @@ impl InferBackend for OpenVINOBackend {
             let port = compiled_model
                 .get_input_by_index(index)
                 .map_err(|err| Error::Backend(err.to_string()))?;
-            input_infos.push(Self::tensor_info_from_port(&port)?);
+            input_infos.push(Self::tensor_info_from_port(&port, self.device_kind())?);
         }
 
         let mut output_infos = Vec::with_capacity(output_count);
@@ -607,7 +612,7 @@ impl InferBackend for OpenVINOBackend {
             let port = compiled_model
                 .get_output_by_index(index)
                 .map_err(|err| Error::Backend(err.to_string()))?;
-            output_infos.push(Self::tensor_info_from_port(&port)?);
+            output_infos.push(Self::tensor_info_from_port(&port, self.device_kind())?);
         }
 
         let mut compiled_model = compiled_model;
@@ -727,7 +732,7 @@ impl InferBackend for OpenVINOBackend {
                 .ok_or_else(|| Error::InvalidOption("compiled model missing".to_string()))?
                 .get_output_by_index(index)
                 .map_err(|err| Error::Backend(err.to_string()))?;
-            output_infos.push(Self::tensor_info_from_port(&port)?);
+            output_infos.push(Self::tensor_info_from_port(&port, self.device_kind())?);
         }
         self.output_infos = output_infos;
         Ok(())

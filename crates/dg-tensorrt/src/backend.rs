@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use dg_core::{CpuDevice, DataFormat, DataType, Shape, Tensor};
+use dg_core::{CpuDevice, DataFormat, DataType, DeviceKind, Shape, Tensor};
 use dg_runtime::{
     backend_capabilities, BackendConfig, BackendDescriptor, BackendKind, BackendOptions, Error,
     InferBackend, ModelSource, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
@@ -516,7 +516,8 @@ impl TensorRtBackend {
                 let (shape, _) = engine_dims_to_shape(&binding.engine_dims, &binding.name)?;
                 Ok(TensorInfo::new(shape, binding.dtype)
                     .with_name(binding.name.clone())
-                    .with_layout(DataFormat::Auto))
+                    .with_layout(DataFormat::Auto)
+                    .with_device(DeviceKind::CudaGpu))
             })
             .collect()
     }
@@ -573,7 +574,8 @@ impl TensorRtBackend {
             output_infos.push(
                 TensorInfo::new(shape, binding.dtype)
                     .with_name(binding.name.clone())
-                    .with_layout(DataFormat::Auto),
+                    .with_layout(DataFormat::Auto)
+                    .with_device(DeviceKind::CudaGpu),
             );
         }
         self.output_infos = output_infos;
@@ -658,6 +660,7 @@ impl InferBackend for TensorRtBackend {
                 TensorInfo::new(shape.clone(), binding.dtype)
                     .with_name(binding.name.clone())
                     .with_layout(DataFormat::Auto)
+                    .with_device(DeviceKind::CudaGpu)
             })
             .collect();
         self.refresh_output_infos()
@@ -737,6 +740,7 @@ impl InferBackend for TensorRtBackend {
             let output = TensorInfo::new(shape, binding.dtype)
                 .with_name(binding.name.clone())
                 .with_layout(DataFormat::Auto)
+                .with_device(DeviceKind::CudaGpu)
                 .allocate(&device)?;
             output.buffer().write_from_slice(&host)?;
             outputs.push(output);
