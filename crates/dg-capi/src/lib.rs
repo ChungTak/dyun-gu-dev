@@ -151,6 +151,18 @@ pub enum DgBackendKind {
     Sophon = 4,
 }
 
+/// ABI version reported by [`dg_abi_version`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DgAbiVersion {
+    /// Must be set to `size_of::<DgAbiVersion>()` by the caller.
+    pub struct_size: u32,
+    /// ABI struct version; must be 0 for the current definition.
+    pub struct_version: u32,
+    pub major: u32,
+    pub minor: u32,
+}
+
 /// Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
 /// the duration of the ABI call.
 #[repr(C)]
@@ -1419,10 +1431,50 @@ pub extern "C" fn dg_version() -> *const c_char {
     c"0.1.0".as_ptr()
 }
 
-/// Returns the stable C ABI version as a static UTF-8 C string.
+/// Writes the stable C ABI version into `out`.
+///
+/// On failure the output is zeroed. Callers must set `struct_size` to
+/// `sizeof(DgAbiVersion)` and `struct_version` to 0.
 #[no_mangle]
-pub extern "C" fn dg_abi_version() -> *const c_char {
-    c"2.0".as_ptr()
+pub unsafe extern "C" fn dg_abi_version(
+    out: *mut DgAbiVersion,
+    out_error: *mut *mut DgError,
+) -> DgStatus {
+    if out.is_null() {
+        write_error(out_error, DgStatus::NullPointer, "output pointer is null");
+        return DgStatus::NullPointer;
+    }
+    if !out_error.is_null() {
+        // SAFETY: `out_error` is a valid pointer; we own writing the initial null.
+        unsafe { out_error.write(ptr::null_mut()) };
+    }
+
+    // Read the version fields through raw pointers before possibly zeroing.
+    let (struct_size, struct_version) = unsafe {
+        (
+            std::ptr::addr_of!((*out).struct_size).read(),
+            std::ptr::addr_of!((*out).struct_version).read(),
+        )
+    };
+
+    if let Err((status, message)) = check_struct_version(
+        "DgAbiVersion",
+        struct_size,
+        struct_version,
+        std::mem::size_of::<DgAbiVersion>(),
+    ) {
+        // SAFETY: `out` is non-null and points to writable caller storage.
+        unsafe { std::ptr::write_bytes(out, 0, 1) };
+        write_error(out_error, status, message);
+        return status;
+    }
+
+    // SAFETY: `out` is non-null and version fields have been validated.
+    unsafe {
+        (*out).major = 2;
+        (*out).minor = 0;
+    }
+    DgStatus::Ok
 }
 
 /// Returns the diagnostic status code stored in an error handle.
@@ -4233,8 +4285,25 @@ connections: []
 
     #[test]
     fn c_abi_v2_wire_types_reject_invalid_inputs() {
-        let abi = unsafe { CStr::from_ptr(dg_abi_version()) };
-        assert_eq!(abi.to_string_lossy(), "2.0");
+        let mut abi = DgAbiVersion {
+            struct_size: 0,
+            struct_version: 0,
+            major: 0,
+            minor: 0,
+        };
+        assert_eq!(
+            unsafe { dg_abi_version(&mut abi, ptr::null_mut()) },
+            DgStatus::InvalidArgument
+        );
+        assert_eq!(abi.major, 0);
+
+        abi.struct_size = std::mem::size_of::<DgAbiVersion>() as u32;
+        assert_eq!(
+            unsafe { dg_abi_version(&mut abi, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(abi.major, 2);
+        assert_eq!(abi.minor, 0);
 
         let mut engine = ptr::null_mut();
         assert_eq!(

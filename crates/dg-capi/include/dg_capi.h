@@ -161,6 +161,22 @@ typedef struct DgOwnedBytes DgOwnedBytes;
 typedef struct DgTensor DgTensor;
 
 /**
+ * ABI version reported by [`dg_abi_version`].
+ */
+typedef struct DgAbiVersion {
+  /**
+   * Must be set to `size_of::<DgAbiVersion>()` by the caller.
+   */
+  uint32_t struct_size;
+  /**
+   * ABI struct version; must be 0 for the current definition.
+   */
+  uint32_t struct_version;
+  uint32_t major;
+  uint32_t minor;
+} DgAbiVersion;
+
+/**
  * Runtime bootstrap options for [`dg_runtime_init`].
  */
 typedef struct DgRuntimeInitOptions {
@@ -268,9 +284,12 @@ typedef struct DgShapeView {
 const char *dg_version(void);
 
 /**
- * Returns the stable C ABI version as a static UTF-8 C string.
+ * Writes the stable C ABI version into `out`.
+ *
+ * On failure the output is zeroed. Callers must set `struct_size` to
+ * `sizeof(DgAbiVersion)` and `struct_version` to 0.
  */
-const char *dg_abi_version(void);
+enum DgStatus dg_abi_version(struct DgAbiVersion *out, struct DgError **out_error);
 
 /**
  * Returns the diagnostic status code stored in an error handle.

@@ -15,6 +15,7 @@ DgMemoryDomain
 DgOwnedBytes
 DgReleaseCallback
 DgStatus
+DgAbiVersion
 DgRuntimeInitOptions
 DgTensor
 DgTensorInfo
