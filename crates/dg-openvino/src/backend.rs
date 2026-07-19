@@ -399,7 +399,9 @@ impl OpenVINOBackend {
             let start = Instant::now();
             raw.copy_from_slice(&bytes);
             if let Some(metrics) = &self.metrics {
-                metrics.record_host_copy(bytes.len() as u64, start.elapsed().as_nanos() as u64);
+                let bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                metrics.record_host_copy(bytes, ns);
             }
             ov_inputs.push(ov_tensor);
         }
@@ -427,7 +429,9 @@ impl OpenVINOBackend {
             let start = Instant::now();
             output.buffer().write_from_slice(bytes)?;
             if let Some(metrics) = &self.metrics {
-                metrics.record_host_copy(bytes.len() as u64, start.elapsed().as_nanos() as u64);
+                let bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                metrics.record_host_copy(bytes, ns);
             }
             outputs.push(output);
         }
@@ -844,7 +848,8 @@ impl InferBackend for OpenVINOBackend {
 
         let in_flight = self.in_flight.remove(index);
         if let Some(metrics) = &self.metrics {
-            metrics.record_infer_latency_ns(in_flight.submit_time.elapsed().as_nanos() as u64);
+            let ns = u64::try_from(in_flight.submit_time.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            metrics.record_infer_latency_ns(ns);
         }
 
         match in_flight.request.get_output_tensor_by_index(0) {
