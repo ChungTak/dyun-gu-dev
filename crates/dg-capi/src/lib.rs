@@ -1357,11 +1357,20 @@ fn tensor_from_bytes(
     format: i32,
     device: i32,
 ) -> Result<Tensor, (DgStatus, String)> {
+    let device = device_from_c(device)?;
+    if device != dg_core::DeviceKind::Cpu {
+        return Err((
+            DgStatus::InvalidArgument,
+            format!(
+                "dg_tensor_create only supports host bytes; got device {device:?}, expected Cpu"
+            ),
+        ));
+    }
     let desc = TensorDesc::new(
         Shape::new(shape.to_vec()),
         data_type_from_c(dtype)?,
         format_from_c_enum(format)?,
-        device_from_c(device)?,
+        device,
     );
     let expected = desc
         .storage_bytes()
@@ -4601,6 +4610,30 @@ connections:
                     DgDataType::U8 as i32,
                     DgDataFormat::N as i32,
                     DgDeviceKind::Cpu as i32,
+                    &mut tensor,
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::InvalidArgument
+        );
+        assert!(tensor.is_null());
+    }
+
+    #[test]
+    fn tensor_create_rejects_non_cpu_device_for_host_bytes() {
+        let bytes = [0_u8; 16];
+        let shape = [bytes.len()];
+        let mut tensor = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                dg_tensor_create(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    shape.as_ptr(),
+                    shape.len(),
+                    DgDataType::U8 as i32,
+                    DgDataFormat::N as i32,
+                    DgDeviceKind::CudaGpu as i32,
                     &mut tensor,
                     ptr::null_mut(),
                 )
