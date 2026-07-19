@@ -618,6 +618,12 @@ unsafe fn clone_buffer_arc(ptr: *const DgBuffer) -> Arc<DgBuffer> {
     clone
 }
 
+enum EnginePollOutput {
+    Tensor(Tensor),
+    Pending,
+    EndOfStream,
+}
+
 struct Engine {
     spec: GraphSpec,
     graph: Option<Graph>,
@@ -788,20 +794,23 @@ impl Engine {
         Ok(())
     }
 
-    fn poll_output(&mut self) -> dg_graph::Result<Option<Tensor>> {
+    fn poll_output(&mut self) -> dg_graph::Result<EnginePollOutput> {
         if let Some(running) = self.running.as_mut() {
             running.poll()?;
         }
         if let Some(tensor) = self.outputs.pop_front() {
-            return Ok(Some(tensor));
+            return Ok(EnginePollOutput::Tensor(tensor));
         }
         if let Some(running) = self.running.as_ref() {
             let (status, cause) = running.status();
             if status == GraphStatus::Failed {
                 return Err(dg_graph::Error::Runtime(cause.unwrap_or_default()));
             }
+            if status == GraphStatus::Stopped {
+                return Ok(EnginePollOutput::EndOfStream);
+            }
         }
-        Ok(None)
+        Ok(EnginePollOutput::Pending)
     }
 
     fn status(&self) -> (DgGraphStatus, Option<String>) {
@@ -2482,8 +2491,10 @@ pub unsafe extern "C" fn dg_engine_push(
     }
 }
 
-/// Polls one output tensor. `Again` means the queue is empty.
-/// On `Again` no `DgError` is written and `*out` is set to null.
+/// Polls one output tensor. `Again` means the queue is empty and the graph is
+/// still running. `EndOfStream` means the running graph has stopped and all
+/// queued output tensors have been consumed. On `Again`/`EndOfStream` no
+/// `DgError` is written and `*out` is set to null.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_poll(
     engine: *mut DgEngine,
@@ -2504,6 +2515,7 @@ pub unsafe extern "C" fn dg_engine_poll(
     enum PollResult {
         Tensor(usize),
         Again,
+        EndOfStream,
         Error(DgStatus, String),
     }
 
@@ -2514,10 +2526,11 @@ pub unsafe extern "C" fn dg_engine_poll(
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let result = match lock_engine_write(&engine_arc) {
             Ok(mut engine) => match engine.poll_output() {
-                Ok(Some(tensor)) => {
+                Ok(EnginePollOutput::Tensor(tensor)) => {
                     PollResult::Tensor(Arc::into_raw(Arc::new(DgTensor { tensor })) as usize)
                 }
-                Ok(None) => PollResult::Again,
+                Ok(EnginePollOutput::Pending) => PollResult::Again,
+                Ok(EnginePollOutput::EndOfStream) => PollResult::EndOfStream,
                 Err(error) => {
                     let (status, message) = map_graph_error(error);
                     PollResult::Error(status, message)
@@ -2536,6 +2549,7 @@ pub unsafe extern "C" fn dg_engine_poll(
             DgStatus::Ok
         }
         Ok(PollResult::Again) => DgStatus::Again,
+        Ok(PollResult::EndOfStream) => DgStatus::EndOfStream,
         Ok(PollResult::Error(status, message)) => {
             write_error(out_error, status, message);
             status
@@ -2890,6 +2904,59 @@ connections:
     }
 
     #[test]
+    fn engine_poll_returns_end_of_stream_when_streaming_graph_stops() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        let spec = graph_spec();
+        assert_eq!(
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    DgGraphFormat::Yaml as i32,
+                    spec.as_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_build(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert_eq!(
+            unsafe { dg_engine_init(engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = ptr::null_mut();
+        let mut error = ptr::null_mut();
+        let mut last_status = DgStatus::Again;
+        // The mock graph has no input data, so the input node eventually
+        // broadcasts EOS and the graph stops. poll_output should report
+        // EndOfStream rather than spinning on Again forever.
+        while std::time::Instant::now() < deadline {
+            last_status = unsafe { dg_engine_poll(engine, &mut output, &mut error) };
+            if last_status == DgStatus::EndOfStream {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            last_status,
+            DgStatus::EndOfStream,
+            "dg_engine_poll must report EndOfStream after the streaming graph stops"
+        );
+        assert!(output.is_null());
+        assert!(error.is_null(), "EndOfStream must not allocate a DgError");
+
+        unsafe { dg_engine_destroy(engine, 5000, ptr::null_mut()) };
+    }
+
+    #[test]
     fn reload_after_run_clears_stale_outputs() {
         let mut engine = ptr::null_mut();
         assert_eq!(
@@ -3070,10 +3137,19 @@ connections:
             DgStatus::Ok
         );
         output = ptr::null_mut();
-        assert_eq!(
-            unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) },
-            DgStatus::Again
-        );
+        // With no pending input the mock graph stops; poll until EndOfStream
+        // and verify no stale one-shot tensor is returned.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut last_status = DgStatus::Again;
+        while std::time::Instant::now() < deadline {
+            last_status = unsafe { dg_engine_poll(engine, &mut output, ptr::null_mut()) };
+            if last_status == DgStatus::EndOfStream {
+                break;
+            }
+            assert!(output.is_null());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(last_status, DgStatus::EndOfStream);
         assert!(output.is_null());
 
         unsafe { dg_engine_shutdown(engine, 5000, ptr::null_mut()) };

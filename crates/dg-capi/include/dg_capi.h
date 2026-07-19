@@ -583,8 +583,10 @@ enum DgStatus dg_engine_push(struct DgEngine *engine,
                              struct DgError **out_error);
 
 /**
- * Polls one output tensor. `Again` means the queue is empty.
- * On `Again` no `DgError` is written and `*out` is set to null.
+ * Polls one output tensor. `Again` means the queue is empty and the graph is
+ * still running. `EndOfStream` means the running graph has stopped and all
+ * queued output tensors have been consumed. On `Again`/`EndOfStream` no
+ * `DgError` is written and `*out` is set to null.
  */
 enum DgStatus dg_engine_poll(struct DgEngine *engine,
                              struct DgTensor **out,
