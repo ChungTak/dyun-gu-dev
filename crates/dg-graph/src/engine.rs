@@ -320,7 +320,9 @@ impl RuntimeGraph {
                 .map_err(|_| Error::Runtime("input queue poisoned".to_string()))?;
             let mut input_bytes = 0usize;
             for tensor in &tensors {
-                input_bytes = input_bytes.saturating_add(tensor.desc().storage_bytes()?);
+                let tensor_bytes = tensor.desc().storage_bytes()?;
+                effective.check_tensor_bytes(tensor_bytes)?;
+                input_bytes = input_bytes.saturating_add(tensor_bytes);
             }
             effective.check_buffer_packets(guard.len().saturating_add(tensors.len()))?;
             effective.check_buffer_bytes(input_bytes)?;
