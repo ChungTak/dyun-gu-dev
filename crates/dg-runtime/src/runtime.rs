@@ -12,7 +12,8 @@ fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
     match source {
         crate::ModelSource::File(path) => {
             let path: &PathBuf = path;
-            Ok(std::fs::metadata(path)?.len() as usize)
+            let len = std::fs::metadata(path)?.len();
+            usize::try_from(len).map_err(|_| Error::Io("model file size exceeds usize".to_string()))
         }
         crate::ModelSource::Bytes(bytes) => Ok(bytes.len()),
     }
