@@ -770,7 +770,10 @@ impl Engine {
     }
 
     fn shutdown(&mut self, timeout_ms: u64) -> dg_graph::Result<()> {
-        let timeout = std::time::Duration::from_millis(timeout_ms);
+        // `Duration::from_millis` panics on overflow; clamp to the largest
+        // representable duration so malicious callers cannot crash the process.
+        let max_ms = std::time::Duration::MAX.as_millis() as u64;
+        let timeout = std::time::Duration::from_millis(timeout_ms.min(max_ms));
         if let Some(mut running) = self.running.take() {
             if let Err(error) = running.shutdown(timeout) {
                 // Only timeouts are retryable; keep the running graph so the
@@ -4116,5 +4119,21 @@ connections:
             dg_owned_bytes_free(owned);
             dg_tensor_free(tensor);
         }
+    }
+
+    #[test]
+    fn destroy_with_u64_max_timeout_does_not_panic() {
+        let mut engine = ptr::null_mut();
+        assert_eq!(
+            unsafe { dg_engine_create(&mut engine, ptr::null_mut()) },
+            DgStatus::Ok
+        );
+        assert!(!engine.is_null());
+        // A malicious or careless caller could pass u64::MAX. The engine must
+        // not panic when converting this to a Duration.
+        assert_eq!(
+            unsafe { dg_engine_destroy(engine, u64::MAX, ptr::null_mut()) },
+            DgStatus::Ok
+        );
     }
 }
