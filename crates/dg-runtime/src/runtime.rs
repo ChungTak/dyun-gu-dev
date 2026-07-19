@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dg_core::ResourcePolicy;
+use dg_core::{
+    DeadlinePolicy, MemoryPoolConfig, ProcessRuntimePolicy, ResourcePolicy, StreamRegistryLimits,
+};
 
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
@@ -125,29 +127,34 @@ pub struct Runtime {
     sync_result: Option<(u64, Vec<dg_core::Tensor>)>,
     metrics: Arc<BackendMetrics>,
     max_in_flight: usize,
-    policy: ResourcePolicy,
+    process_policy: Arc<ProcessRuntimePolicy>,
 }
 
 impl Runtime {
     pub fn new(option: RuntimeOption) -> Result<Self> {
-        Self::new_with_policy(option, ResourcePolicy::default())
+        Self::new_with_metrics(option, Arc::new(BackendMetrics::default()))
     }
 
-    pub fn new_with_policy(option: RuntimeOption, policy: ResourcePolicy) -> Result<Self> {
-        Self::new_with_policy_and_metrics(option, policy, Arc::new(BackendMetrics::default()))
+    pub fn new_with_policy(option: RuntimeOption, resource_policy: ResourcePolicy) -> Result<Self> {
+        let process_policy = ProcessRuntimePolicy::new(
+            resource_policy,
+            MemoryPoolConfig::default(),
+            StreamRegistryLimits::default(),
+            DeadlinePolicy::default(),
+            ProcessRuntimePolicy::DEFAULT_AFFINITY_CAPACITY,
+            ProcessRuntimePolicy::DEFAULT_AFFINITY_TTL_SECONDS,
+            ProcessRuntimePolicy::DEFAULT_METRICS_SERIALIZATION_BYTES,
+        )
+        .map_err(|err| Error::InvalidOption(format!("resource policy: {err}")))?;
+        Self::new(option.with_process_policy(process_policy))
     }
 
     pub fn new_with_metrics(option: RuntimeOption, metrics: Arc<BackendMetrics>) -> Result<Self> {
-        Self::new_with_policy_and_metrics(option, ResourcePolicy::default(), metrics)
-    }
-
-    pub fn new_with_policy_and_metrics(
-        option: RuntimeOption,
-        policy: ResourcePolicy,
-        metrics: Arc<BackendMetrics>,
-    ) -> Result<Self> {
         validate_runtime_option(&option)?;
-        policy.check_model_bytes(model_source_size(&option.model_source)?)?;
+        option
+            .process_policy
+            .resource_policy()
+            .check_model_bytes(model_source_size(&option.model_source)?)?;
         let mut backend = create_backend(option.backend)?;
         backend.attach_metrics(Arc::clone(&metrics));
         backend.init(&option)?;
@@ -161,7 +168,7 @@ impl Runtime {
             sync_result: None,
             metrics,
             max_in_flight,
-            policy,
+            process_policy: Arc::new(option.process_policy),
         })
     }
 
@@ -189,12 +196,16 @@ impl Runtime {
             sync_result: None,
             metrics,
             max_in_flight,
-            policy: ResourcePolicy::default(),
+            process_policy: Arc::new(ProcessRuntimePolicy::default()),
         }
     }
 
     pub fn policy(&self) -> &ResourcePolicy {
-        &self.policy
+        self.process_policy.resource_policy()
+    }
+
+    pub fn process_policy(&self) -> &ProcessRuntimePolicy {
+        &self.process_policy
     }
 
     pub fn backend_kind(&self) -> BackendKind {

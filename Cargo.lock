@@ -1420,8 +1420,10 @@ dependencies = [
  "dg-tensorrt",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "signal-hook",
  "tiny_http",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1433,6 +1435,7 @@ dependencies = [
  "half",
  "inventory",
  "proptest",
+ "serde",
  "thiserror 1.0.69",
  "tracing",
 ]

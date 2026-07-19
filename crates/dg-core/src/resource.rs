@@ -22,7 +22,10 @@ use crate::{Error, Result};
 /// * `max_tensor_bytes` - 512 MiB
 /// * `max_frame_bytes` - 512 MiB
 /// * `max_model_bytes` - 2 GiB
-#[derive(Clone, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ResourcePolicy {
     pub max_config_bytes: usize,
     pub max_include_depth: usize,

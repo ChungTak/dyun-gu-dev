@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use dg_core::{DataFormat, DataType, DeviceKind, MemoryDomain};
+use dg_core::{DataFormat, DataType, DeviceKind, MemoryDomain, ProcessRuntimePolicy};
 use dg_graph::{ElementMetricsSnapshot, Graph, GraphDiff, GraphReport, GraphSpec, GraphStatus};
 use dg_media::{
     FrameLayout, FrameTransferRequest, HandleKind, MediaFrame, MemoryDtype, MemoryFormat,
@@ -66,15 +66,21 @@ pub enum Command {
         ops_bind: String,
         #[arg(long)]
         ops_disable: bool,
+        #[arg(long)]
+        runtime_limits: Option<PathBuf>,
     },
     #[cfg(feature = "stream")]
     Demo {
         #[arg(long)]
         config: PathBuf,
+        #[arg(long)]
+        runtime_limits: Option<PathBuf>,
     },
     Validate {
         #[arg(long)]
         config: PathBuf,
+        #[arg(long)]
+        runtime_limits: Option<PathBuf>,
     },
     ListElements,
     Schema {
@@ -98,23 +104,31 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             watch,
             ops_bind,
             ops_disable,
+            runtime_limits,
         } => run_graph_with_watch(
             &config,
             format,
             watch,
             if ops_disable { None } else { Some(ops_bind) },
+            load_runtime_limits(runtime_limits.as_deref())?,
         ),
         #[cfg(feature = "stream")]
-        Command::Demo { config } => {
-            let summary = run_demo(&config)?;
+        Command::Demo {
+            config,
+            runtime_limits,
+        } => {
+            let summary = run_demo(&config, load_runtime_limits(runtime_limits.as_deref())?)?;
             println!(
                 "demo completed: {} mock streams, {} frames, planned copy count: {}",
                 summary.streams, summary.frames, summary.planned_copy_count
             );
             Ok(ExitCode::SUCCESS)
         }
-        Command::Validate { config } => {
-            validate_graph(&config)?;
+        Command::Validate {
+            config,
+            runtime_limits,
+        } => {
+            validate_graph(&config, load_runtime_limits(runtime_limits.as_deref())?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::ListElements => {
@@ -128,8 +142,12 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-pub fn run_graph(path: &Path, format: OutputFormat) -> Result<()> {
-    let exit_code = run_graph_with_watch(path, format, false, None)?;
+pub fn run_graph(
+    path: &Path,
+    format: OutputFormat,
+    process_policy: ProcessRuntimePolicy,
+) -> Result<()> {
+    let exit_code = run_graph_with_watch(path, format, false, None, process_policy)?;
     if exit_code == ExitCode::SUCCESS {
         Ok(())
     } else {
@@ -150,13 +168,13 @@ const DEMO_INPUTS: [&str; 2] = ["mock://demo/input-a", "mock://demo/input-b"];
 const DEMO_FRAME_COUNT: usize = 3;
 
 #[cfg(feature = "stream")]
-pub fn run_demo(path: &Path) -> Result<DemoSummary> {
+pub fn run_demo(path: &Path, process_policy: ProcessRuntimePolicy) -> Result<DemoSummary> {
     let spec = load_spec(path)?;
     let publishers = DEMO_INPUTS
         .iter()
         .map(|url| seed_demo_stream(url))
         .collect::<Result<Vec<_>>>()?;
-    let graph = Graph::new(spec).context("build demo graph")?;
+    let graph = Graph::new_with_process_policy(spec, process_policy).context("build demo graph")?;
     let report = graph.run().context("run demo graph")?;
     for publisher in publishers {
         publisher
@@ -256,9 +274,10 @@ fn run_graph_with_watch(
     format: OutputFormat,
     watch: bool,
     ops_bind: Option<String>,
+    process_policy: ProcessRuntimePolicy,
 ) -> Result<ExitCode> {
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+    let shutdown_timeout = process_policy.deadlines().shutdown();
 
     #[allow(clippy::large_enum_variant)]
     enum SupervisorEvent {
@@ -280,7 +299,7 @@ fn run_graph_with_watch(
             return Ok(ExitCode::from(2));
         }
     };
-    let graph = match Graph::new(spec) {
+    let graph = match Graph::new_with_process_policy(spec, process_policy.clone()) {
         Ok(graph) => graph,
         Err(error) => {
             error!(error = %error, "failed to build graph");
@@ -350,7 +369,7 @@ fn run_graph_with_watch(
                     break;
                 };
                 running.request_stop();
-                match running.shutdown(SHUTDOWN_TIMEOUT) {
+                match running.shutdown(shutdown_timeout) {
                     Ok(()) => {
                         let report = running.finish()?;
                         print_report(&report, format)?;
@@ -509,8 +528,10 @@ fn ensure_runtime_connectors() -> Result<()> {
     Ok(())
 }
 
-pub fn validate_graph(path: &Path) -> Result<()> {
-    let _ = load_spec(path)?;
+pub fn validate_graph(path: &Path, process_policy: ProcessRuntimePolicy) -> Result<()> {
+    let spec = load_spec(path)?;
+    let _ = Graph::new_with_process_policy(spec, process_policy)
+        .with_context(|| format!("validate graph config {}", path.display()))?;
     println!("valid: {}", path.display());
     Ok(())
 }
@@ -540,6 +561,34 @@ pub fn schema(kind: Option<&str>) -> Result<()> {
 
 fn load_spec(path: &Path) -> Result<GraphSpec> {
     GraphSpec::load_from_path(path).with_context(|| format!("load graph config {}", path.display()))
+}
+
+fn load_runtime_limits(path: Option<&Path>) -> Result<ProcessRuntimePolicy> {
+    let Some(path) = path else {
+        return Ok(ProcessRuntimePolicy::default());
+    };
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("read runtime limits {}", path.display()))?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let policy: ProcessRuntimePolicy = match ext.as_str() {
+        "json" => serde_json::from_str(&content)
+            .with_context(|| format!("parse runtime limits as JSON {}", path.display()))?,
+        "yaml" | "yml" => serde_yaml_ng::from_str(&content)
+            .with_context(|| format!("parse runtime limits as YAML {}", path.display()))?,
+        "toml" => toml::from_str(&content)
+            .with_context(|| format!("parse runtime limits as TOML {}", path.display()))?,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "unsupported runtime limits format for {}; expected json/yaml/toml",
+                path.display()
+            ))
+        }
+    };
+    Ok(policy)
 }
 
 fn print_report(report: &GraphReport, format: OutputFormat) -> Result<()> {
@@ -701,6 +750,7 @@ fn init_logging(verbose: u8) {
 mod tests {
     use std::fs;
 
+    use dg_core::ProcessRuntimePolicy;
     use dg_graph::{GraphDiff, NodeSpec};
 
     #[cfg(feature = "stream")]
@@ -746,8 +796,9 @@ connections:
     #[test]
     fn commands_run_validate_and_list_elements() {
         let path = temp_config();
-        validate_graph(&path).expect("validate config");
-        run_graph(&path, OutputFormat::Json).expect("run config");
+        let policy = ProcessRuntimePolicy::default();
+        validate_graph(&path, policy.clone()).expect("validate config");
+        run_graph(&path, OutputFormat::Json, policy).expect("run config");
         list_elements().expect("list elements");
         #[cfg(feature = "stream")]
         {
@@ -775,15 +826,17 @@ connections:
     fn documented_multi_algorithm_example_runs() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/mock-multi-algorithm.yaml");
-        validate_graph(&path).expect("validate documented example");
-        run_graph(&path, OutputFormat::Json).expect("run documented example");
+        let policy = ProcessRuntimePolicy::default();
+        validate_graph(&path, policy.clone()).expect("validate documented example");
+        run_graph(&path, OutputFormat::Json, policy).expect("run documented example");
     }
 
     #[test]
     fn multi_stream_demo_runs_and_reports_planned_copy_count() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/mock-multi-stream-demo.yaml");
-        let summary = super::run_demo(&path).expect("run multi-stream demo");
+        let summary =
+            super::run_demo(&path, ProcessRuntimePolicy::default()).expect("run multi-stream demo");
         assert_eq!(summary.streams, 2);
         assert_eq!(summary.frames, 6);
         assert_eq!(summary.planned_copy_count, 0);
@@ -895,7 +948,8 @@ nodes:
       device: cuda_gpu
 "#;
         fs::write(&path, content).expect("write config");
-        let err = validate_graph(&path).expect_err("device should fail preflight");
+        let err = validate_graph(&path, ProcessRuntimePolicy::default())
+            .expect_err("device should fail preflight");
         fs::remove_file(path).expect("remove config");
         assert!(format!("{err:#}").contains("unsupported device: CudaGpu"));
     }

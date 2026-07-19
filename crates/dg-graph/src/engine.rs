@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use dg_core::{Classification, Detection, FaceDetection, OcrText, ResourcePolicy, Tensor, Track};
+use dg_core::{
+    Classification, DeadlinePolicy, Detection, FaceDetection, MemoryPoolConfig, OcrText,
+    ProcessRuntimePolicy, ResourcePolicy, StreamRegistryLimits, Tensor, Track,
+};
 use tracing::{error, info};
 
 use crate::element::{Element, ElementHandle, ElementIo, EosState};
@@ -68,7 +71,7 @@ type SinkMap = BTreeMap<String, Arc<Mutex<crate::element::SinkCollector>>>;
 
 pub struct Graph {
     spec: GraphSpec,
-    policy: Arc<ResourcePolicy>,
+    policy: Arc<ProcessRuntimePolicy>,
 }
 
 /// Lifecycle status of a [`RunningGraph`].
@@ -99,7 +102,7 @@ fn status_from_u8(value: u8) -> GraphStatus {
 /// this handle until [`RunningGraph::finish`] joins them.
 pub struct RunningGraph {
     spec: GraphSpec,
-    policy: Arc<ResourcePolicy>,
+    policy: Arc<ProcessRuntimePolicy>,
     stop: Arc<AtomicBool>,
     workers: BTreeMap<String, LiveNode>,
     routes: RuntimeRoutes,
@@ -111,12 +114,33 @@ pub struct RunningGraph {
 
 impl Graph {
     pub fn new(spec: GraphSpec) -> Result<Self> {
-        Self::new_with_policy(spec, ResourcePolicy::default())
+        Self::new_with_process_policy(spec, ProcessRuntimePolicy::default())
     }
 
-    pub fn new_with_policy(spec: GraphSpec, policy: ResourcePolicy) -> Result<Self> {
+    pub fn new_with_policy(spec: GraphSpec, resource_policy: ResourcePolicy) -> Result<Self> {
+        let process_policy = ProcessRuntimePolicy::new(
+            resource_policy,
+            MemoryPoolConfig::default(),
+            StreamRegistryLimits::default(),
+            DeadlinePolicy::default(),
+            ProcessRuntimePolicy::DEFAULT_AFFINITY_CAPACITY,
+            ProcessRuntimePolicy::DEFAULT_AFFINITY_TTL_SECONDS,
+            ProcessRuntimePolicy::DEFAULT_METRICS_SERIALIZATION_BYTES,
+        )
+        .map_err(|err| Error::Validation {
+            path: "process_policy".to_string(),
+            message: err.to_string(),
+        })?;
+        Self::new_with_process_policy(spec, process_policy)
+    }
+
+    pub fn new_with_process_policy(
+        spec: GraphSpec,
+        process_policy: ProcessRuntimePolicy,
+    ) -> Result<Self> {
         let requested = ResourcePolicy::from(&spec.limits);
-        let effective = policy
+        let effective = process_policy
+            .resource_policy()
             .effective_for(&requested)
             .map_err(|err| Error::Validation {
                 path: "limits".to_string(),
@@ -125,11 +149,15 @@ impl Graph {
         spec.validate_with_policy(&effective)?;
         Ok(Self {
             spec,
-            policy: Arc::new(policy),
+            policy: Arc::new(process_policy),
         })
     }
 
     pub fn policy(&self) -> &ResourcePolicy {
+        &self.policy.resource
+    }
+
+    pub fn process_policy(&self) -> &ProcessRuntimePolicy {
         &self.policy
     }
 
@@ -198,6 +226,7 @@ impl Graph {
         let requested = ResourcePolicy::from(&spec.limits);
         let effective = self
             .policy
+            .resource_policy()
             .effective_for(&requested)
             .map_err(|err| Error::Validation {
                 path: "limits".to_string(),
@@ -234,7 +263,7 @@ pub struct RuntimeGraph {
     nodes: Vec<ExecNode>,
     routes: RuntimeRoutes,
     spec: GraphSpec,
-    policy: Arc<ResourcePolicy>,
+    policy: Arc<ProcessRuntimePolicy>,
     stop: Arc<AtomicBool>,
 }
 
@@ -260,10 +289,10 @@ impl RuntimeGraph {
     fn build(
         spec: GraphSpec,
         inputs: HashMap<String, Vec<Tensor>>,
-        policy: Arc<ResourcePolicy>,
+        policy: Arc<ProcessRuntimePolicy>,
     ) -> Result<(Self, SinkMap, BTreeMap<String, Arc<ElementMetrics>>)> {
         let requested = ResourcePolicy::from(&spec.limits);
-        let effective = Arc::new(policy.effective_for(&requested)?);
+        let effective = Arc::new(policy.resource_policy().effective_for(&requested)?);
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
         for node in &spec.nodes {
@@ -733,6 +762,7 @@ impl RunningGraph {
         let requested = ResourcePolicy::from(&new_spec.limits);
         let effective = self
             .policy
+            .resource_policy()
             .effective_for(&requested)
             .map_err(|err| Error::Validation {
                 path: "limits".to_string(),
@@ -768,6 +798,7 @@ impl RunningGraph {
         let requested = ResourcePolicy::from(&candidate.limits);
         let effective = self
             .policy
+            .resource_policy()
             .effective_for(&requested)
             .map_err(|err| Error::Validation {
                 path: "limits".to_string(),
@@ -1054,15 +1085,15 @@ impl RunningGraph {
     /// Used after a join failure before routes were switched.
     fn respawn_nodes_from_spec(&mut self, spec: &GraphSpec, names: &[String]) -> Result<()> {
         let requested = ResourcePolicy::from(&spec.limits);
-        let effective =
-            Arc::new(
-                self.policy
-                    .effective_for(&requested)
-                    .map_err(|err| Error::Validation {
-                        path: "limits".to_string(),
-                        message: err.to_string(),
-                    })?,
-            );
+        let effective = Arc::new(
+            self.policy
+                .resource_policy()
+                .effective_for(&requested)
+                .map_err(|err| Error::Validation {
+                    path: "limits".to_string(),
+                    message: err.to_string(),
+                })?,
+        );
         let max_packet_starts = spec.execution.queue_capacity.max(1);
         for name in names {
             let Some(node) = spec.nodes.iter().find(|node| node.name == *name) else {

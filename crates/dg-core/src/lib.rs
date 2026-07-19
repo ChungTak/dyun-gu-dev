@@ -16,6 +16,7 @@ mod error;
 mod format;
 mod media;
 mod memory;
+mod process_policy;
 mod quantization;
 mod resource;
 mod shape;
@@ -48,6 +49,7 @@ pub use memory::{
     Allocator, CpuAllocator, ExternalDropGuard, ExternalHandle, MemoryDomain, MemoryPool,
     MemoryPoolConfig, MemoryPoolMetrics,
 };
+pub use process_policy::{DeadlinePolicy, ProcessRuntimePolicy, StreamRegistryLimits};
 pub use quantization::{Quantization, QuantizationScheme};
 pub use resource::ResourcePolicy;
 pub use shape::{Shape, Strides};

@@ -13,7 +13,7 @@
 
 | ID | 等级 | 当前事实 | 目标关闭证据 | 状态 | Owner |
 |---|---|---|---|---|---|
-| R7-001 | P0 | CLI/C bootstrap 未安装可信 process policy，产品路径仍使用 default | Rust/CLI/C 同策略 + init/reload/boundary tests | Open | devin |
+| R7-001 | P0 | CLI/C bootstrap 未安装可信 process policy，产品路径仍使用 default | Rust/CLI/C 同策略 + init/reload/boundary tests | In Progress | devin |
 | R7-002 | P0 | vendor backend 直接读模型，device output policy 未统一 | bounded reader + SDK shim/allocator pre-call tests | Open | devin |
 | R7-003 | P0 | bridge 按 default 检查并复制，较小 effective frame limit 检查过晚 | copy-before-reject 失败基线转绿，copy count=0 | Open | devin |
 | R7-004 | P0 | Cheetah timeout 创建 timer thread，上游无原生 deadline | pinned upstream native timeout/close + thread/fd tests | Open | devin |
