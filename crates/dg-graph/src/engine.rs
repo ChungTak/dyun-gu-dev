@@ -550,6 +550,18 @@ impl RunningGraph {
         (status, root_cause)
     }
 
+    /// Drains collected tensors from all sinks. This can be called while the
+    /// graph is still running to retrieve incremental streaming output.
+    pub fn drain_sinks(&self) -> Vec<Tensor> {
+        let mut tensors = Vec::new();
+        for sink in self.sinks.values() {
+            if let Ok(mut guard) = sink.lock() {
+                tensors.extend(guard.drain_tensors());
+            }
+        }
+        tensors
+    }
+
     /// Idempotently requests a cooperative stop of all workers.
     pub fn request_stop(&self) {
         // Reloading is numeric 5; do not use integer comparison against Draining.
