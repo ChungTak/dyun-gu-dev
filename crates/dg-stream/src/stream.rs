@@ -39,10 +39,10 @@ impl RetryConfig {
 
     /// Computes the backoff for the given attempt number (1-indexed).
     pub fn backoff(&self, attempt: u64) -> std::time::Duration {
-        let base = self.initial_backoff_ms.saturating_mul(
-            self.multiplier
-                .saturating_pow(attempt.saturating_sub(1) as u32),
-        );
+        let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+        let base = self
+            .initial_backoff_ms
+            .saturating_mul(self.multiplier.saturating_pow(exponent));
         let clamped = base.min(self.max_backoff_ms);
         let jitter = if self.jitter_percent == 0 {
             0
@@ -306,4 +306,40 @@ pub trait CoreAdaptersApi: Send + Sync {
     async fn update_tracks(&self, stream_key: StreamKey, tracks: Vec<TrackInfo>) -> Result<()>;
 
     async fn close_stream(&self, stream_key: &StreamKey) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_does_not_wrap_for_attempt_exceeding_u32() {
+        let config = RetryConfig {
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1_000,
+            multiplier: 2,
+            jitter_percent: 0,
+            max_attempts: 0, // unlimited
+        };
+        // With the old `attempt as u32` this would wrap to a tiny exponent.
+        let attempt = (u32::MAX as u64) + 100;
+        let delay = config.backoff(attempt);
+        assert_eq!(delay, Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn backoff_reaches_max_after_expected_doublings() {
+        let config = RetryConfig {
+            initial_backoff_ms: 100,
+            max_backoff_ms: 10_000,
+            multiplier: 2,
+            jitter_percent: 0,
+            max_attempts: 0,
+        };
+        // 100 * 2^7 = 12800 > 10000, so attempt 8 should be capped.
+        assert_eq!(config.backoff(1), Duration::from_millis(100));
+        assert_eq!(config.backoff(7), Duration::from_millis(6_400));
+        assert_eq!(config.backoff(8), Duration::from_millis(10_000));
+        assert_eq!(config.backoff(100), Duration::from_millis(10_000));
+    }
 }
