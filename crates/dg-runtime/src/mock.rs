@@ -278,7 +278,7 @@ impl InferBackend for MockBackend {
     }
 
     fn cancel(&mut self) -> Result<CancelReport> {
-        let requested = self.pending.len() as u64;
+        let requested = u64::try_from(self.pending.len()).unwrap_or(u64::MAX);
         self.pending.clear();
         Ok(CancelReport {
             requested,
