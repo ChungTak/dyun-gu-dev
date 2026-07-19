@@ -1,5 +1,11 @@
 # 006 执行状态 — **In Progress**
 
+> **后续交接（2026-07-19）**：本文件保留 Plan 6 当时的代码路径与证据状态，不据此宣告 product-ready。
+> 未完成项已按当前代码重新审计并转入
+> [Plan 7 执行状态](../007_core_modules_product_ready_closure_plan/EXECUTION_STATUS.md) 和
+> [Plan 6 差距矩阵](../007_core_modules_product_ready_closure_plan/PLAN6_GAP_MATRIX.md)；Plan 6 acceptance
+> 继续保持 Pending。
+
 ## 审计基线
 
 | Field | Value |

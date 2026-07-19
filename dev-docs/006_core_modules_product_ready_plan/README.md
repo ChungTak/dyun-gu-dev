@@ -1,5 +1,11 @@
 # dyun-gu-dev Plan 6：核心模块 Product-Ready
 
+> **后续交接（2026-07-19）**：Plan 6 的代码路径状态保留为历史记录，但最终 acceptance 仍为 Pending。
+> 当前基线复核、未兑现合同和下一轮实施入口见
+> [Plan 7：核心模块 Product-Ready 闭环](../007_core_modules_product_ready_closure_plan/README.md)；
+> 逐项映射见
+> [PLAN6_GAP_MATRIX.md](../007_core_modules_product_ready_closure_plan/PLAN6_GAP_MATRIX.md)。
+
 ## 1. 定位
 
 本计划在一期功能与 Plan 5 软件路径完成后，对产品核心链路做横向加固：
@@ -93,4 +99,3 @@ OpenVINO、TensorRT、RKNN 和 Sophon 本轮只纳入统一 runtime 合同与真
 - [ ] pool 指标完整聚合，metrics、affinity、cache、sink 和队列不会无界增长。
 - [ ] PR 门禁、nightly 2h、sanitizer/Miri/fuzz 和 release 24h soak 证据完整。
 - [ ] C ABI v2 header/library/snapshot/examples 与 GraphSpec schema 来自同一候选 commit。
-
