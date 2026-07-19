@@ -308,6 +308,18 @@ impl GraphSpec {
         format: GraphFormat,
         policy: &ResourcePolicy,
     ) -> Result<Self> {
+        // Reject oversized inputs before parsing so a malicious caller cannot
+        // force serde to allocate a huge GraphSpec on a small config budget.
+        if input.len() > policy.max_config_bytes {
+            return Err(Error::Validation {
+                path: "limits.max_config_bytes".to_string(),
+                message: format!(
+                    "config string size {} exceeds maximum {}",
+                    input.len(),
+                    policy.max_config_bytes
+                ),
+            });
+        }
         let spec: GraphSpec = match format {
             GraphFormat::Yaml => serde_yaml_ng::from_str(input)?,
             GraphFormat::Json => serde_json::from_str(input)?,

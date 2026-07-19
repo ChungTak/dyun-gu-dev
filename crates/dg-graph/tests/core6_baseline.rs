@@ -34,6 +34,19 @@ fn from_str_with_format_enforces_max_config_bytes() {
 }
 
 #[test]
+fn from_str_with_format_rejects_oversized_input_before_parse() {
+    // The default max_config_bytes is 8 MiB; a 9 MiB string must be rejected
+    // before serde is asked to parse it.
+    let huge = "x".repeat(9 * 1024 * 1024);
+    let result = GraphSpec::from_str_with_format(&huge, GraphFormat::Yaml);
+    let err = result.expect_err("oversized input should be rejected before parse");
+    assert!(
+        err.to_string().contains("config string size"),
+        "error should mention config string size: {err}"
+    );
+}
+
+#[test]
 fn load_from_path_enforces_configured_include_depth() {
     let dir = std::env::temp_dir().join(format!("dg-core6-include-depth-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
