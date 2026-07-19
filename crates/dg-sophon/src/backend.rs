@@ -151,19 +151,9 @@ impl SophonBackend {
             .ok_or_else(|| Error::BackendUnavailable("Sophon network not loaded".to_string()))
     }
 
-    fn load_model(source: &ModelSource) -> Result<ModelBuffer> {
-        match source {
-            ModelSource::File(path) => {
-                let data = std::fs::read(path).map_err(|err| {
-                    Error::BackendUnavailable(format!(
-                        "failed to read Sophon bmodel {}: {err}",
-                        path.display()
-                    ))
-                })?;
-                ModelBuffer::new(data)
-            }
-            ModelSource::Bytes(bytes) => ModelBuffer::new(bytes.clone()),
-        }
+    fn load_model(source: &ModelSource, max_model_bytes: usize) -> Result<ModelBuffer> {
+        let data = source.load_bounded(max_model_bytes)?.into_owned();
+        ModelBuffer::new(data)
     }
 
     /// Queries the loaded bmodel for its first network and records the static
@@ -295,7 +285,10 @@ impl InferBackend for SophonBackend {
         validate_deploy_mode(sophon.deploy_mode, compiled_deploy_mode())?;
         self.options = sophon.clone();
 
-        let model = Self::load_model(&option.model_source)?;
+        let model = Self::load_model(
+            &option.model_source,
+            option.process_policy.resource_policy().max_model_bytes,
+        )?;
 
         let device_id = i32::try_from(self.options.device_id.unwrap_or(0))
             .map_err(|_| Error::InvalidOption("Sophon device id overflows i32".to_string()))?;

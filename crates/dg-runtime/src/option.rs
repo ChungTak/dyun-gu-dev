@@ -1,3 +1,6 @@
+use std::borrow::Cow;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 
 pub use dg_core::CoreSelection;
@@ -12,6 +15,48 @@ use crate::{mock::MockOptions, Error, Result};
 pub enum ModelSource {
     File(PathBuf),
     Bytes(Vec<u8>),
+}
+
+impl ModelSource {
+    /// Reads the model into memory while enforcing a hard byte limit.
+    ///
+    /// For files, at most `max_bytes + 1` bytes are read; if the content
+    /// exceeds the limit a typed `Config` error is returned. The extra byte
+    /// guarantees that the reader detects oversize inputs without needing a
+    /// second pass.
+    pub fn load_bounded(&self, max_bytes: usize) -> Result<Cow<'_, [u8]>> {
+        match self {
+            ModelSource::Bytes(bytes) => {
+                if bytes.len() > max_bytes {
+                    return Err(Error::Core(dg_core::Error::Config(format!(
+                        "model bytes {} exceeds limit {}",
+                        bytes.len(),
+                        max_bytes
+                    ))));
+                }
+                Ok(Cow::Borrowed(bytes))
+            }
+            ModelSource::File(path) => {
+                let file = File::open(path)?;
+                let limit = u64::try_from(max_bytes)
+                    .map(|limit| limit.saturating_add(1))
+                    .map_err(|_| {
+                        Error::Io("model byte limit exceeds u64 representable range".to_string())
+                    })?;
+                let mut reader = file.take(limit);
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf)?;
+                if buf.len() > max_bytes {
+                    return Err(Error::Core(dg_core::Error::Config(format!(
+                        "model file {} exceeds limit {}",
+                        path.display(),
+                        max_bytes
+                    ))));
+                }
+                Ok(Cow::Owned(buf))
+            }
+        }
+    }
 }
 
 /// Backend-agnostic model representation.
