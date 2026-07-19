@@ -18,8 +18,8 @@
 | R7-003 | P0 | bridge 按 default 检查并复制，较小 effective frame limit 检查过晚 | copy-before-reject 失败基线转绿，copy count=0 | In Progress | devin |
 | R7-004 | P0 | Cheetah timeout 创建 timer thread，上游无原生 deadline | pinned upstream native timeout/close + thread/fd tests | Open | devin |
 | R7-005 | P1 | vendor sync/cancel capability 与真实可中断性未统一验收 | common contract + capability/support matrix | In Progress | devin |
-| R7-006 | P1 | 多个 algorithm 数据错误仍可终止整个 graph | frame-local continuation + fatal classification tests | Open | devin |
-| R7-007 | P1 | pool/affinity/registry/resource/shutdown metrics 与 readiness 不完整 | ops golden、slow scrape、state matrix | Open | devin |
+| R7-006 | P1 | 多个 algorithm 数据错误仍可终止整个 graph | frame-local continuation + fatal classification tests | In Progress | devin |
+| R7-007 | P1 | pool/affinity/registry/resource/shutdown metrics 与 readiness 不完整 | ops golden、slow scrape、state matrix | In Progress | devin |
 | R7-008 | P0 | C ABI view 未接线、runtime options 空、制品 ABI 未验证 | C11/C++17 + symbol/SONAME/view/fuzz/sanitizer | Open | devin |
 | R7-009 | P0 | 最近 nightly `reload-transitions` fuzz 失败且当前 SHA 未重跑 | minimized corpus + fix + candidate nightly green | Open | devin |
 | R7-010 | P0 | 无 Miri、ASan/LSan/TSan 和并发模型 release gate | workflow artifacts 无 report | Open | devin |

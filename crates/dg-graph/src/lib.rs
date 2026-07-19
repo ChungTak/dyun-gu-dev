@@ -22,7 +22,7 @@ mod spec;
 
 pub use element::{CreatedElement, Element, ElementHandle, ElementIo, PortSchema, SinkCollector};
 pub use engine::{watch, Graph, GraphDiff, GraphReport, GraphStatus, RunningGraph, WatchHandle};
-pub use error::{Error, Result};
+pub use error::{Error, ErrorScope, Result};
 pub use fault::{
     arm as arm_hot_update_fault, clear as clear_hot_update_fault,
     exclusive as exclusive_hot_update_fault, HotUpdateFaultGuard, HotUpdateFaultPoint,

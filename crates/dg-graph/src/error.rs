@@ -4,6 +4,29 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Scope of an error within a graph execution.
+///
+/// The scope determines whether the graph should drop a single frame, retry
+/// or reconnect a stream, fail a single node, or fail the entire graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ErrorScope {
+    /// Drop the current frame and continue the same stream.
+    FrameLocal,
+    /// Close the old endpoint and reconnect within budget.
+    StreamLocal,
+    /// Stop the failing node and fail-closed the graph.
+    NodeFatal,
+    /// Save the first root cause and stop all workers.
+    GraphFatal,
+}
+
+impl ErrorScope {
+    /// Returns true if this scope should move the graph to Failed.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, ErrorScope::NodeFatal | ErrorScope::GraphFatal)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("configuration error: {0}")]
@@ -65,4 +88,23 @@ pub enum Error {
     RuntimeBackend(#[from] dg_runtime::Error),
     #[error(transparent)]
     Core(#[from] dg_core::Error),
+}
+
+impl Error {
+    /// Returns the error scope used to decide whether the graph should drop a
+    /// frame, reconnect a stream, fail the node, or fail the entire graph.
+    pub fn scope(&self) -> ErrorScope {
+        match self {
+            // Cancellation / not-running are frame-local control signals; they do
+            // not imply any persistent failure.
+            Error::Cancelled | Error::NotRunning => ErrorScope::FrameLocal,
+            // Invariant violations corrupt shared graph state and are always
+            // graph-fatal. Worker panics are reported as Invariant.
+            Error::Invariant(_) => ErrorScope::GraphFatal,
+            // All other errors stop the failing node and fail-closed the graph.
+            // This includes config/model/capability/resource errors and
+            // element-level runtime failures.
+            _ => ErrorScope::NodeFatal,
+        }
+    }
 }

@@ -17,7 +17,7 @@ use dg_core::{
 use tracing::{error, info};
 
 use crate::element::{Element, ElementHandle, ElementIo, EosState};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorScope, Result};
 use crate::metrics::{ElementMetrics, ElementMetricsSnapshot, MetricsSink};
 use crate::pipe::{DataPipe, PipeReceiver, PipeSender};
 use crate::registry::create_element;
@@ -1423,14 +1423,12 @@ fn collect_report(
 }
 
 fn is_cancellation(error: &Error) -> bool {
-    matches!(error, Error::NotRunning)
+    matches!(error.scope(), ErrorScope::FrameLocal)
 }
 
 fn select_error(current: Option<Error>, candidate: Error) -> Option<Error> {
     match current {
-        Some(existing) if !is_cancellation(&existing) || is_cancellation(&candidate) => {
-            Some(existing)
-        }
+        Some(existing) if existing.scope() >= candidate.scope() => Some(existing),
         _ => Some(candidate),
     }
 }
@@ -1440,7 +1438,7 @@ fn run_element(element: Box<dyn Element>, io: ElementIo, stop: &Arc<AtomicBool>)
     match catch_unwind(AssertUnwindSafe(|| element.run(io))) {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => {
-            if !is_cancellation(&err) {
+            if err.scope().is_fatal() {
                 stop.store(true, Ordering::Relaxed);
             }
             Err(err)
@@ -1861,5 +1859,34 @@ mod tests {
     fn cancellation_is_only_the_not_running_error() {
         assert!(is_cancellation(&Error::NotRunning));
         assert!(!is_cancellation(&root_cause()));
+    }
+
+    #[test]
+    fn error_scope_classifies_invariant_as_graph_fatal() {
+        assert_eq!(
+            Error::Invariant("route corrupted".to_string()).scope(),
+            ErrorScope::GraphFatal
+        );
+    }
+
+    #[test]
+    fn error_scope_classifies_node_errors_as_node_fatal() {
+        assert_eq!(root_cause().scope(), ErrorScope::NodeFatal);
+        assert_eq!(
+            Error::ResourceLimit {
+                resource: "frame_bytes".to_string(),
+                requested: 10,
+                limit: 8,
+            }
+            .scope(),
+            ErrorScope::NodeFatal
+        );
+    }
+
+    #[test]
+    fn error_selection_prefers_fatal_over_cancellation() {
+        let fatal = Error::Invariant("queue corrupted".to_string());
+        let selected = select_error(Some(Error::NotRunning), fatal);
+        assert!(matches!(selected, Some(Error::Invariant(_))));
     }
 }

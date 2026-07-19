@@ -186,7 +186,15 @@ fn readyz_response(state: &Arc<RwLock<OpsState>>) -> Response<std::io::Cursor<Ve
 }
 
 fn is_ready(state: &Arc<RwLock<OpsState>>) -> bool {
-    state.read().map(|s| s.ready).unwrap_or(false)
+    state
+        .read()
+        .map(|s| {
+            s.ready
+                && s.status == GraphStatus::Running
+                && s.root_cause.is_none()
+                && s.supervisor_healthy
+        })
+        .unwrap_or(false)
 }
 
 fn read_ready_reason(state: &Arc<RwLock<OpsState>>) -> String {
@@ -562,6 +570,14 @@ mod tests {
         let state = sample_state();
         let response = readyz_response(&state);
         assert_eq!(response.status_code(), StatusCode(200));
+    }
+
+    #[test]
+    fn readyz_returns_503_when_graph_not_running() {
+        let state = sample_state();
+        state.write().unwrap().status = GraphStatus::Stopped;
+        let response = readyz_response(&state);
+        assert_eq!(response.status_code(), StatusCode(503));
     }
 
     #[test]
