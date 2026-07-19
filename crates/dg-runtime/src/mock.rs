@@ -5,6 +5,12 @@ use dg_core::{DataFormat, DataType, Shape, Tensor, TypeCode};
 use serde::Deserialize;
 use tracing::trace;
 
+/// Maximum artificial delay the mock backend will honor. This prevents a
+/// caller from forcing an unbounded `thread::sleep` or an `Instant`
+/// overflow by passing a huge `delay_ms` value.
+const MAX_MOCK_DELAY_MS: u64 = 3_600_000;
+const MAX_MOCK_DELAY: Duration = Duration::from_millis(MAX_MOCK_DELAY_MS);
+
 use crate::{
     backend::{BackendDescriptor, BackendKind, CancelReport, InferBackend},
     capabilities::{supports_deployment, supports_device, supports_precision},
@@ -237,8 +243,11 @@ impl InferBackend for MockBackend {
                 "mock backend is not configured for async operation".to_string(),
             ));
         };
+        let delay = std::cmp::min(delay, MAX_MOCK_DELAY);
         let now = Instant::now();
-        let finish = now + delay;
+        let finish = now
+            .checked_add(delay)
+            .ok_or_else(|| Error::Backend("mock delay exceeds representable time".to_string()))?;
         self.pending.push(DelayedInference {
             sequence,
             submitted: now,
@@ -357,13 +366,13 @@ fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
         output_infos: vec![TensorInfo::new(output_shape, output_dtype).with_layout(layout)],
         echo_inputs: params.echo_inputs.unwrap_or(true),
         fill_value: params.fill_value.unwrap_or(0),
-        delay: params.delay_ms.map(Duration::from_millis),
+        delay: params.delay_ms.map(parse_delay_ms).transpose()?,
         delays: params
             .delays_ms
             .unwrap_or_default()
             .into_iter()
-            .map(Duration::from_millis)
-            .collect(),
+            .map(parse_delay_ms)
+            .collect::<Result<Vec<_>>>()?,
         max_in_flight: params.max_in_flight.unwrap_or(1).clamp(1, 64),
     });
     let model_source = config.model().map_or_else(
@@ -371,6 +380,15 @@ fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
         |path| ModelSource::File(path.to_path_buf()),
     );
     Ok(config.into_runtime_option(BackendKind::Mock, model_source, options))
+}
+
+fn parse_delay_ms(ms: u64) -> Result<Duration> {
+    if ms > MAX_MOCK_DELAY_MS {
+        return Err(Error::InvalidOption(format!(
+            "mock delay_ms {ms} exceeds maximum {MAX_MOCK_DELAY_MS}"
+        )));
+    }
+    Ok(Duration::from_millis(ms))
 }
 
 fn parse_dtype(value: &str) -> Result<DataType> {
