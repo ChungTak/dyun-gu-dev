@@ -803,6 +803,14 @@ impl GraphSpec {
                 path: format!("nodes[{}].params", node.name),
                 message: err.to_string(),
             })?;
+            if node.kind == "inference" {
+                crate::inference::check_model_bytes(&node.params, policy).map_err(|err| {
+                    Error::Validation {
+                        path: format!("nodes[{}].params", node.name),
+                        message: err.to_string(),
+                    }
+                })?;
+            }
         }
 
         let mut node_kinds = BTreeMap::new();

@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
-use dg_core::{DataType, DeployMode, DeviceKind, Shape, TypeCode};
+use dg_core::{DataType, DeployMode, DeviceKind, ResourcePolicy, Shape, TypeCode};
 use dg_runtime::{
-    configure_backend, validate_runtime_option, BackendConfig, CoreSelection, InferPoll, Runtime,
-    RuntimeOption,
+    configure_backend, model_source_size, validate_runtime_option, BackendConfig, CoreSelection,
+    InferPoll, Runtime, RuntimeOption,
 };
 use dg_scheduler::{
     InstancePool, Lease, Placement, PooledLease, Request, Scheduler, SchedulingPolicy, Topology,
@@ -550,6 +550,16 @@ fn prepare_inference(value: Value) -> Result<InferencePlan> {
         instances: params.instances,
         policy: parse_schedule(&params.schedule)?,
     })
+}
+
+/// Validates that the model source for an `inference` node fits within the
+/// provided `ResourcePolicy`. This lets `GraphSpec::validate_with_policy` fail
+/// fast on oversized model files before `Runtime::new` tries to load them.
+pub(crate) fn check_model_bytes(params: &Value, policy: &ResourcePolicy) -> Result<()> {
+    let plan = prepare_inference(params.clone())?;
+    let size = model_source_size(&plan.option.model_source)?;
+    policy.check_model_bytes(size)?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

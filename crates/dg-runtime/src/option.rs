@@ -130,6 +130,10 @@ impl BackendConfig {
         &self.options
     }
 
+    pub fn model(&self) -> Option<&std::path::Path> {
+        self.model.as_deref()
+    }
+
     pub fn parse_options<T: DeserializeOwned>(&self, backend: &str) -> Result<T> {
         let value = if self.options.is_null() {
             Value::Object(serde_json::Map::new())
