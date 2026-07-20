@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{mpsc, Arc, RwLock};
@@ -563,12 +564,36 @@ fn load_spec(path: &Path) -> Result<GraphSpec> {
     GraphSpec::load_from_path(path).with_context(|| format!("load graph config {}", path.display()))
 }
 
+/// Hard ceiling on the runtime-limits file size. Runtime limits are a small
+/// JSON/YAML/TOML document; a multi-megabyte file is either malformed or a
+/// denial-of-service attempt.
+const MAX_RUNTIME_LIMITS_BYTES: usize = 1024 * 1024;
+
 fn load_runtime_limits(path: Option<&Path>) -> Result<ProcessRuntimePolicy> {
     let Some(path) = path else {
         return Ok(ProcessRuntimePolicy::default());
     };
-    let content = std::fs::read_to_string(path)
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open runtime limits {}", path.display()))?;
+    let mut content = String::new();
+    content
+        .try_reserve_exact(MAX_RUNTIME_LIMITS_BYTES.saturating_add(1))
+        .with_context(|| {
+            format!(
+                "failed to allocate runtime limits read buffer for {}",
+                path.display()
+            )
+        })?;
+    file.take(MAX_RUNTIME_LIMITS_BYTES.saturating_add(1) as u64)
+        .read_to_string(&mut content)
         .with_context(|| format!("read runtime limits {}", path.display()))?;
+    if content.len() > MAX_RUNTIME_LIMITS_BYTES {
+        return Err(anyhow::anyhow!(
+            "runtime limits file {} exceeds {} bytes",
+            path.display(),
+            MAX_RUNTIME_LIMITS_BYTES
+        ));
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
