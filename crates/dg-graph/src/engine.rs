@@ -513,9 +513,11 @@ impl RuntimeGraph {
         let root_cause = Arc::new(Mutex::new(None));
         for node_spec in &self.spec.nodes {
             let exec_nodes = grouped.remove(&node_spec.name).ok_or_else(|| {
+                abort_spawns(&self.stop, &mut workers);
                 Error::Runtime(format!("missing runtime node {}", node_spec.name))
             })?;
             let first = exec_nodes.first().ok_or_else(|| {
+                abort_spawns(&self.stop, &mut workers);
                 Error::Runtime(format!("node {} has no executable workers", node_spec.name))
             })?;
             let control = first.io.control.clone();
@@ -523,12 +525,20 @@ impl RuntimeGraph {
             for node in exec_nodes {
                 let stop = self.stop.clone();
                 let name = node_spec.name.clone();
-                let handle = thread::Builder::new()
+                let handle = match thread::Builder::new()
                     .name(name.clone())
                     .spawn(move || run_element(node.element, node.io, &stop))
-                    .map_err(|err| {
-                        Error::Runtime(format!("failed to spawn worker for node {name}: {err}"))
-                    })?;
+                {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        control.stop.store(true, Ordering::Relaxed);
+                        let _ = join_workers(&mut handles, true, &name);
+                        abort_spawns(&self.stop, &mut workers);
+                        return Err(Error::Runtime(format!(
+                            "failed to spawn worker for node {name}: {err}"
+                        )));
+                    }
+                };
                 handles.push(handle);
             }
             workers.insert(
@@ -540,6 +550,7 @@ impl RuntimeGraph {
             );
         }
         if !grouped.is_empty() {
+            abort_spawns(&self.stop, &mut workers);
             return Err(Error::Runtime("runtime contains unknown nodes".to_string()));
         }
         let running = RunningGraph {
@@ -1053,14 +1064,20 @@ impl RunningGraph {
                 };
                 let stop = self.stop.clone();
                 let node_name = node.name.clone();
-                let handle = thread::Builder::new()
+                let handle = match thread::Builder::new()
                     .name(node_name.clone())
                     .spawn(move || run_element(element, io, &stop))
-                    .map_err(|err| {
-                        Error::Runtime(format!(
+                {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        control.stop.store(true, Ordering::Relaxed);
+                        let _ = join_workers(&mut handles, true, &node_name);
+                        abort_spawns(&self.stop, &mut self.workers);
+                        return Err(Error::Runtime(format!(
                             "failed to spawn worker for node {node_name}: {err}"
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 handles.push(handle);
             }
             self.workers.insert(
@@ -1152,14 +1169,20 @@ impl RunningGraph {
                 };
                 let stop = self.stop.clone();
                 let node_name = node.name.clone();
-                let handle = thread::Builder::new()
+                let handle = match thread::Builder::new()
                     .name(node_name.clone())
                     .spawn(move || run_element(element, io, &stop))
-                    .map_err(|err| {
-                        Error::Runtime(format!(
+                {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        control.stop.store(true, Ordering::Relaxed);
+                        let _ = join_workers(&mut handles, true, &node_name);
+                        abort_spawns(&self.stop, &mut self.workers);
+                        return Err(Error::Runtime(format!(
                             "failed to spawn worker for node {node_name}: {err}"
-                        ))
-                    })?;
+                        )));
+                    }
+                };
                 handles.push(handle);
             }
             self.workers.insert(
@@ -1335,6 +1358,16 @@ impl PreparedNode {
             elements.push(created.element);
         }
         Ok(Self { handle, elements })
+    }
+}
+
+/// Signals all workers to stop and joins any that have already been spawned.
+/// Used when worker spawn fails so we do not leave detached threads running.
+fn abort_spawns(stop: &Arc<AtomicBool>, workers: &mut BTreeMap<String, LiveNode>) {
+    stop.store(true, Ordering::Relaxed);
+    for (name, node) in workers.iter_mut() {
+        node.control.stop.store(true, Ordering::Relaxed);
+        let _ = join_workers(&mut node.workers, true, name);
     }
 }
 
