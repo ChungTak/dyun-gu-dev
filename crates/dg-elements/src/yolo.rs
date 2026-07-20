@@ -291,7 +291,10 @@ fn preprocess_tensor(
             "input tensor size does not match its descriptor".to_string(),
         ));
     }
-    let mut hwc = vec![0.0; expected];
+    let mut hwc = Vec::new();
+    hwc.try_reserve_exact(expected)
+        .map_err(|_| Error::Runtime("yolo preprocess hwc allocation failed".to_string()))?;
+    hwc.resize(expected, 0.0);
     for y in 0..source_height {
         for x in 0..source_width {
             for channel in 0..channels {
@@ -420,22 +423,34 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
     }
     let bytes = tensor.buffer().read_bytes()?;
     match tensor.desc().dtype() {
-        DataType::U8 => Ok(bytes.into_iter().map(f32::from).collect()),
+        DataType::U8 => {
+            let mut values = Vec::new();
+            values.try_reserve_exact(bytes.len()).map_err(|_| {
+                Error::Runtime("yolo tensor_values u8 allocation failed".to_string())
+            })?;
+            for byte in bytes {
+                values.push(f32::from(byte));
+            }
+            Ok(values)
+        }
         DataType::F32 => {
-            let chunks = bytes.chunks_exact(std::mem::size_of::<f32>());
-            if !chunks.remainder().is_empty() {
+            let elem_bytes = std::mem::size_of::<f32>();
+            if bytes.len() % elem_bytes != 0 {
                 return Err(Error::Runtime(
                     "f32 tensor contains a partial element".to_string(),
                 ));
             }
-            let values: Vec<f32> = chunks
-                .map(|chunk| {
-                    let array: [u8; 4] = chunk
-                        .try_into()
-                        .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
-                    Ok(f32::from_ne_bytes(array))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let count = bytes.len() / elem_bytes;
+            let mut values = Vec::new();
+            values.try_reserve_exact(count).map_err(|_| {
+                Error::Runtime("yolo tensor_values f32 allocation failed".to_string())
+            })?;
+            for chunk in bytes.chunks_exact(elem_bytes) {
+                let array: [u8; 4] = chunk
+                    .try_into()
+                    .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
+                values.push(f32::from_ne_bytes(array));
+            }
             if !values.iter().all(|value| value.is_finite()) {
                 return Err(Error::Config(
                     "tensor contains non-finite floating point values".to_string(),
