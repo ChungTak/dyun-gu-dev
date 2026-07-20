@@ -1029,26 +1029,32 @@ fn parse_ppocr_det(node: &NodeSpec) -> Result<f32> {
 fn parse_ppocr_rec(node: &NodeSpec) -> Result<(Vec<char>, usize)> {
     let params = params_object(node)?;
     reject_unknown_fields(params, PPOCR_REC_FIELDS)?;
-    let alphabet = match params.get("alphabet") {
-        None => "0123456789".chars().collect::<Vec<_>>(),
+    let alphabet_str = match params.get("alphabet") {
+        None => "0123456789",
         Some(value) => value
             .as_str()
-            .ok_or_else(|| Error::Config("field alphabet must be a string".to_string()))?
-            .chars()
-            .collect::<Vec<_>>(),
+            .ok_or_else(|| Error::Config("field alphabet must be a string".to_string()))?,
     };
-    if alphabet.is_empty() {
+    let char_count = alphabet_str.chars().count();
+    if char_count == 0 {
         return Err(Error::Config(
             "field alphabet must not be empty".to_string(),
         ));
     }
-    if alphabet.len() > MAX_ALPHABET_LEN {
+    if char_count > MAX_ALPHABET_LEN {
         return Err(Error::ResourceLimit {
             resource: "ppocr_rec alphabet length".to_string(),
-            requested: alphabet.len(),
+            requested: char_count,
             limit: MAX_ALPHABET_LEN,
         });
     }
+    let mut alphabet = Vec::new();
+    alphabet.try_reserve_exact(char_count).map_err(|_| {
+        Error::Runtime(format!(
+            "ppocr_rec alphabet allocation failed for {char_count} chars"
+        ))
+    })?;
+    alphabet.extend(alphabet_str.chars());
     let blank = read_usize(params, "blank_index", alphabet.len())?;
     if blank > alphabet.len() {
         return Err(Error::Config(format!(
