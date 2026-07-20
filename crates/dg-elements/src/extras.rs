@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, VecDeque};
 
 use dg_core::{
     BBox, Classification, DataFormat, DataType, Detection, DeviceKind, Error as CoreError,
@@ -554,7 +555,8 @@ fn decode_retinaface(
     }
     let width_f = usize_f32(width)?;
     let height_f = usize_f32(height)?;
-    let mut candidates = Vec::new();
+    let candidate_capacity = MAX_NMS_CANDIDATES.min(values.len() / ATTRIBUTES);
+    let mut heap: BinaryHeap<Reverse<ByFaceScore>> = BinaryHeap::with_capacity(candidate_capacity);
     for (index, row) in values.chunks_exact(ATTRIBUTES).enumerate() {
         if !row.iter().all(|value| value.is_finite()) {
             continue;
@@ -570,6 +572,15 @@ fn decode_retinaface(
         let score = crate::math::sigmoid(row[4]);
         if score < score_threshold {
             continue;
+        }
+        if heap.len() == MAX_NMS_CANDIDATES {
+            let lowest = heap.peek().ok_or_else(|| {
+                Error::Runtime("retinaface candidate heap unexpectedly empty".to_string())
+            })?;
+            if score.total_cmp(&lowest.0.score()) != Ordering::Greater {
+                continue;
+            }
+            heap.pop();
         }
         let center_x = (anchor.x + row[0] * 0.1 * anchor.w).clamp(0.0, 1.0) * width_f;
         let center_y = (anchor.y + row[1] * 0.1 * anchor.h).clamp(0.0, 1.0) * height_f;
@@ -588,17 +599,27 @@ fn decode_retinaface(
                 y: (anchor.y + point[1] * 0.1 * anchor.h).clamp(0.0, 1.0) * height_f,
             });
         }
-        candidates.push(FaceDetection {
+        heap.push(Reverse(ByFaceScore(FaceDetection {
             bbox,
             score,
             landmarks,
-        });
+        })));
     }
-    candidates.sort_by(|left, right| right.score.total_cmp(&left.score));
-    if candidates.len() > MAX_NMS_CANDIDATES {
-        candidates.truncate(MAX_NMS_CANDIDATES);
+
+    let sorted = heap.into_sorted_vec();
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(sorted.len())
+        .map_err(|_| Error::Runtime("retinaface candidate allocation failed".to_string()))?;
+    for Reverse(ByFaceScore(detection)) in sorted {
+        candidates.push(detection);
     }
+    // `into_sorted_vec` on a max-heap of `Reverse<ByFaceScore>` returns the
+    // highest-score detections first, which is what the greedy NMS below expects.
     let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| Error::Runtime("retinaface selected allocation failed".to_string()))?;
     for candidate in candidates {
         if selected
             .iter()
@@ -608,6 +629,36 @@ fn decode_retinaface(
         }
     }
     Ok(selected)
+}
+
+/// A score-only view of a face detection so the top-k heap does not need to
+/// keep every candidate in memory.
+struct ByFaceScore(FaceDetection);
+
+impl ByFaceScore {
+    fn score(&self) -> f32 {
+        self.0.score
+    }
+}
+
+impl PartialEq for ByFaceScore {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.score.to_bits() == other.0.score.to_bits()
+    }
+}
+
+impl Eq for ByFaceScore {}
+
+impl PartialOrd for ByFaceScore {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ByFaceScore {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.score.total_cmp(&other.0.score)
+    }
 }
 
 pub fn ctc_greedy_decode(
