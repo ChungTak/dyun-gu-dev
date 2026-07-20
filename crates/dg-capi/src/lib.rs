@@ -2305,7 +2305,15 @@ pub unsafe extern "C" fn dg_backend_create(
         ResourcePolicy::default()
             .check_model_bytes(model_length)
             .map_err(|error| (map_core_error(&error), error.to_string()))?;
-        let model = unsafe { bytes(model_data, model_length)? }.to_vec();
+        let model_bytes = unsafe { bytes(model_data, model_length)? };
+        let mut model = Vec::new();
+        model.try_reserve_exact(model_bytes.len()).map_err(|_| {
+            (
+                DgStatus::RuntimeError,
+                format!("model allocation failed for {} bytes", model_bytes.len()),
+            )
+        })?;
+        model.extend_from_slice(model_bytes);
         let options = if options_json.is_null() {
             Value::Object(Map::new())
         } else {
