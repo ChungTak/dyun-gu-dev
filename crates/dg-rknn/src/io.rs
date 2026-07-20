@@ -119,8 +119,7 @@ pub fn strides_from_w_stride(
 pub fn padded_byte_len(shape: &Shape, strides: &Strides, elem_bytes: usize) -> Result<usize> {
     let (dims, stride_values) = validated_layout(shape, strides)?;
     let last_offset: usize =
-        dims
-            .iter()
+        dims.iter()
             .zip(stride_values)
             .try_fold(0usize, |acc, (dim, stride)| -> Result<usize> {
                 let dim_minus_one = dim.checked_sub(1).ok_or_else(|| {
@@ -250,10 +249,9 @@ fn for_each_run(
     let mut index = vec![0usize; outer.len()];
     let mut contig = 0usize;
     loop {
-        let pad = index
-            .iter()
-            .zip(stride_values)
-            .try_fold(0usize, |acc, (i, stride)| -> Result<usize> {
+        let pad = index.iter().zip(stride_values).try_fold(
+            0usize,
+            |acc, (i, stride)| -> Result<usize> {
                 let term = i
                     .checked_mul(*stride)
                     .and_then(|p| p.checked_mul(elem_bytes))
@@ -263,7 +261,8 @@ fn for_each_run(
                 acc.checked_add(term).ok_or_else(|| {
                     Error::Backend("for_each_run: padded offset accumulation overflow".to_string())
                 })
-            })?;
+            },
+        )?;
         visit(pad, contig, run);
         contig = contig.checked_add(run).ok_or_else(|| {
             Error::Backend("for_each_run: contiguous offset overflow".to_string())
