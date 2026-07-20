@@ -18,7 +18,7 @@ use dg_rknn_sys as sys;
 
 use crate::io::{
     depad_bytes, pad_bytes, padded_byte_len, quantization_from_rknn, select_io_path,
-    strides_from_w_stride, IoPath,
+    strides_from_w_stride, try_zeroed_vec, IoPath,
 };
 
 /// Returns `true` when the real RKNN backend is compiled in.
@@ -93,7 +93,7 @@ impl IoMem {
                 self.size
             )));
         }
-        let mut bytes = vec![0u8; len];
+        let mut bytes = try_zeroed_vec(len)?;
         // SAFETY: `virt_addr` is a CPU-visible mapping of at least `size`
         // bytes and `len <= size` was checked above.
         unsafe {
@@ -670,7 +670,7 @@ fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
         info = info.with_layout(layout);
         let w_stride = usize::try_from(attr.w_stride)
             .map_err(|_| Error::Backend("rknn w_stride does not fit in usize".to_string()))?;
-        if let Some(strides) = strides_from_w_stride(&info.shape, layout, w_stride) {
+        if let Some(strides) = strides_from_w_stride(&info.shape, layout, w_stride)? {
             info = info.with_strides(strides);
         }
     }

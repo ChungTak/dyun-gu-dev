@@ -65,46 +65,89 @@ pub fn quantization_from_rknn(qnt_type: u32, fl: i8, zp: i32, scale: f32) -> Res
     }
 }
 
-/// Derives element strides for RKNN's padded-width layout. Returns `None`
-/// when `w_stride` is zero (SDK convention for "equal to width") or matches
-/// the logical width, i.e. the tensor is contiguous.
+/// Derives element strides for RKNN's padded-width layout.
+///
+/// Returns `Ok(None)` when `w_stride` is zero (SDK convention for "equal to
+/// width"), the shape is not 4D, or `w_stride` matches the logical width
+/// (i.e. the tensor is contiguous). Returns an `Err` if the stride
+/// arithmetic would overflow `usize`, which can happen with a corrupted or
+/// adversarial `w_stride` value.
 pub fn strides_from_w_stride(
     shape: &Shape,
     layout: DataFormat,
     w_stride: usize,
-) -> Option<Strides> {
+) -> Result<Option<Strides>> {
     if w_stride == 0 || shape.rank() != 4 {
-        return None;
+        return Ok(None);
     }
     let dims = shape.dims();
     match layout {
         DataFormat::NCHW => {
             let (c, h, w) = (dims[1], dims[2], dims[3]);
             if w_stride == w {
-                return None;
+                return Ok(None);
             }
-            Some(Strides::new([c * h * w_stride, h * w_stride, w_stride, 1]))
+            let ch = c.checked_mul(h).ok_or_else(|| {
+                Error::Backend("NCHW outer stride overflow in strides_from_w_stride".to_string())
+            })?;
+            let chw = ch.checked_mul(w_stride).ok_or_else(|| {
+                Error::Backend("NCHW outer stride overflow in strides_from_w_stride".to_string())
+            })?;
+            let hw = h.checked_mul(w_stride).ok_or_else(|| {
+                Error::Backend("NCHW inner stride overflow in strides_from_w_stride".to_string())
+            })?;
+            Ok(Some(Strides::new([chw, hw, w_stride, 1])))
         }
         DataFormat::NHWC => {
             let (h, w, c) = (dims[1], dims[2], dims[3]);
             if w_stride == w {
-                return None;
+                return Ok(None);
             }
-            Some(Strides::new([h * w_stride * c, w_stride * c, c, 1]))
+            let wc = w_stride.checked_mul(c).ok_or_else(|| {
+                Error::Backend("NHWC inner stride overflow in strides_from_w_stride".to_string())
+            })?;
+            let hwc = h.checked_mul(wc).ok_or_else(|| {
+                Error::Backend("NHWC outer stride overflow in strides_from_w_stride".to_string())
+            })?;
+            Ok(Some(Strides::new([hwc, wc, c, 1])))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
 /// Byte size of the padded physical layout described by element `strides`.
 pub fn padded_byte_len(shape: &Shape, strides: &Strides, elem_bytes: usize) -> Result<usize> {
     let (dims, stride_values) = validated_layout(shape, strides)?;
-    let last_offset: usize = dims
-        .iter()
-        .zip(stride_values)
-        .map(|(dim, stride)| (dim - 1) * stride)
-        .sum();
-    Ok((last_offset + 1) * elem_bytes)
+    let last_offset: usize =
+        dims.iter()
+            .zip(stride_values)
+            .try_fold(0usize, |acc, (dim, stride)| -> Result<usize> {
+                let dim_minus_one = dim.checked_sub(1).ok_or_else(|| {
+                    Error::Backend("padded_byte_len: dimension underflow".to_string())
+                })?;
+                let offset = dim_minus_one
+                    .checked_mul(*stride)
+                    .and_then(|o| acc.checked_add(o))
+                    .ok_or_else(|| {
+                        Error::Backend("padded_byte_len: element offset overflow".to_string())
+                    })?;
+                Ok(offset)
+            })?;
+    last_offset
+        .checked_add(1)
+        .and_then(|elements| elements.checked_mul(elem_bytes))
+        .ok_or_else(|| Error::Backend("padded_byte_len: byte size overflow".to_string()))
+}
+
+/// Allocates a zero-initialized vector of `len` bytes without aborting the
+/// process on memory exhaustion; returns an error if the allocation fails.
+pub(crate) fn try_zeroed_vec(len: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(len)
+        .map_err(|_| Error::Backend(format!("rknn io buffer allocation failed for {len} bytes")))?;
+    bytes.resize(len, 0);
+    Ok(bytes)
 }
 
 /// Expands contiguous row-major bytes into the padded layout described by
@@ -115,7 +158,7 @@ pub fn pad_bytes(
     strides: &Strides,
     elem_bytes: usize,
 ) -> Result<Vec<u8>> {
-    let mut padded = vec![0u8; padded_byte_len(shape, strides, elem_bytes)?];
+    let mut padded = try_zeroed_vec(padded_byte_len(shape, strides, elem_bytes)?)?;
     for_each_run(
         shape,
         strides,
@@ -143,8 +186,11 @@ pub fn depad_bytes(
             padded.len()
         )));
     }
-    let logical = shape.element_count()? * elem_bytes;
-    let mut contiguous = vec![0u8; logical];
+    let logical = shape
+        .element_count()?
+        .checked_mul(elem_bytes)
+        .ok_or_else(|| Error::Backend("depad_bytes: logical byte count overflow".to_string()))?;
+    let mut contiguous = try_zeroed_vec(logical)?;
     for_each_run(shape, strides, elem_bytes, logical, |pad, contig, run| {
         contiguous[contig..contig + run].copy_from_slice(&padded[pad..pad + run]);
     })?;
@@ -186,25 +232,41 @@ fn for_each_run(
     mut visit: impl FnMut(usize, usize, usize),
 ) -> Result<()> {
     let (dims, stride_values) = validated_layout(shape, strides)?;
-    let logical = shape.element_count()? * elem_bytes;
+    let logical = shape
+        .element_count()?
+        .checked_mul(elem_bytes)
+        .ok_or_else(|| Error::Backend("for_each_run: logical byte count overflow".to_string()))?;
     if contiguous_len != logical {
         return Err(Error::Backend(format!(
             "contiguous buffer size mismatch: {contiguous_len} != {logical}"
         )));
     }
     let rank = dims.len();
-    let run = dims[rank - 1] * elem_bytes;
+    let run = dims[rank - 1]
+        .checked_mul(elem_bytes)
+        .ok_or_else(|| Error::Backend("for_each_run: run length overflow".to_string()))?;
     let outer = &dims[..rank - 1];
     let mut index = vec![0usize; outer.len()];
     let mut contig = 0usize;
     loop {
-        let pad: usize = index
-            .iter()
-            .zip(stride_values)
-            .map(|(i, stride)| i * stride * elem_bytes)
-            .sum();
+        let pad = index.iter().zip(stride_values).try_fold(
+            0usize,
+            |acc, (i, stride)| -> Result<usize> {
+                let term = i
+                    .checked_mul(*stride)
+                    .and_then(|p| p.checked_mul(elem_bytes))
+                    .ok_or_else(|| {
+                        Error::Backend("for_each_run: padded offset term overflow".to_string())
+                    })?;
+                acc.checked_add(term).ok_or_else(|| {
+                    Error::Backend("for_each_run: padded offset accumulation overflow".to_string())
+                })
+            },
+        )?;
         visit(pad, contig, run);
-        contig += run;
+        contig = contig.checked_add(run).ok_or_else(|| {
+            Error::Backend("for_each_run: contiguous offset overflow".to_string())
+        })?;
         let mut axis = outer.len();
         loop {
             if axis == 0 {
@@ -264,34 +326,49 @@ mod tests {
     #[test]
     fn strides_contiguous_when_w_stride_matches_width() {
         let shape = Shape::new([1, 3, 224, 224]);
-        assert_eq!(strides_from_w_stride(&shape, DataFormat::NCHW, 224), None);
-        assert_eq!(strides_from_w_stride(&shape, DataFormat::NCHW, 0), None);
+        assert_eq!(
+            strides_from_w_stride(&shape, DataFormat::NCHW, 224).unwrap(),
+            None
+        );
+        assert_eq!(
+            strides_from_w_stride(&shape, DataFormat::NCHW, 0).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn strides_nchw_padded_width() {
         let shape = Shape::new([1, 3, 224, 224]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 256).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 256)
+            .expect("padded")
+            .expect("some strides");
         assert_eq!(strides.values(), &[3 * 224 * 256, 224 * 256, 256, 1]);
     }
 
     #[test]
     fn strides_nhwc_padded_width() {
         let shape = Shape::new([1, 224, 224, 3]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NHWC, 256).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NHWC, 256)
+            .expect("padded")
+            .expect("some strides");
         assert_eq!(strides.values(), &[224 * 256 * 3, 256 * 3, 3, 1]);
     }
 
     #[test]
     fn strides_non_4d_shapes_are_ignored() {
         let shape = Shape::new([1, 128]);
-        assert_eq!(strides_from_w_stride(&shape, DataFormat::NCHW, 256), None);
+        assert_eq!(
+            strides_from_w_stride(&shape, DataFormat::NCHW, 256).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn padded_byte_len_accounts_for_w_stride() {
         let shape = Shape::new([1, 2, 2, 3]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4)
+            .expect("padded")
+            .expect("some strides");
         // Three padded rows of 4 plus the final row's 3 logical elements.
         assert_eq!(padded_byte_len(&shape, &strides, 1).expect("len"), 15);
     }
@@ -299,7 +376,9 @@ mod tests {
     #[test]
     fn pad_and_depad_round_trip_nchw() {
         let shape = Shape::new([1, 2, 2, 3]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 4)
+            .expect("padded")
+            .expect("some strides");
         let contiguous: Vec<u8> = (1..=12).collect();
         let padded = pad_bytes(&contiguous, &shape, &strides, 1).expect("pad");
         assert_eq!(padded, vec![1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12]);
@@ -310,7 +389,9 @@ mod tests {
     #[test]
     fn depad_reads_padded_nhwc_rows() {
         let shape = Shape::new([1, 2, 2, 2]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NHWC, 3).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NHWC, 3)
+            .expect("padded")
+            .expect("some strides");
         // Two rows of 2x2 elements padded to width 3 (x = padding).
         let padded = vec![1, 2, 3, 4, 0, 0, 5, 6, 7, 8, 0, 0];
         let restored = depad_bytes(&padded, &shape, &strides, 1).expect("depad");
@@ -320,7 +401,9 @@ mod tests {
     #[test]
     fn pad_and_depad_respect_element_size() {
         let shape = Shape::new([1, 1, 2, 2]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3)
+            .expect("padded")
+            .expect("some strides");
         let contiguous: Vec<u8> = (1..=8).collect();
         let padded = pad_bytes(&contiguous, &shape, &strides, 2).expect("pad");
         assert_eq!(padded, vec![1, 2, 3, 4, 0, 0, 5, 6, 7, 8]);
@@ -331,8 +414,25 @@ mod tests {
     #[test]
     fn pad_and_depad_reject_size_mismatch() {
         let shape = Shape::new([1, 1, 2, 2]);
-        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3).expect("padded");
+        let strides = strides_from_w_stride(&shape, DataFormat::NCHW, 3)
+            .expect("padded")
+            .expect("some strides");
         assert!(pad_bytes(&[0u8; 3], &shape, &strides, 1).is_err());
         assert!(depad_bytes(&[0u8; 3], &shape, &strides, 1).is_err());
+    }
+
+    #[test]
+    fn strides_from_w_stride_rejects_overflow() {
+        let shape = Shape::new([1, usize::MAX, 2, 1]);
+        assert!(strides_from_w_stride(&shape, DataFormat::NCHW, 2).is_err());
+        let shape = Shape::new([1, 2, 2, usize::MAX]);
+        assert!(strides_from_w_stride(&shape, DataFormat::NHWC, 1).is_err());
+    }
+
+    #[test]
+    fn padded_byte_len_rejects_overflow() {
+        let shape = Shape::new([2, 2]);
+        let strides = Strides::new([usize::MAX, 1]);
+        assert!(padded_byte_len(&shape, &strides, 1).is_err());
     }
 }
