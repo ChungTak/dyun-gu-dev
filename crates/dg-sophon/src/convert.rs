@@ -31,11 +31,11 @@ pub enum SophonDataType {
 impl SophonDataType {
     /// Vendor ABI code (`bm_data_type_t`) as the unsigned FFI representation.
     pub const fn bm_code(self) -> u32 {
-        self.code() as u32
+        self.code()
     }
 
     /// Vendor ABI code (`bm_data_type_t`).
-    pub const fn code(self) -> i32 {
+    pub const fn code(self) -> u32 {
         match self {
             Self::Float32 => 0,
             Self::Float16 => 1,
@@ -51,6 +51,8 @@ impl SophonDataType {
 
     /// Rebuilds a data type from a vendor ABI code, rejecting unknown values.
     pub fn from_code(code: i32) -> Result<Self> {
+        let code = u32::try_from(code)
+            .map_err(|_| Error::Backend(format!("unsupported Sophon bm_data_type code: {code}")))?;
         match code {
             0 => Ok(Self::Float32),
             1 => Ok(Self::Float16),
@@ -184,7 +186,10 @@ mod tests {
         ] {
             let core = dtype.to_data_type();
             assert_eq!(SophonDataType::from_data_type(core).unwrap(), dtype);
-            assert_eq!(SophonDataType::from_code(dtype.code()).unwrap(), dtype);
+            assert_eq!(
+                SophonDataType::from_code(i32::try_from(dtype.code()).unwrap()).unwrap(),
+                dtype
+            );
         }
     }
 
