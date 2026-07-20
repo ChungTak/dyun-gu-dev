@@ -19,6 +19,23 @@ use crate::ZeroCopyPlanner;
 #[cfg(feature = "avcodec-sdk")]
 use crate::{FrameLayout, FrameTransferRequest, HandleKind, MemoryDtype, MemoryFormat};
 
+/// Fallibly clone a byte slice into a new `Vec`.
+///
+/// Avoids `.to_vec()` on large media payloads, which aborts the process if the
+/// allocator cannot satisfy the request.
+#[cfg(feature = "avcodec-sdk")]
+fn try_clone_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes.len()).map_err(|_| {
+        dg_core::Error::Media(format!(
+            "media bytes allocation failed for {} bytes",
+            bytes.len()
+        ))
+    })?;
+    out.extend_from_slice(bytes);
+    Ok(out)
+}
+
 pub fn tensor_to_frame(tensor: Tensor) -> MediaFrame {
     MediaFrame::from_tensor(tensor)
 }
@@ -263,7 +280,7 @@ fn share_avcodec_handle(
             domain,
             desc,
             external,
-            bytes.to_vec(),
+            try_clone_bytes(bytes)?,
             guard,
         ),
         None => Buffer::from_external(device, domain, desc, external, guard),
@@ -356,7 +373,7 @@ pub fn avcodec_packet_to_media_frame_with_transfer(
     let slice = host.ok_or_else(|| {
         dg_core::Error::Buffer("avcodec packet is not host-readable; domain mismatch".to_string())
     })?;
-    let bytes = slice.to_vec();
+    let bytes = try_clone_bytes(slice)?;
     let shape = vec![bytes.len()];
     let mut frame = MediaFrame::from_host_bytes(
         MediaFrameKind::Tensor,
@@ -581,7 +598,7 @@ fn materialize_avcodec_image_host_bytes(
     // Prefer the whole host buffer when present (keeps original plane offsets/strides).
     if let Some(bytes) = image.memory.host_bytes() {
         if !bytes.is_empty() {
-            return Ok((bytes.to_vec(), TransferPathKind::HostClone, 1));
+            return Ok((try_clone_bytes(bytes)?, TransferPathKind::HostClone, 1));
         }
     }
 
@@ -591,21 +608,19 @@ fn materialize_avcodec_image_host_bytes(
             .plane_host_bytes(0)
             .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?
         {
-            bytes.to_vec()
+            try_clone_bytes(bytes)?
         } else {
             let staged = image
                 .memory
                 .stage_to_host(0)
                 .map_err(|err| dg_core::Error::Buffer(format!("{err:?}")))?;
-            staged
-                .host_bytes()
-                .ok_or_else(|| {
-                    dg_core::Error::Buffer(
-                        "avcodec image staging did not produce host-readable bytes".to_string(),
-                    )
-                })?
-                .to_vec()
+            try_clone_bytes(staged.host_bytes().ok_or_else(|| {
+                dg_core::Error::Buffer(
+                    "avcodec image staging did not produce host-readable bytes".to_string(),
+                )
+            })?)?
         };
+
         return Ok((host, TransferPathKind::HostClone, 1));
     }
 
@@ -616,6 +631,16 @@ fn materialize_avcodec_image_host_bytes(
         .map_err(|_| dg_core::Error::Media("image height overflow".to_string()))?;
     let mut out = Vec::new();
     let plane_specs = plane_geometry(pixel, width, height)?;
+    let total = plane_specs
+        .iter()
+        .try_fold(0usize, |acc, (rows, row_bytes)| {
+            rows.checked_mul(*row_bytes)
+                .and_then(|plane| acc.checked_add(plane))
+        })
+        .ok_or_else(|| dg_core::Error::Media("image row bytes total overflow".into()))?;
+    out.try_reserve_exact(total).map_err(|_| {
+        dg_core::Error::Media(format!("image repack allocation failed for {total} bytes"))
+    })?;
     for (index, (rows, row_bytes)) in plane_specs.iter().enumerate() {
         let src = image
             .plane_host_bytes(index)
