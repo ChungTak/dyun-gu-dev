@@ -211,7 +211,13 @@ impl ResizeCore {
         }
         let out_len =
             checked_pixel_count(self.dst_height, self.dst_width, channels, "media_resize")?;
-        let mut dst = vec![0_u8; out_len];
+        let mut dst = Vec::new();
+        dst.try_reserve_exact(out_len).map_err(|_| {
+            Error::Media(format!(
+                "media_resize: allocation failed for {out_len} bytes"
+            ))
+        })?;
+        dst.resize(out_len, 0);
         for dst_y in 0..self.dst_height {
             let src_y = dst_y * src_height / self.dst_height;
             for dst_x in 0..self.dst_width {
