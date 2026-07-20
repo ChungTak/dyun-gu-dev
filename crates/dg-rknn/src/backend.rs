@@ -670,7 +670,7 @@ fn tensor_info_from_attr(attr: &sys::rknn_tensor_attr) -> Result<TensorInfo> {
         info = info.with_layout(layout);
         let w_stride = usize::try_from(attr.w_stride)
             .map_err(|_| Error::Backend("rknn w_stride does not fit in usize".to_string()))?;
-        if let Some(strides) = strides_from_w_stride(&info.shape, layout, w_stride) {
+        if let Some(strides) = strides_from_w_stride(&info.shape, layout, w_stride)? {
             info = info.with_strides(strides);
         }
     }
