@@ -10,6 +10,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+
 use dg_core::{
     BitstreamFormat, DataType, EncodedMediaInfo, EncodedPacketFlags, MediaCodec, MediaCodecConfig,
     MediaInfo, MediaKind as CoreMediaKind, MediaPayloadInfo, MediaTimeBase, MediaTiming,
@@ -845,6 +847,26 @@ fn track_bitstream_format(codec: TrackCodec) -> BitstreamFormat {
     }
 }
 
+/// Fallibly clone a bounded codec-config `Bytes` into a `Vec<u8>`.
+///
+/// This avoids `.to_vec()` on an oversized extradata blob, which could OOM
+/// abort before `MediaCodecConfig::new` gets a chance to enforce the item size
+/// limit.
+fn clone_codec_config(bytes: &Bytes) -> dg_core::Result<Vec<u8>> {
+    if bytes.len() > dg_core::MAX_CODEC_CONFIG_ITEM_BYTES {
+        return Err(dg_core::Error::InvalidArgument(format!(
+            "codec config item exceeds {} bytes",
+            dg_core::MAX_CODEC_CONFIG_ITEM_BYTES
+        )));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes.len()).map_err(|_| {
+        dg_core::Error::InvalidArgument("codec config item allocation failed".to_string())
+    })?;
+    out.extend_from_slice(bytes);
+    Ok(out)
+}
+
 /// Builds Annex-B / OBU / ASC codec_config blobs from track extradata with size limits.
 fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfig>> {
     const START: &[u8] = &[0, 0, 0, 1];
@@ -864,7 +886,7 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if let Some(avcc) = avcc {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::H264Avcc,
-                    avcc.to_vec(),
+                    clone_codec_config(avcc)?,
                 )?);
             }
         }
@@ -886,7 +908,7 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if let Some(hvcc) = hvcc {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::H265Hvcc,
-                    hvcc.to_vec(),
+                    clone_codec_config(hvcc)?,
                 )?);
             }
         }
@@ -904,7 +926,7 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if !asc.is_empty() {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::AacRaw,
-                    asc.to_vec(),
+                    clone_codec_config(asc)?,
                 )?);
             }
         }
@@ -915,13 +937,13 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if let Some(seq) = sequence_header {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::Av1Obu,
-                    seq.to_vec(),
+                    clone_codec_config(seq)?,
                 )?);
             }
             if let Some(cfg) = codec_config {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::Av1Obu,
-                    cfg.to_vec(),
+                    clone_codec_config(cfg)?,
                 )?);
             }
         }
@@ -929,7 +951,7 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if let Some(cfg) = config {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::Vp8Frame,
-                    cfg.to_vec(),
+                    clone_codec_config(cfg)?,
                 )?);
             }
         }
@@ -937,7 +959,7 @@ fn track_codec_configs(track: &TrackInfo) -> dg_core::Result<Vec<MediaCodecConfi
             if let Some(cfg) = config {
                 configs.push(MediaCodecConfig::new(
                     BitstreamFormat::Vp9Frame,
-                    cfg.to_vec(),
+                    clone_codec_config(cfg)?,
                 )?);
             }
         }
@@ -960,6 +982,8 @@ fn annexb_append_nal(out: &mut Vec<u8>, start: &[u8], nal: &[u8]) -> dg_core::Re
             "annex-b parameter sets exceed total codec config budget".into(),
         ));
     }
+    out.try_reserve_exact(added)
+        .map_err(|_| dg_core::Error::InvalidArgument("annex-b config allocation failed".into()))?;
     out.extend_from_slice(start);
     out.extend_from_slice(nal);
     Ok(())
