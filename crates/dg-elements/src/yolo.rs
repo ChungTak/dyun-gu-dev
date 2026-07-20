@@ -377,7 +377,11 @@ fn decode_detections(
         pad_x,
         pad_y,
     };
+    let detection_count = values.len() / attributes;
     let mut detections = Vec::new();
+    detections
+        .try_reserve_exact(detection_count)
+        .map_err(|_| Error::Runtime("yolo decode detections allocation failed".to_string()))?;
     for row in values.chunks_exact(attributes) {
         if !row.iter().all(|value| value.is_finite()) {
             continue;

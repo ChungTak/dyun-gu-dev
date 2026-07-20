@@ -1,5 +1,7 @@
 use dg_core::{BBox, Detection};
 use dg_graph::{Error, Result};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// Maximum number of detection candidates that can be passed to NMS before the
 /// caller must explicitly pre-filter using a deterministic top-k.
@@ -207,7 +209,7 @@ pub fn nms(detections: &[Detection], threshold: f32) -> Result<Vec<Detection>> {
             limit: MAX_NMS_CANDIDATES,
         });
     }
-    Ok(nms_inner(detections, threshold))
+    Ok(nms_inner(detections.to_vec(), threshold))
 }
 
 /// NMS that deterministically keeps only the top `max_candidates` by score
@@ -224,17 +226,71 @@ pub fn nms_with_top_k(
         ));
     }
     let max_candidates = max_candidates.min(MAX_NMS_CANDIDATES);
-    let mut ordered = detections.to_vec();
-    ordered.sort_by(|left, right| right.score.total_cmp(&left.score));
-    ordered.truncate(max_candidates);
-    Ok(nms_inner(&ordered, threshold))
+    if max_candidates == 0 || detections.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Keep a min-heap of the best `max_candidates` detections by score.
+    // This avoids cloning the entire (potentially huge) input slice before
+    // truncation, which could OOM abort on adversarial model output.
+    let mut heap = BinaryHeap::with_capacity(max_candidates.min(detections.len()));
+    for detection in detections {
+        if heap.len() < max_candidates {
+            heap.push(Reverse(ByScore(detection)));
+        } else {
+            // SAFETY: the heap is non-empty because max_candidates > 0.
+            let lowest = heap.peek().unwrap();
+            if detection.score.total_cmp(&lowest.0.score()) == std::cmp::Ordering::Greater {
+                heap.pop();
+                heap.push(Reverse(ByScore(detection)));
+            }
+        }
+    }
+
+    let top = heap
+        .into_sorted_vec()
+        .into_iter()
+        .map(|reverse| reverse.0 .0.clone())
+        .collect::<Vec<_>>();
+    // `into_sorted_vec` on a max-heap of `Reverse<ByScore>` returns the
+    // highest-score detections first, matching `nms_inner`'s expectation.
+    Ok(nms_inner(top, threshold))
 }
 
-fn nms_inner(detections: &[Detection], threshold: f32) -> Vec<Detection> {
-    let mut ordered = detections.to_vec();
-    ordered.sort_by(|left, right| right.score.total_cmp(&left.score));
+/// A score-only view of a detection so the top-k heap does not need to
+/// clone candidates until they are kept in the final set.
+struct ByScore<'a>(&'a Detection);
+
+impl<'a> ByScore<'a> {
+    fn score(&self) -> f32 {
+        self.0.score
+    }
+}
+
+impl<'a> PartialEq for ByScore<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.score.to_bits() == other.0.score.to_bits()
+    }
+}
+
+impl<'a> Eq for ByScore<'a> {}
+
+impl<'a> PartialOrd for ByScore<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<'a> Ord for ByScore<'a> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.score.total_cmp(&other.0.score)
+    }
+}
+
+fn nms_inner(mut detections: Vec<Detection>, threshold: f32) -> Vec<Detection> {
+    detections.sort_by(|left, right| right.score.total_cmp(&left.score));
     let mut selected = Vec::new();
-    for candidate in ordered {
+    for candidate in detections {
         let suppressed = selected.iter().any(|existing: &Detection| {
             existing.class_id == candidate.class_id
                 && iou(existing.bbox, candidate.bbox) > threshold
