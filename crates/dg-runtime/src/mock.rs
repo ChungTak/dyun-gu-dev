@@ -96,7 +96,14 @@ impl MockBackend {
                 }
                 output.buffer().write_from_slice(&bytes)?;
             } else {
-                let bytes = vec![self.options.fill_value; output.buffer().len()];
+                let len = output.buffer().len();
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(len).map_err(|_| {
+                    Error::Backend(format!(
+                        "mock backend fill allocation failed for {len} bytes"
+                    ))
+                })?;
+                bytes.resize(len, self.options.fill_value);
                 output.buffer().write_from_slice(&bytes)?;
             }
             outputs.push(output);
