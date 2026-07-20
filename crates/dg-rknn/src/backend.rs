@@ -18,7 +18,7 @@ use dg_rknn_sys as sys;
 
 use crate::io::{
     depad_bytes, pad_bytes, padded_byte_len, quantization_from_rknn, select_io_path,
-    strides_from_w_stride, IoPath,
+    strides_from_w_stride, try_zeroed_vec, IoPath,
 };
 
 /// Returns `true` when the real RKNN backend is compiled in.
@@ -93,7 +93,7 @@ impl IoMem {
                 self.size
             )));
         }
-        let mut bytes = vec![0u8; len];
+        let mut bytes = try_zeroed_vec(len)?;
         // SAFETY: `virt_addr` is a CPU-visible mapping of at least `size`
         // bytes and `len <= size` was checked above.
         unsafe {

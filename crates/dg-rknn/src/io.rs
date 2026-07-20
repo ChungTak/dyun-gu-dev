@@ -141,7 +141,7 @@ pub fn padded_byte_len(shape: &Shape, strides: &Strides, elem_bytes: usize) -> R
 
 /// Allocates a zero-initialized vector of `len` bytes without aborting the
 /// process on memory exhaustion; returns an error if the allocation fails.
-fn try_zeroed_vec(len: usize) -> Result<Vec<u8>> {
+pub(crate) fn try_zeroed_vec(len: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(len)
