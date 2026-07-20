@@ -55,14 +55,54 @@ jobs:
       - name: Package
         run: |
           package="dyun-gu-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$package/bin" "dist/$package/lib" "dist/$package/include" "dist/$package/examples" "dist/$package/docs"
+          mkdir -p "dist/$package/bin" "dist/$package/lib/pkgconfig" "dist/$package/include" "dist/$package/examples/c" "dist/$package/examples/graphs" "dist/$package/docs"
           cp "target/${{ matrix.target }}/release/dg-cli" "dist/$package/bin/"
+
+          # Collect C ABI libraries; the cdylib is the real .so.2, keep a dev symlink.
           find "target/${{ matrix.target }}/release" -maxdepth 1 -type f \
             \( -name 'libdg_capi.a' -o -name 'libdg_capi.so' \) \
             -exec cp {} "dist/$package/lib/" \;
+          if [[ -f "dist/$package/lib/libdg_capi.so" ]]; then
+            mv "dist/$package/lib/libdg_capi.so" "dist/$package/lib/libdg_capi.so.2"
+            ln -s libdg_capi.so.2 "dist/$package/lib/libdg_capi.so"
+          fi
+
           cp crates/dg-capi/include/dg_capi.h "dist/$package/include/"
-          cp examples/*.yaml "dist/$package/examples/"
+          cp crates/dg-capi/examples/*.c "dist/$package/examples/c/"
+          cp examples/*.yaml "dist/$package/examples/graphs/"
           cp README.md docs/user-guide.md "dist/$package/docs/"
+
+          # pkg-config file so downstream builds can find the C ABI without hard-coding paths.
+          cat > "dist/$package/lib/pkgconfig/dg-capi.pc" <<EOF
+          prefix=/usr/local
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+          Name: dg-capi
+          Description: dyun-gu stable C ABI
+          Version: 0.1.0
+          Libs: -L\${libdir} -ldg_capi
+          Cflags: -I\${includedir}
+          EOF
+
+          # Manifest binds the package contents to the exact source and lockfile.
+          commit=$(git rev-parse HEAD)
+          lock_hash=$(git rev-parse HEAD:Cargo.lock)
+          python3 - "dist/$package/manifest.json" "$package" "${{ matrix.target }}" "$commit" "$lock_hash" "${CARGO_FLAGS}" <<'PY'
+          import json, sys
+          path, name, target, commit, lock_hash, features = sys.argv[1:7]
+          manifest = {
+              "name": name,
+              "target": target,
+              "dyun_commit": commit,
+              "cargo_lock_hash": lock_hash,
+              "abi_version": "2.0",
+              "soname": "libdg_capi.so.2",
+              "features": features,
+          }
+          with open(path, "w") as f:
+              json.dump(manifest, f, indent=2)
+          PY
+
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - uses: actions/upload-artifact@v4
         with:
