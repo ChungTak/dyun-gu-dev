@@ -140,18 +140,30 @@ impl NativeDataType for f64 {
     }
 }
 
-fn pack_nibbles(values: &[u8]) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(values.len().div_ceil(2));
+fn pack_nibbles(values: &[u8]) -> Result<Vec<u8>> {
+    let capacity = values.len().div_ceil(2);
+    let mut packed = Vec::new();
+    packed.try_reserve_exact(capacity).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "pack_nibbles: allocation failed for {capacity} values"
+        ))
+    })?;
     for chunk in values.chunks(2) {
         let lo = chunk[0] & 0x0f;
         let hi = chunk.get(1).copied().unwrap_or(0) & 0x0f;
         packed.push(lo | (hi << 4));
     }
-    packed
+    Ok(packed)
 }
 
-fn unpack_nibbles(bytes: &[u8], count: usize) -> Vec<u8> {
-    let mut values = Vec::with_capacity(count);
+fn unpack_nibbles(bytes: &[u8], count: usize) -> Result<Vec<u8>> {
+    let capacity = count.min(bytes.len().saturating_mul(2));
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "unpack_nibbles: allocation failed for {capacity} values"
+        ))
+    })?;
     for &byte in bytes {
         values.push(byte & 0x0f);
         if values.len() == count {
@@ -162,12 +174,18 @@ fn unpack_nibbles(bytes: &[u8], count: usize) -> Vec<u8> {
             break;
         }
     }
-    values
+    Ok(values)
 }
 
 /// Packs 4-bit signed integers using two's complement nibble encoding.
 pub fn pack_int4(values: &[i8]) -> Result<Vec<u8>> {
-    let mut raw = Vec::with_capacity(values.len());
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(values.len()).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "pack_int4: allocation failed for {} values",
+            values.len()
+        ))
+    })?;
     for &value in values {
         if !(-8..=7).contains(&value) {
             return Err(Error::InvalidArgument("int4 out of range".to_string()));
@@ -175,23 +193,28 @@ pub fn pack_int4(values: &[i8]) -> Result<Vec<u8>> {
         let [byte] = value.to_le_bytes();
         raw.push(byte & 0x0f);
     }
-    Ok(pack_nibbles(&raw))
+    pack_nibbles(&raw)
 }
 
 /// Unpacks 4-bit signed integers using two's complement nibble encoding.
 pub fn unpack_int4(bytes: &[u8], count: usize) -> Result<Vec<i8>> {
-    let raw = unpack_nibbles(bytes, count);
-    Ok(raw
-        .into_iter()
-        .map(|nibble| {
-            let signed = i8::from_le_bytes([nibble]);
-            if nibble & 0x08 != 0 {
-                signed - 16
-            } else {
-                signed
-            }
-        })
-        .collect())
+    let raw = unpack_nibbles(bytes, count)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(raw.len()).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "unpack_int4: allocation failed for {} values",
+            raw.len()
+        ))
+    })?;
+    for nibble in raw {
+        let signed = i8::from_le_bytes([nibble]);
+        values.push(if nibble & 0x08 != 0 {
+            signed - 16
+        } else {
+            signed
+        });
+    }
+    Ok(values)
 }
 
 /// Packs 4-bit floating payloads as raw nibbles.
@@ -199,12 +222,12 @@ pub fn pack_float4(values: &[u8]) -> Result<Vec<u8>> {
     if values.iter().any(|&value| value > 0x0f) {
         return Err(Error::InvalidArgument("float4 out of range".to_string()));
     }
-    Ok(pack_nibbles(values))
+    pack_nibbles(values)
 }
 
 /// Unpacks 4-bit floating payloads as raw nibbles.
 pub fn unpack_float4(bytes: &[u8], count: usize) -> Result<Vec<u8>> {
-    Ok(unpack_nibbles(bytes, count))
+    unpack_nibbles(bytes, count)
 }
 
 #[cfg(test)]
