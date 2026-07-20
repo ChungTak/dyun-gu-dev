@@ -751,6 +751,9 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
     })?;
     visited.resize(expected, false);
     let mut output = Vec::new();
+    output
+        .try_reserve_exact(MAX_OCR_REGIONS)
+        .map_err(|_| Error::Runtime("ppocr_det output allocation failed".to_string()))?;
     for start in 0..expected {
         if visited[start] || values[start] < threshold {
             continue;
@@ -758,6 +761,9 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
         let mut queue = VecDeque::from([start]);
         visited[start] = true;
         let mut points = Vec::new();
+        points
+            .try_reserve_exact(MAX_OCR_REGION_PIXELS)
+            .map_err(|_| Error::Runtime("ppocr_det points allocation failed".to_string()))?;
         while let Some(index) = queue.pop_front() {
             points.push(index);
             if points.len() > MAX_OCR_REGION_PIXELS {
