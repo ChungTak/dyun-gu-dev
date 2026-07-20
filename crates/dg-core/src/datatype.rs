@@ -172,7 +172,8 @@ pub fn pack_int4(values: &[i8]) -> Result<Vec<u8>> {
         if !(-8..=7).contains(&value) {
             return Err(Error::InvalidArgument("int4 out of range".to_string()));
         }
-        raw.push((value as i16 & 0x0f) as u8);
+        let [byte] = value.to_le_bytes();
+        raw.push(byte & 0x0f);
     }
     Ok(pack_nibbles(&raw))
 }
@@ -183,10 +184,11 @@ pub fn unpack_int4(bytes: &[u8], count: usize) -> Result<Vec<i8>> {
     Ok(raw
         .into_iter()
         .map(|nibble| {
+            let signed = i8::from_le_bytes([nibble]);
             if nibble & 0x08 != 0 {
-                (nibble as i8) - 16
+                signed - 16
             } else {
-                nibble as i8
+                signed
             }
         })
         .collect())

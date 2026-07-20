@@ -590,6 +590,9 @@ fn filled_tensor(
     Ok(tensor)
 }
 
+// The `as f32` is safe and exact here because the value is bounded to
+// integers that fit exactly in an f32 mantissa (<= 2^24) before the cast.
+#[allow(clippy::cast_possible_truncation)]
 fn usize_to_exact_f32(value: usize, field: &str) -> Result<f32> {
     const MAX_EXACT_INT: usize = 16_777_216;
     if value > MAX_EXACT_INT {
@@ -601,6 +604,9 @@ fn usize_to_exact_f32(value: usize, field: &str) -> Result<f32> {
     Ok(narrowed)
 }
 
+// `as f32` is the only stable narrowing conversion; the result is immediately
+// checked for exact round-trip back to f64, so truncation is rejected.
+#[allow(clippy::cast_possible_truncation)]
 fn f64_to_exact_f32(value: f64, field: &str) -> Result<f32> {
     if !value.is_finite() {
         return Err(Error::Config(format!("field {field} must be finite")));

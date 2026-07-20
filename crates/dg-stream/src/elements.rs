@@ -1133,11 +1133,14 @@ fn read_retry_config(params: &Map<String, Value>) -> dg_graph::Result<RetryConfi
     let max_attempts = u32::try_from(max_attempts).map_err(|_| {
         dg_graph::Error::Config("field retry_max_attempts exceeds u32 range".to_string())
     })?;
+    let jitter_percent = u8::try_from(jitter).map_err(|_| {
+        dg_graph::Error::Config("field retry_jitter_percent exceeds u8 range".to_string())
+    })?;
     Ok(RetryConfig {
         initial_backoff_ms,
         max_backoff_ms,
         multiplier,
-        jitter_percent: jitter as u8,
+        jitter_percent,
         max_attempts,
     })
 }

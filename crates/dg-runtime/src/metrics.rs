@@ -267,9 +267,9 @@ impl LatencyHistogram {
             count,
             sum_ns: self.sum.load(Ordering::Relaxed),
             max_ns: self.max.load(Ordering::Relaxed),
-            p50_ns: percentile_from_histogram(&cumulative, count, 0.5),
-            p95_ns: percentile_from_histogram(&cumulative, count, 0.95),
-            p99_ns: percentile_from_histogram(&cumulative, count, 0.99),
+            p50_ns: percentile_from_histogram(&cumulative, count, 50),
+            p95_ns: percentile_from_histogram(&cumulative, count, 95),
+            p99_ns: percentile_from_histogram(&cumulative, count, 99),
             buckets,
             cumulative,
         }
@@ -283,9 +283,11 @@ fn bucket_index(ns: u64) -> usize {
         .unwrap_or(BUCKET_COUNT - 1)
 }
 
-fn percentile_from_histogram(cumulative: &[u64; BUCKET_COUNT], count: u64, p: f64) -> u64 {
-    let target = (p * count as f64).ceil() as u64;
-    let target = target.max(1);
+fn percentile_from_histogram(cumulative: &[u64; BUCKET_COUNT], count: u64, percent: u64) -> u64 {
+    // `percent` is expected to be in 0..=100; clamp to avoid nonsensical targets.
+    let percent = percent.min(100);
+    let target = count.saturating_mul(percent).saturating_add(99) / 100;
+    let target = target.max(1).min(count);
     for (i, &cumulative_count) in cumulative.iter().enumerate() {
         if cumulative_count >= target {
             return BUCKET_BOUNDS_NS[i];
