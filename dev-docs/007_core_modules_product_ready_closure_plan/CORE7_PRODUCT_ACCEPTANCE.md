@@ -89,3 +89,23 @@
 - 决定时间：待填写
 - 适用制品：待填写
 - 备注：本文创建时仅定义接纳合同，不代表 Plan 7 已实施或候选已验证。
+
+## 8. CORE7 任务 PR 追踪
+
+> 临时记录当前 CORE7 各任务独立 PR。所有 PR 合入 main、对应门禁 green、风险关闭后，本文件进入 Accepted 流程。
+
+| CORE7 ID | 主题 | PR | 状态 |
+|---|---|---|---|
+| CORE7-01 | Plan 6 gap audit and admission baseline | #86 | Merged |
+| CORE7-02 | Trusted process policy and bootstrap | #87 | Merged |
+| CORE7-03 | Bounded model loader and pre-consumption model checks | #88 | Merged |
+| CORE7-04 | Runtime/backend cancel diagnostics and execution-mode capabilities | #89 | Open |
+| CORE7-05 | Graph error scopes and readiness contract | #90 | Open |
+| CORE7-06 | Stream native deadline and pre-copy safety | #91 | Open |
+| CORE7-07 | C ABI v2 structured ABI version | #92 | Open |
+| CORE7-08 | reload-transitions fuzz cleanup | #93 | Open |
+| CORE7-09 | Soak driver with candidate/spec support | #95 | Open |
+| CORE7-10 | Release package layout and support matrix | #94 | Open |
+| CORE7-11 | Execution order and acceptance tracking | #96 | Open |
+
+最终候选身份与 evidence 必须在所有上述 PR 合入后重新以 main 的完整 SHA 填写。
