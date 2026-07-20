@@ -439,7 +439,11 @@ impl InferBackend for SophonBackend {
             let dtype = SophonDataType::from_code(code)?;
             let shape = convert::shape_from_bm(out.shape.num_dims, &out.shape.dims)?;
             let size = convert::byte_size(dtype, &shape)?;
-            let mut host = vec![0u8; size];
+            let mut host = Vec::new();
+            host.try_reserve_exact(size).map_err(|_| {
+                Error::Backend(format!("sophon output host allocation failed for {size} bytes"))
+            })?;
+            host.resize(size, 0);
             output_mems[index].download(&mut host)?;
 
             let mut info =
