@@ -120,7 +120,13 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
     dg_core::ResourcePolicy::default()
         .check_frame_bytes(payload_len)
         .map_err(|err| Error::InvalidArgument(err.to_string()))?;
-    let bytes = frame.payload.clone().to_vec();
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(payload_len).map_err(|_| {
+        Error::Runtime(format!(
+            "stream bridge payload allocation failed for {payload_len} bytes"
+        ))
+    })?;
+    bytes.extend_from_slice(&frame.payload);
     // Compressed stream frames are Tensor payloads; Image is reserved for decoded pixels.
     let kind = MediaFrameKind::Tensor;
     let mut media_frame = MediaFrame::from_host_bytes(
