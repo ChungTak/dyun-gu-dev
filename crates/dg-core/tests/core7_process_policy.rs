@@ -55,3 +55,71 @@ fn process_policy_rejects_invalid_deadline_order() {
     )
     .is_err());
 }
+
+#[test]
+fn process_policy_accepts_u64_ttl_above_u32_max() {
+    let default = ProcessRuntimePolicy::default();
+    assert!(ProcessRuntimePolicy::new(
+        default.resource,
+        default.memory_pool,
+        default.stream_registry,
+        default.deadlines,
+        default.affinity_capacity,
+        u64::from(u32::MAX) + 1,
+        default.metrics_serialization_bytes,
+    )
+    .is_ok());
+}
+
+#[test]
+fn process_policy_rejects_zero_affinity_ttl() {
+    let default = ProcessRuntimePolicy::default();
+    assert!(ProcessRuntimePolicy::new(
+        default.resource,
+        default.memory_pool,
+        default.stream_registry,
+        default.deadlines,
+        default.affinity_capacity,
+        0,
+        default.metrics_serialization_bytes,
+    )
+    .is_err());
+}
+
+#[test]
+fn process_policy_rejects_invalid_nested_memory_pool() {
+    let default = ProcessRuntimePolicy::default();
+    let invalid_pool = MemoryPoolConfig {
+        max_cached_bytes: 0,
+        ..default.memory_pool
+    };
+    let policy = ProcessRuntimePolicy {
+        memory_pool: invalid_pool,
+        ..default
+    };
+    assert!(policy.validate().is_err());
+}
+
+#[test]
+fn stream_registry_accepts_u64_idle_ttl_above_u32_max() {
+    assert!(StreamRegistryLimits::new(
+        StreamRegistryLimits::DEFAULT_MAX_STREAMS,
+        StreamRegistryLimits::DEFAULT_MAX_SUBSCRIBERS_PER_STREAM,
+        StreamRegistryLimits::DEFAULT_MAX_BOOTSTRAP_BYTES,
+        StreamRegistryLimits::DEFAULT_MAX_BOOTSTRAP_FRAMES,
+        u64::from(u32::MAX) + 1,
+    )
+    .is_ok());
+}
+
+#[test]
+fn stream_registry_rejects_zero_idle_ttl() {
+    assert!(StreamRegistryLimits::new(
+        StreamRegistryLimits::DEFAULT_MAX_STREAMS,
+        StreamRegistryLimits::DEFAULT_MAX_SUBSCRIBERS_PER_STREAM,
+        StreamRegistryLimits::DEFAULT_MAX_BOOTSTRAP_BYTES,
+        StreamRegistryLimits::DEFAULT_MAX_BOOTSTRAP_FRAMES,
+        0,
+    )
+    .is_err());
+}

@@ -60,7 +60,7 @@ impl StreamRegistryLimits {
         )?;
         Self::check_nonzero(self.max_bootstrap_bytes, "max_bootstrap_bytes")?;
         Self::check_nonzero(self.max_bootstrap_frames, "max_bootstrap_frames")?;
-        Self::check_nonzero(self.idle_ttl_seconds as usize, "idle_ttl_seconds")?;
+        Self::check_nonzero_u64(self.idle_ttl_seconds, "idle_ttl_seconds")?;
         Self::check_representable(self.max_streams, "max_streams")?;
         Self::check_representable(
             self.max_subscribers_per_stream,
@@ -68,7 +68,13 @@ impl StreamRegistryLimits {
         )?;
         Self::check_representable(self.max_bootstrap_bytes, "max_bootstrap_bytes")?;
         Self::check_representable(self.max_bootstrap_frames, "max_bootstrap_frames")?;
-        Self::check_representable(self.idle_ttl_seconds as usize, "idle_ttl_seconds")?;
+        Ok(())
+    }
+
+    fn check_nonzero_u64(value: u64, name: &str) -> Result<()> {
+        if value == 0 {
+            return Err(Error::Config(format!("{name} must be > 0")));
+        }
         Ok(())
     }
 
@@ -251,19 +257,29 @@ impl ProcessRuntimePolicy {
         Ok(policy)
     }
 
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
+        ResourcePolicy::validate(&self.resource)?;
+        self.memory_pool.validate()?;
+        self.stream_registry.validate()?;
+        self.deadlines.validate()?;
         Self::check_nonzero(self.affinity_capacity, "affinity_capacity")?;
-        Self::check_nonzero(self.affinity_ttl_seconds as usize, "affinity_ttl_seconds")?;
+        Self::check_nonzero_u64(self.affinity_ttl_seconds, "affinity_ttl_seconds")?;
         Self::check_nonzero(
             self.metrics_serialization_bytes,
             "metrics_serialization_bytes",
         )?;
         Self::check_representable(self.affinity_capacity, "affinity_capacity")?;
-        Self::check_representable(self.affinity_ttl_seconds as usize, "affinity_ttl_seconds")?;
         Self::check_representable(
             self.metrics_serialization_bytes,
             "metrics_serialization_bytes",
         )?;
+        Ok(())
+    }
+
+    fn check_nonzero_u64(value: u64, name: &str) -> Result<()> {
+        if value == 0 {
+            return Err(Error::Config(format!("{name} must be > 0")));
+        }
         Ok(())
     }
 

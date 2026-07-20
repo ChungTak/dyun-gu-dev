@@ -588,6 +588,9 @@ fn load_runtime_limits(path: Option<&Path>) -> Result<ProcessRuntimePolicy> {
             ))
         }
     };
+    policy
+        .validate()
+        .with_context(|| format!("validate runtime limits {}", path.display()))?;
     Ok(policy)
 }
 
