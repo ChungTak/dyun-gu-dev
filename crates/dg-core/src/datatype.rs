@@ -199,17 +199,22 @@ pub fn pack_int4(values: &[i8]) -> Result<Vec<u8>> {
 /// Unpacks 4-bit signed integers using two's complement nibble encoding.
 pub fn unpack_int4(bytes: &[u8], count: usize) -> Result<Vec<i8>> {
     let raw = unpack_nibbles(bytes, count)?;
-    Ok(raw
-        .into_iter()
-        .map(|nibble| {
-            let signed = i8::from_le_bytes([nibble]);
-            if nibble & 0x08 != 0 {
-                signed - 16
-            } else {
-                signed
-            }
-        })
-        .collect())
+    let mut values = Vec::new();
+    values.try_reserve_exact(raw.len()).map_err(|_| {
+        Error::InvalidArgument(format!(
+            "unpack_int4: allocation failed for {} values",
+            raw.len()
+        ))
+    })?;
+    for nibble in raw {
+        let signed = i8::from_le_bytes([nibble]);
+        values.push(if nibble & 0x08 != 0 {
+            signed - 16
+        } else {
+            signed
+        });
+    }
+    Ok(values)
 }
 
 /// Packs 4-bit floating payloads as raw nibbles.
