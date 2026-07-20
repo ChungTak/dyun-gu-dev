@@ -730,7 +730,9 @@ impl InferBackend for TensorRtBackend {
             let byte_len = binding.dtype.storage_bytes_for_shape(&shape)?;
             let mut host = Vec::new();
             host.try_reserve_exact(byte_len).map_err(|_| {
-                Error::Backend(format!("tensorrt output host allocation failed for {byte_len} bytes"))
+                Error::Backend(format!(
+                    "tensorrt output host allocation failed for {byte_len} bytes"
+                ))
             })?;
             host.resize(byte_len, 0);
             buffer.copy_to_host(&mut host)?;
