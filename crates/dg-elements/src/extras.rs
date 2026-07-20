@@ -1077,12 +1077,17 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
         )));
     }
     match tensor.desc().dtype() {
-        DataType::U8 => Ok(tensor
-            .buffer()
-            .read_bytes()?
-            .into_iter()
-            .map(f32::from)
-            .collect()),
+        DataType::U8 => {
+            let bytes = tensor.buffer().read_bytes()?;
+            let mut values = Vec::new();
+            values.try_reserve_exact(bytes.len()).map_err(|_| {
+                Error::Runtime("extras tensor_values u8 allocation failed".to_string())
+            })?;
+            for byte in bytes {
+                values.push(f32::from(byte));
+            }
+            Ok(values)
+        }
         DataType::F32 => f32_values(tensor),
         dtype => Err(Error::Config(format!(
             "algorithm elements support only u8/f32 tensors, got {dtype:?}"
@@ -1097,18 +1102,21 @@ fn f32_values(tensor: &Tensor) -> Result<Vec<f32>> {
         )));
     }
     let bytes = tensor.buffer().read_bytes()?;
-    let chunks = bytes.chunks_exact(std::mem::size_of::<f32>());
-    if !chunks.remainder().is_empty() {
+    let elem_bytes = std::mem::size_of::<f32>();
+    if bytes.len() % elem_bytes != 0 {
         return Err(Error::Runtime("f32 tensor has partial element".to_string()));
     }
-    let values: Vec<f32> = chunks
-        .map(|chunk| {
-            let bytes: [u8; 4] = chunk
-                .try_into()
-                .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
-            Ok(f32::from_ne_bytes(bytes))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let count = bytes.len() / elem_bytes;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| Error::Runtime("extras f32_values allocation failed".to_string()))?;
+    for chunk in bytes.chunks_exact(elem_bytes) {
+        let bytes: [u8; 4] = chunk
+            .try_into()
+            .map_err(|_| Error::Runtime("invalid f32 tensor element".to_string()))?;
+        values.push(f32::from_ne_bytes(bytes));
+    }
     if !values.iter().all(|value| value.is_finite()) {
         return Err(Error::Config(
             "tensor contains non-finite floating point values".to_string(),
