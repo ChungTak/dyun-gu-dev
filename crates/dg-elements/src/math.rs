@@ -178,7 +178,11 @@ pub fn top_k(values: &[f32], k: usize) -> Result<Vec<(usize, f32)>> {
             limit: MAX_TOP_K,
         });
     }
-    let mut indexed = values.iter().copied().enumerate().collect::<Vec<_>>();
+    let mut indexed = Vec::new();
+    indexed
+        .try_reserve_exact(values.len())
+        .map_err(|_| Error::Runtime("top_k indexed allocation failed".to_string()))?;
+    indexed.extend(values.iter().copied().enumerate());
     indexed.sort_by(|left, right| right.1.total_cmp(&left.1));
     indexed.truncate(k);
     Ok(indexed)
