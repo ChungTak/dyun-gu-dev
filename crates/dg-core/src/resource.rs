@@ -157,7 +157,7 @@ impl ResourcePolicy {
         }
     }
 
-    fn validate(policy: &ResourcePolicy) -> Result<()> {
+    pub(crate) fn validate(policy: &ResourcePolicy) -> Result<()> {
         Self::check_nonzero(policy.max_config_bytes, "max_config_bytes")?;
         Self::check_nonzero(policy.max_include_depth, "max_include_depth")?;
         Self::check_nonzero(policy.max_include_count, "max_include_count")?;

@@ -153,7 +153,7 @@ impl MemoryPoolConfig {
         Ok(config)
     }
 
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.max_cached_bytes == 0 {
             return Err(Error::InvalidArgument(
                 "max_cached_bytes must be > 0".to_string(),
