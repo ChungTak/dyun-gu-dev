@@ -21,6 +21,11 @@ use crate::io::{
     strides_from_w_stride, try_zeroed_vec, IoPath,
 };
 
+/// Hard ceiling on the number of input/output tensors a model may declare.
+/// This prevents adversarial or malformed models from forcing unbounded
+/// allocation loops during metadata discovery.
+const MAX_RKNN_IO_COUNT: usize = 1024;
+
 /// Returns `true` when the real RKNN backend is compiled in.
 #[cfg_attr(test, allow(dead_code))]
 pub const fn backend_enabled() -> bool {
@@ -246,12 +251,39 @@ impl RknnBackend {
         };
         check_status(status, "rknn_query(IN_OUT_NUM)")?;
 
+        let n_input = usize::try_from(io_num.n_input)
+            .map_err(|_| Error::Backend("rknn input count out of range".to_string()))?;
+        let n_output = usize::try_from(io_num.n_output)
+            .map_err(|_| Error::Backend("rknn output count out of range".to_string()))?;
+        if n_input > MAX_RKNN_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "rknn model declares {n_input} inputs, limit is {MAX_RKNN_IO_COUNT}"
+            )));
+        }
+        if n_output > MAX_RKNN_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "rknn model declares {n_output} outputs, limit is {MAX_RKNN_IO_COUNT}"
+            )));
+        }
+
         self.io_mems = None;
         self.zero_copy_failed = false;
         self.input_attrs.clear();
         self.output_attrs.clear();
         self.input_infos.clear();
         self.output_infos.clear();
+        self.input_attrs
+            .try_reserve_exact(n_input)
+            .map_err(|_| Error::Backend("rknn input attribute allocation failed".to_string()))?;
+        self.input_infos
+            .try_reserve_exact(n_input)
+            .map_err(|_| Error::Backend("rknn input info allocation failed".to_string()))?;
+        self.output_attrs
+            .try_reserve_exact(n_output)
+            .map_err(|_| Error::Backend("rknn output attribute allocation failed".to_string()))?;
+        self.output_infos
+            .try_reserve_exact(n_output)
+            .map_err(|_| Error::Backend("rknn output info allocation failed".to_string()))?;
 
         for index in 0..io_num.n_input {
             let mut attr: sys::rknn_tensor_attr = unsafe { std::mem::zeroed() };
@@ -325,7 +357,9 @@ impl RknnBackend {
     fn setup_zero_copy(&self) -> Result<ZeroCopyBinding> {
         let context = self.context()?;
         let bind = |attrs: &[sys::rknn_tensor_attr], role: &str| -> Result<Vec<IoMem>> {
-            let mut mems = Vec::with_capacity(attrs.len());
+            let mut mems = Vec::new();
+            mems.try_reserve_exact(attrs.len())
+                .map_err(|_| Error::Backend(format!("rknn {role} io_mem allocation failed")))?;
             for attr in attrs {
                 let size = if attr.size_with_stride > 0 {
                     attr.size_with_stride
@@ -371,7 +405,10 @@ impl RknnBackend {
         check_status(status, "rknn_run")?;
 
         let device = dg_core::CpuDevice::new();
-        let mut tensors = Vec::with_capacity(self.output_infos.len());
+        let mut tensors = Vec::new();
+        tensors
+            .try_reserve_exact(self.output_infos.len())
+            .map_err(|_| Error::Backend("rknn zero-copy output allocation failed".to_string()))?;
         for (mem, info) in binding.outputs.iter().zip(&self.output_infos) {
             let tensor = info.allocate(&device)?;
             let bytes = match &info.strides {
@@ -403,7 +440,10 @@ impl RknnBackend {
             .iter()
             .map(|tensor| tensor.buffer().read_bytes())
             .collect::<std::result::Result<Vec<_>, dg_core::Error>>()?;
-        let mut inputs_set = Vec::with_capacity(input_buffers.len());
+        let mut inputs_set = Vec::new();
+        inputs_set
+            .try_reserve_exact(input_buffers.len())
+            .map_err(|_| Error::Backend("rknn staging input set allocation failed".to_string()))?;
         for (index, buffer) in input_buffers.iter().enumerate() {
             let index = u32::try_from(index).map_err(|_| {
                 Error::InvalidOption("rknn input index does not fit in u32".to_string())
@@ -429,7 +469,10 @@ impl RknnBackend {
 
         let output_count = u32::try_from(self.output_infos.len())
             .map_err(|_| Error::InvalidOption("rknn output count exceeds u32".to_string()))?;
-        let mut outputs = Vec::with_capacity(self.output_infos.len());
+        let mut outputs = Vec::new();
+        outputs
+            .try_reserve_exact(self.output_infos.len())
+            .map_err(|_| Error::Backend("rknn staging output set allocation failed".to_string()))?;
         for index in 0..self.output_infos.len() {
             let index = u32::try_from(index).map_err(|_| {
                 Error::InvalidOption("rknn output index does not fit in u32".to_string())
@@ -449,7 +492,10 @@ impl RknnBackend {
         check_status(status, "rknn_outputs_get")?;
 
         let device = dg_core::CpuDevice::new();
-        let mut tensors = Vec::with_capacity(outputs.len());
+        let mut tensors = Vec::new();
+        tensors.try_reserve_exact(outputs.len()).map_err(|_| {
+            Error::Backend("rknn staging output tensor allocation failed".to_string())
+        })?;
         for (index, output) in outputs.iter().enumerate() {
             if output.buf.is_null() {
                 release_outputs(context, &mut outputs)?;

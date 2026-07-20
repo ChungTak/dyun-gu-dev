@@ -2529,7 +2529,13 @@ pub unsafe extern "C" fn dg_backend_run(
             // SAFETY: the caller supplies `input_count` valid tensor pointers.
             unsafe { std::slice::from_raw_parts(inputs, input_count) }
         };
-        let mut tensors = Vec::with_capacity(input_count);
+        let mut tensors = Vec::new();
+        tensors.try_reserve_exact(input_count).map_err(|_| {
+            (
+                DgStatus::RuntimeError,
+                format!("input tensor vector allocation failed for {input_count}"),
+            )
+        })?;
         for handle in input_handles {
             if handle.is_null() {
                 return Err((DgStatus::NullPointer, "input tensor is null".to_string()));

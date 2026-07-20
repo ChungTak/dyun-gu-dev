@@ -23,6 +23,11 @@ pub fn backend_enabled() -> bool {
     true
 }
 
+/// Hard ceiling on the number of input/output tensors a model may declare.
+/// This prevents adversarial or malformed models from forcing unbounded
+/// metadata discovery loops and allocations.
+const MAX_OPENVINO_IO_COUNT: usize = 1024;
+
 /// A submitted OpenVINO request that is still in flight.
 ///
 /// The `inputs` tensor vector must outlive the asynchronous inference because
@@ -322,7 +327,10 @@ impl OpenVINOBackend {
 
         let mut device_kinds = Vec::new();
         let mut all_precisions = Vec::new();
-        let mut records = Vec::with_capacity(available.len());
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(available.len())
+            .map_err(|_| Error::Backend("openvino device record allocation failed".to_string()))?;
         let mut execution_modes = Vec::new();
 
         for device in available {
@@ -407,7 +415,10 @@ impl OpenVINOBackend {
     }
 
     fn fill_input_tensors(&self, inputs: &[Tensor]) -> Result<Vec<OvTensor>> {
-        let mut ov_inputs = Vec::with_capacity(inputs.len());
+        let mut ov_inputs = Vec::new();
+        ov_inputs
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| Error::Backend("openvino input tensor allocation failed".to_string()))?;
         for (index, input) in inputs.iter().enumerate() {
             let info = &self.input_infos[index];
             let dims = info
@@ -449,7 +460,10 @@ impl OpenVINOBackend {
 
     fn copy_output_tensors(&self, request: &InferRequest) -> Result<Vec<Tensor>> {
         let device = dg_core::CpuDevice::new();
-        let mut outputs = Vec::with_capacity(self.output_infos.len());
+        let mut outputs = Vec::new();
+        outputs
+            .try_reserve_exact(self.output_infos.len())
+            .map_err(|_| Error::Backend("openvino output tensor allocation failed".to_string()))?;
         for (index, output_info) in self.output_infos.iter().enumerate() {
             let ov_tensor = request
                 .get_output_tensor_by_index(index)
@@ -645,8 +659,21 @@ impl InferBackend for OpenVINOBackend {
         let output_count = compiled_model
             .get_output_size()
             .map_err(|err| Error::Backend(err.to_string()))?;
+        if input_count > MAX_OPENVINO_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "openvino model declares {input_count} inputs, limit is {MAX_OPENVINO_IO_COUNT}"
+            )));
+        }
+        if output_count > MAX_OPENVINO_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "openvino model declares {output_count} outputs, limit is {MAX_OPENVINO_IO_COUNT}"
+            )));
+        }
 
-        let mut input_infos = Vec::with_capacity(input_count);
+        let mut input_infos = Vec::new();
+        input_infos
+            .try_reserve_exact(input_count)
+            .map_err(|_| Error::Backend("openvino input info allocation failed".to_string()))?;
         for index in 0..input_count {
             let port = compiled_model
                 .get_input_by_index(index)
@@ -654,7 +681,10 @@ impl InferBackend for OpenVINOBackend {
             input_infos.push(Self::tensor_info_from_port(&port, self.device_kind())?);
         }
 
-        let mut output_infos = Vec::with_capacity(output_count);
+        let mut output_infos = Vec::new();
+        output_infos
+            .try_reserve_exact(output_count)
+            .map_err(|_| Error::Backend("openvino output info allocation failed".to_string()))?;
         for index in 0..output_count {
             let port = compiled_model
                 .get_output_by_index(index)
@@ -698,8 +728,14 @@ impl InferBackend for OpenVINOBackend {
             ));
         }
 
-        let mut partial_shapes = Vec::with_capacity(input_shapes.len());
-        let mut input_ports = Vec::with_capacity(input_shapes.len());
+        let mut partial_shapes = Vec::new();
+        let mut input_ports = Vec::new();
+        partial_shapes
+            .try_reserve_exact(input_shapes.len())
+            .map_err(|_| Error::Backend("openvino partial shape allocation failed".to_string()))?;
+        input_ports
+            .try_reserve_exact(input_shapes.len())
+            .map_err(|_| Error::Backend("openvino input port allocation failed".to_string()))?;
         for (index, shape) in input_shapes.iter().enumerate() {
             let dims = shape
                 .dims()
@@ -752,18 +788,21 @@ impl InferBackend for OpenVINOBackend {
 
         self.compiled_model = Some(compiled_model);
         let existing_infos = self.input_infos.clone();
-        self.input_infos = input_shapes
-            .iter()
-            .enumerate()
-            .map(|(index, shape)| {
-                let mut info = TensorInfo::new(shape.clone(), existing_infos[index].dtype)
-                    .with_layout(existing_infos[index].layout.unwrap_or(DataFormat::Auto));
-                if let Some(name) = existing_infos[index].name.clone() {
-                    info = info.with_name(name);
-                }
-                info
-            })
-            .collect();
+        let mut new_input_infos = Vec::new();
+        new_input_infos
+            .try_reserve_exact(input_shapes.len())
+            .map_err(|_| {
+                Error::Backend("openvino reshape input info allocation failed".to_string())
+            })?;
+        for (index, shape) in input_shapes.iter().enumerate() {
+            let mut info = TensorInfo::new(shape.clone(), existing_infos[index].dtype)
+                .with_layout(existing_infos[index].layout.unwrap_or(DataFormat::Auto));
+            if let Some(name) = existing_infos[index].name.clone() {
+                info = info.with_name(name);
+            }
+            new_input_infos.push(info);
+        }
+        self.input_infos = new_input_infos;
 
         let output_count = self
             .compiled_model
@@ -771,7 +810,15 @@ impl InferBackend for OpenVINOBackend {
             .ok_or_else(|| Error::InvalidOption("compiled model missing".to_string()))?
             .get_output_size()
             .map_err(|err| Error::Backend(err.to_string()))?;
-        let mut output_infos = Vec::with_capacity(output_count);
+        if output_count > MAX_OPENVINO_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "openvino reshaped model declares {output_count} outputs, limit is {MAX_OPENVINO_IO_COUNT}"
+            )));
+        }
+        let mut output_infos = Vec::new();
+        output_infos.try_reserve_exact(output_count).map_err(|_| {
+            Error::Backend("openvino reshape output info allocation failed".to_string())
+        })?;
         for index in 0..output_count {
             let port = self
                 .compiled_model

@@ -35,6 +35,11 @@ pub const fn backend_enabled() -> bool {
     true
 }
 
+/// Hard ceiling on the number of input/output tensors a network may declare.
+/// This prevents adversarial or malformed bmodels from forcing unbounded
+/// metadata discovery loops and allocations.
+const MAX_SOPHON_IO_COUNT: usize = 1024;
+
 /// Deployment mode this crate was compiled for. SoC and Host (PCIe) builds link
 /// against different vendor libraries, so the runtime request must match.
 const fn compiled_deploy_mode() -> dg_core::DeployMode {
@@ -373,8 +378,14 @@ impl InferBackend for SophonBackend {
             )));
         }
 
-        let mut input_mems: Vec<DeviceMem> = Vec::with_capacity(inputs.len());
-        let mut input_tensors: Vec<sys::bm_tensor_t> = Vec::with_capacity(inputs.len());
+        let mut input_mems: Vec<DeviceMem> = Vec::new();
+        let mut input_tensors: Vec<sys::bm_tensor_t> = Vec::new();
+        input_mems
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| Error::Backend("sophon input memory allocation failed".to_string()))?;
+        input_tensors
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| Error::Backend("sophon input tensor set allocation failed".to_string()))?;
         for (index, tensor) in inputs.iter().enumerate() {
             let info = &self.input_infos[index];
             let dtype = SophonDataType::from_data_type(info.dtype)?;
@@ -393,8 +404,16 @@ impl InferBackend for SophonBackend {
             input_mems.push(mem);
         }
 
-        let mut output_mems: Vec<DeviceMem> = Vec::with_capacity(self.output_infos.len());
-        let mut output_tensors: Vec<sys::bm_tensor_t> = Vec::with_capacity(self.output_infos.len());
+        let mut output_mems: Vec<DeviceMem> = Vec::new();
+        let mut output_tensors: Vec<sys::bm_tensor_t> = Vec::new();
+        output_mems
+            .try_reserve_exact(self.output_infos.len())
+            .map_err(|_| Error::Backend("sophon output memory allocation failed".to_string()))?;
+        output_tensors
+            .try_reserve_exact(self.output_infos.len())
+            .map_err(|_| {
+                Error::Backend("sophon output tensor set allocation failed".to_string())
+            })?;
         for info in &self.output_infos {
             let dtype = SophonDataType::from_data_type(info.dtype)?;
             let size = convert::byte_size(dtype, &info.shape)?;
@@ -432,7 +451,10 @@ impl InferBackend for SophonBackend {
         check_status(status, "bm_thread_sync")?;
 
         let device = CpuDevice::new();
-        let mut results = Vec::with_capacity(output_tensors.len());
+        let mut results = Vec::new();
+        results
+            .try_reserve_exact(output_tensors.len())
+            .map_err(|_| Error::Backend("sophon output result allocation failed".to_string()))?;
         for (index, out) in output_tensors.iter().enumerate() {
             let code = i32::try_from(out.dtype)
                 .map_err(|_| Error::Backend("Sophon output dtype overflow".to_string()))?;
@@ -493,7 +515,15 @@ fn collect_infos(
             "Sophon network metadata is incomplete".to_string(),
         ));
     }
-    let mut infos = Vec::with_capacity(count);
+    if count > MAX_SOPHON_IO_COUNT {
+        return Err(Error::Backend(format!(
+            "sophon network declares {count} tensors, limit is {MAX_SOPHON_IO_COUNT}"
+        )));
+    }
+    let mut infos = Vec::new();
+    infos
+        .try_reserve_exact(count)
+        .map_err(|_| Error::Backend("sophon tensor info allocation failed".to_string()))?;
     for index in 0..count {
         // SAFETY: bmrt guarantees the dtype/shape arrays hold `count` entries.
         let code = i32::try_from(unsafe { *dtypes.add(index) })

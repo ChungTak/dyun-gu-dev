@@ -24,6 +24,11 @@ use ffi::{Context, CudaStream, DeviceBuffer, Engine, Runtime};
 #[cfg(not(feature = "backend"))]
 use crate::mock_sys as sys;
 
+/// Hard ceiling on the number of input/output bindings a TensorRT engine may
+/// declare. This prevents malformed engines from forcing unbounded metadata
+/// discovery loops or allocations.
+const MAX_TENSORRT_IO_COUNT: usize = 1024;
+
 #[cfg(feature = "backend")]
 pub const fn backend_enabled() -> bool {
     true
@@ -469,9 +474,21 @@ impl TensorRtBackend {
     }
 
     fn inspect_bindings(engine: &Engine) -> Result<(Vec<IoBinding>, Vec<IoBinding>)> {
+        let num_io = engine.num_io()?;
+        if num_io > MAX_TENSORRT_IO_COUNT {
+            return Err(Error::Backend(format!(
+                "tensorrt engine declares {num_io} bindings, limit is {MAX_TENSORRT_IO_COUNT}"
+            )));
+        }
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
-        for index in 0..engine.num_io()? {
+        inputs
+            .try_reserve_exact(num_io)
+            .map_err(|_| Error::Backend("tensorrt input binding allocation failed".to_string()))?;
+        outputs
+            .try_reserve_exact(num_io)
+            .map_err(|_| Error::Backend("tensorrt output binding allocation failed".to_string()))?;
+        for index in 0..num_io {
             let name = engine.io_name(index)?;
             let dtype = trt_dtype_to_datatype(engine.io_dtype(index)?)?;
             let engine_dims = engine.io_dims(index)?;
@@ -500,16 +517,20 @@ impl TensorRtBackend {
     }
 
     fn binding_infos(bindings: &[IoBinding]) -> Result<Vec<TensorInfo>> {
-        bindings
-            .iter()
-            .map(|binding| {
-                let (shape, _) = engine_dims_to_shape(&binding.engine_dims, &binding.name)?;
-                Ok(TensorInfo::new(shape, binding.dtype)
+        let mut infos = Vec::new();
+        infos
+            .try_reserve_exact(bindings.len())
+            .map_err(|_| Error::Backend("tensorrt binding info allocation failed".to_string()))?;
+        for binding in bindings {
+            let (shape, _) = engine_dims_to_shape(&binding.engine_dims, &binding.name)?;
+            infos.push(
+                TensorInfo::new(shape, binding.dtype)
                     .with_name(binding.name.clone())
                     .with_layout(DataFormat::Auto)
-                    .with_device(DeviceKind::CudaGpu))
-            })
-            .collect()
+                    .with_device(DeviceKind::CudaGpu),
+            );
+        }
+        Ok(infos)
     }
 
     fn validate_inputs(&self, inputs: &[Tensor]) -> Result<()> {
@@ -646,16 +667,21 @@ impl InferBackend for TensorRtBackend {
             let dims = shape_to_dims(shape, &binding.name)?;
             context.set_input_shape(&binding.name, &dims)?;
         }
-        self.input_infos = input_shapes
-            .iter()
-            .zip(&self.inputs)
-            .map(|(shape, binding)| {
+        let mut new_input_infos = Vec::new();
+        new_input_infos
+            .try_reserve_exact(input_shapes.len())
+            .map_err(|_| {
+                Error::Backend("tensorrt reshape input info allocation failed".to_string())
+            })?;
+        for (shape, binding) in input_shapes.iter().zip(&self.inputs) {
+            new_input_infos.push(
                 TensorInfo::new(shape.clone(), binding.dtype)
                     .with_name(binding.name.clone())
                     .with_layout(DataFormat::Auto)
-                    .with_device(DeviceKind::CudaGpu)
-            })
-            .collect();
+                    .with_device(DeviceKind::CudaGpu),
+            );
+        }
+        self.input_infos = new_input_infos;
         self.refresh_output_infos()
     }
 
@@ -696,7 +722,10 @@ impl InferBackend for TensorRtBackend {
         };
 
         let stream = CudaStream::create()?;
-        let mut input_buffers = Vec::with_capacity(self.inputs.len());
+        let mut input_buffers = Vec::new();
+        input_buffers
+            .try_reserve_exact(self.inputs.len())
+            .map_err(|_| Error::Backend("tensorrt input buffer allocation failed".to_string()))?;
         for (tensor, binding) in inputs.iter().zip(&self.inputs) {
             let dims = shape_to_dims(tensor.desc().shape(), &binding.name)?;
             context.set_input_shape(&binding.name, &dims)?;
@@ -707,8 +736,14 @@ impl InferBackend for TensorRtBackend {
             input_buffers.push(buffer);
         }
 
-        let mut output_buffers = Vec::with_capacity(self.outputs.len());
-        let mut output_shapes = Vec::with_capacity(self.outputs.len());
+        let mut output_buffers = Vec::new();
+        let mut output_shapes = Vec::new();
+        output_buffers
+            .try_reserve_exact(self.outputs.len())
+            .map_err(|_| Error::Backend("tensorrt output buffer allocation failed".to_string()))?;
+        output_shapes
+            .try_reserve_exact(self.outputs.len())
+            .map_err(|_| Error::Backend("tensorrt output shape allocation failed".to_string()))?;
         for binding in &self.outputs {
             let dims = context.tensor_shape(&binding.name)?;
             let shape = dims_to_shape(&dims, &binding.name)?;
@@ -723,7 +758,10 @@ impl InferBackend for TensorRtBackend {
         stream.synchronize()?;
 
         let device = CpuDevice::new();
-        let mut outputs = Vec::with_capacity(self.outputs.len());
+        let mut outputs = Vec::new();
+        outputs
+            .try_reserve_exact(self.outputs.len())
+            .map_err(|_| Error::Backend("tensorrt output allocation failed".to_string()))?;
         for ((binding, buffer), shape) in
             self.outputs.iter().zip(&output_buffers).zip(output_shapes)
         {
