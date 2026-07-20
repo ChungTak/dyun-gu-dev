@@ -217,7 +217,12 @@ pub fn nms(detections: &[Detection], threshold: f32) -> Result<Vec<Detection>> {
             limit: MAX_NMS_CANDIDATES,
         });
     }
-    Ok(nms_inner(detections.to_vec(), threshold))
+    let mut cloned = Vec::new();
+    cloned
+        .try_reserve_exact(detections.len())
+        .map_err(|_| Error::Runtime("nms candidate allocation failed".to_string()))?;
+    cloned.extend(detections.iter().cloned());
+    nms_inner(cloned, threshold)
 }
 
 /// NMS that deterministically keeps only the top `max_candidates` by score
@@ -256,14 +261,16 @@ pub fn nms_with_top_k(
         }
     }
 
-    let top = heap
-        .into_sorted_vec()
-        .into_iter()
-        .map(|reverse| reverse.0 .0.clone())
-        .collect::<Vec<_>>();
+    let sorted = heap.into_sorted_vec();
+    let mut top = Vec::new();
+    top.try_reserve_exact(sorted.len())
+        .map_err(|_| Error::Runtime("nms top-k output allocation failed".to_string()))?;
+    for Reverse(ByScore(detection)) in sorted {
+        top.push(detection.clone());
+    }
     // `into_sorted_vec` on a max-heap of `Reverse<ByScore>` returns the
     // highest-score detections first, matching `nms_inner`'s expectation.
-    Ok(nms_inner(top, threshold))
+    nms_inner(top, threshold)
 }
 
 /// A score-only view of a detection so the top-k heap does not need to
@@ -296,9 +303,12 @@ impl<'a> Ord for ByScore<'a> {
     }
 }
 
-fn nms_inner(mut detections: Vec<Detection>, threshold: f32) -> Vec<Detection> {
+fn nms_inner(mut detections: Vec<Detection>, threshold: f32) -> Result<Vec<Detection>> {
     detections.sort_by(|left, right| right.score.total_cmp(&left.score));
     let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(detections.len())
+        .map_err(|_| Error::Runtime("nms selected allocation failed".to_string()))?;
     for candidate in detections {
         let suppressed = selected.iter().any(|existing: &Detection| {
             existing.class_id == candidate.class_id
@@ -308,7 +318,7 @@ fn nms_inner(mut detections: Vec<Detection>, threshold: f32) -> Vec<Detection> {
             selected.push(candidate);
         }
     }
-    selected
+    Ok(selected)
 }
 
 fn usize_to_f32(value: usize) -> Result<f32> {
