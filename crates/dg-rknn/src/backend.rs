@@ -461,15 +461,15 @@ impl RknnBackend {
             let tensor = info.allocate(&device)?;
             let output_size = usize::try_from(output.size)
                 .map_err(|_| Error::Backend("rknn output size exceeds usize".to_string()))?;
-            let bytes = unsafe { std::slice::from_raw_parts(output.buf as *const u8, output_size) };
-            if tensor.buffer().len() != bytes.len() {
+            if tensor.buffer().len() != output_size {
                 release_outputs(context, &mut outputs)?;
                 return Err(Error::Backend(format!(
                     "rknn output size mismatch: expected {}, got {}",
                     tensor.buffer().len(),
-                    bytes.len()
+                    output_size
                 )));
             }
+            let bytes = unsafe { std::slice::from_raw_parts(output.buf as *const u8, output_size) };
             tensor.buffer().write_from_slice(bytes)?;
             tensors.push(tensor);
         }
