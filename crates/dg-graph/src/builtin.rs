@@ -246,7 +246,14 @@ impl Element for MockInferenceElement {
                 let mut outputs = self.runtime.run(&[tensor])?;
                 for output in &mut outputs {
                     let bytes = output.buffer().read_bytes()?;
-                    let fill = vec![self.fill_value; bytes.len()];
+                    let len = bytes.len();
+                    let mut fill = Vec::new();
+                    fill.try_reserve_exact(len).map_err(|_| {
+                        Error::Config(format!(
+                            "mock inference fill allocation failed for {len} bytes"
+                        ))
+                    })?;
+                    fill.resize(len, self.fill_value);
                     output.buffer().write_from_slice(&fill)?;
                 }
                 outputs
