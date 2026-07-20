@@ -437,8 +437,15 @@ impl ByteTrack {
         for track in &mut self.tracks {
             track.lost = track.lost.saturating_add(1);
         }
-        let mut matched = vec![false; self.tracks.len()];
+        let mut matched = Vec::new();
+        matched
+            .try_reserve_exact(self.tracks.len())
+            .map_err(|_| Error::Runtime("bytetrack matched allocation failed".to_string()))?;
+        matched.resize(self.tracks.len(), false);
         let mut output = Vec::new();
+        output
+            .try_reserve_exact(detections.len())
+            .map_err(|_| Error::Runtime("bytetrack output allocation failed".to_string()))?;
         for detection in detections {
             let best = self
                 .tracks
@@ -861,7 +868,11 @@ fn resnet_preprocess_tensor(
         ),
         policy,
     )?;
+    let output_len = output.buffer().len();
     let mut bytes = Vec::new();
+    bytes.try_reserve_exact(output_len).map_err(|_| {
+        Error::Runtime("resnet preprocess output bytes allocation failed".to_string())
+    })?;
     for channel in 0..3 {
         for y in 0..height {
             for x in 0..width {
