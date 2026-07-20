@@ -238,8 +238,9 @@ pub fn nms_with_top_k(
         if heap.len() < max_candidates {
             heap.push(Reverse(ByScore(detection)));
         } else {
-            // SAFETY: the heap is non-empty because max_candidates > 0.
-            let lowest = heap.peek().unwrap();
+            let lowest = heap.peek().ok_or_else(|| {
+                Error::Runtime("nms candidate heap unexpectedly empty".to_string())
+            })?;
             if detection.score.total_cmp(&lowest.0.score()) == std::cmp::Ordering::Greater {
                 heap.pop();
                 heap.push(Reverse(ByScore(detection)));
