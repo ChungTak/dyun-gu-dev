@@ -402,15 +402,19 @@ impl Element for PpocrRec {
                     "ocr logits do not match alphabet size".to_string(),
                 ));
             }
-            let rows = logits.len() / class_count;
-            if rows > MAX_OCR_ROWS {
+            let row_count = logits.len() / class_count;
+            if row_count > MAX_OCR_ROWS {
                 return Err(Error::ResourceLimit {
                     resource: "ppocr_rec rows".to_string(),
-                    requested: rows,
+                    requested: row_count,
                     limit: MAX_OCR_ROWS,
                 });
             }
-            let rows: Vec<&[f32]> = logits.chunks_exact(class_count).collect();
+            let mut rows: Vec<&[f32]> = Vec::new();
+            rows.try_reserve_exact(row_count).map_err(|_| {
+                Error::Runtime("ppocr_rec row vector allocation failed".to_string())
+            })?;
+            rows.extend(logits.chunks_exact(class_count));
             let text = ctc_greedy_decode(&rows, &self.alphabet, self.blank)?;
             io.send(
                 "out",
