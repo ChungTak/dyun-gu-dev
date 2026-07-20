@@ -98,14 +98,15 @@ pub fn resize_letterbox(
     )?
     .max(1)
     .min(target_height);
-    let mut output =
-        vec![
-            padding;
-            target_width
-                .checked_mul(target_height)
-                .and_then(|size| size.checked_mul(channels))
-                .ok_or_else(|| Error::Config("resize target size overflow".to_string()))?
-        ];
+    let target_size = target_width
+        .checked_mul(target_height)
+        .and_then(|size| size.checked_mul(channels))
+        .ok_or_else(|| Error::Config("resize target size overflow".to_string()))?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(target_size)
+        .map_err(|_| Error::Config("resize output allocation failed".to_string()))?;
+    output.resize(target_size, padding);
     let pad_x = (target_width - resized_width) / 2;
     let pad_y = (target_height - resized_height) / 2;
     for y in 0..resized_height {

@@ -326,7 +326,13 @@ fn preprocess_tensor(
         .checked_mul(target_height)
         .and_then(|size| size.checked_mul(channels))
         .ok_or_else(|| Error::Runtime("output dimensions overflow".to_string()))?;
-    let mut bytes = Vec::with_capacity(count * std::mem::size_of::<f32>());
+    let byte_count = count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| Error::Runtime("yolo output byte count overflow".to_string()))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_count)
+        .map_err(|_| Error::Runtime("yolo output byte allocation failed".to_string()))?;
     for channel in 0..channels {
         for y in 0..target_height {
             for x in 0..target_width {
