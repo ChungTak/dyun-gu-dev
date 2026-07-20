@@ -766,7 +766,10 @@ fn resnet_preprocess_tensor(
         return Err(Error::Config("resnet expects three channels".to_string()));
     }
     let values = tensor_values(input)?;
-    let mut hwc = vec![0.0; values.len()];
+    let mut hwc = Vec::new();
+    hwc.try_reserve_exact(values.len())
+        .map_err(|_| Error::Runtime("resnet preprocess hwc allocation failed".to_string()))?;
+    hwc.resize(values.len(), 0.0);
     for channel in 0..channels {
         for y in 0..source_height {
             for x in 0..source_width {
