@@ -606,14 +606,20 @@ fn decode_retinaface(
         })));
     }
 
-    let candidates: Vec<FaceDetection> = heap
-        .into_sorted_vec()
-        .into_iter()
-        .map(|reverse| reverse.0 .0)
-        .collect();
+    let sorted = heap.into_sorted_vec();
+    let mut candidates = Vec::new();
+    candidates
+        .try_reserve_exact(sorted.len())
+        .map_err(|_| Error::Runtime("retinaface candidate allocation failed".to_string()))?;
+    for Reverse(ByFaceScore(detection)) in sorted {
+        candidates.push(detection);
+    }
     // `into_sorted_vec` on a max-heap of `Reverse<ByFaceScore>` returns the
     // highest-score detections first, which is what the greedy NMS below expects.
     let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(candidates.len())
+        .map_err(|_| Error::Runtime("retinaface selected allocation failed".to_string()))?;
     for candidate in candidates {
         if selected
             .iter()
