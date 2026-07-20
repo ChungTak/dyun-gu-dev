@@ -436,7 +436,11 @@ impl ByteTrack {
         for track in &mut self.tracks {
             track.lost = track.lost.saturating_add(1);
         }
-        let mut matched = vec![false; self.tracks.len()];
+        let mut matched = Vec::new();
+        matched
+            .try_reserve_exact(self.tracks.len())
+            .map_err(|_| Error::Runtime("bytetrack matched allocation failed".to_string()))?;
+        matched.resize(self.tracks.len(), false);
         let mut output = Vec::new();
         output
             .try_reserve_exact(detections.len())
