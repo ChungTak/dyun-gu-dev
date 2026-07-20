@@ -574,8 +574,9 @@ fn decode_retinaface(
             continue;
         }
         if heap.len() == MAX_NMS_CANDIDATES {
-            // SAFETY: the heap is non-empty and at capacity.
-            let lowest = heap.peek().unwrap();
+            let lowest = heap.peek().ok_or_else(|| {
+                Error::Runtime("retinaface candidate heap unexpectedly empty".to_string())
+            })?;
             if score.total_cmp(&lowest.0.score()) != Ordering::Greater {
                 continue;
             }
