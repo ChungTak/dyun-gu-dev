@@ -525,7 +525,12 @@ pub fn generate_anchors(
             limit: MAX_ANCHORS,
         });
     }
-    let mut anchors = Vec::with_capacity(anchor_count);
+    let mut anchors = Vec::new();
+    anchors.try_reserve_exact(anchor_count).map_err(|_| {
+        Error::Runtime(format!(
+            "retinaface anchor allocation failed for {anchor_count} anchors"
+        ))
+    })?;
     for y in (0..height).step_by(stride) {
         for x in (0..width).step_by(stride) {
             let center_x = dimension_or_zero(x) / dimension_or_one(width);
@@ -676,7 +681,13 @@ fn detect_text_regions(tensor: &Tensor, threshold: f32) -> Result<Vec<OcrText>> 
     if values.len() != expected {
         return Err(Error::Runtime("ocr map size mismatch".to_string()));
     }
-    let mut visited = vec![false; expected];
+    let mut visited = Vec::new();
+    visited.try_reserve_exact(expected).map_err(|_| {
+        Error::Runtime(format!(
+            "ppocr_det visited allocation failed for {expected} pixels"
+        ))
+    })?;
+    visited.resize(expected, false);
     let mut output = Vec::new();
     for start in 0..expected {
         if visited[start] || values[start] < threshold {
