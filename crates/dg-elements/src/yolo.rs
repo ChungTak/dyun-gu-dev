@@ -291,7 +291,10 @@ fn preprocess_tensor(
             "input tensor size does not match its descriptor".to_string(),
         ));
     }
-    let mut hwc = vec![0.0; expected];
+    let mut hwc = Vec::new();
+    hwc.try_reserve_exact(expected)
+        .map_err(|_| Error::Runtime("yolo preprocess hwc allocation failed".to_string()))?;
+    hwc.resize(expected, 0.0);
     for y in 0..source_height {
         for x in 0..source_width {
             for channel in 0..channels {

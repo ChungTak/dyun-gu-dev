@@ -149,10 +149,18 @@ pub fn softmax(values: &[f32]) -> Result<Vec<f32>> {
     let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exponents = values.iter().map(|value| (*value - max).exp());
     let sum: f32 = exponents.clone().sum();
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(values.len())
+        .map_err(|_| Error::Runtime("softmax output allocation failed".to_string()))?;
     if sum == 0.0 || !sum.is_finite() {
-        return Ok(vec![0.0; values.len()]);
+        output.resize(values.len(), 0.0);
+        return Ok(output);
     }
-    Ok(exponents.map(|value| value / sum).collect())
+    for value in exponents {
+        output.push(value / sum);
+    }
+    Ok(output)
 }
 
 pub fn top_k(values: &[f32], k: usize) -> Result<Vec<(usize, f32)>> {
