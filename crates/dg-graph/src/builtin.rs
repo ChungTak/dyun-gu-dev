@@ -573,7 +573,13 @@ fn filled_tensor(
     let tensor = Tensor::allocate_with_policy(&device, desc, policy)?;
     if dtype == DataType::F32 {
         let count = shape.element_count()?;
-        let mut bytes = Vec::with_capacity(count * std::mem::size_of::<f32>());
+        let byte_count = count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| Error::Config("filled tensor byte count overflow".to_string()))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(byte_count)
+            .map_err(|_| Error::Config("filled tensor byte allocation failed".to_string()))?;
         for _ in 0..count {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
@@ -581,7 +587,12 @@ fn filled_tensor(
     } else if dtype == DataType::U8 {
         let count = shape.element_count()?;
         let byte = f32_to_exact_u8(value)?;
-        tensor.buffer().write_from_slice(&vec![byte; count])?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(count)
+            .map_err(|_| Error::Config("filled tensor byte allocation failed".to_string()))?;
+        bytes.resize(count, byte);
+        tensor.buffer().write_from_slice(&bytes)?;
     } else {
         return Err(Error::Config(format!(
             "source element only supports f32/u8 for now, got {dtype:?}"
