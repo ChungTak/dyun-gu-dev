@@ -31,6 +31,11 @@ use crate::stream::{
 use crate::track::{CodecExtradata, CodecId as TrackCodec, TrackInfo, TrackReadiness};
 use dg_media::{MediaFrame, MediaFrameKind};
 
+/// Maximum number of tracks a single pull stream endpoint may expose.
+/// This bounds the `HashMap` built in `StreamPullElement::run` and prevents
+/// a malicious or malformed endpoint from causing unbounded allocation.
+const MAX_STREAM_TRACKS: usize = 1_000;
+
 const PULL_OUTPUT_PORT: PortSchema = PortSchema {
     name: "out",
     dtype: Some(DataType::U8),
@@ -221,6 +226,13 @@ impl StreamPullElement {
     }
 
     fn validate_tracks(tracks: &[TrackInfo]) -> dg_graph::Result<()> {
+        if tracks.len() > MAX_STREAM_TRACKS {
+            return Err(dg_graph::Error::Config(format!(
+                "stream track count {} exceeds maximum {}",
+                tracks.len(),
+                MAX_STREAM_TRACKS
+            )));
+        }
         for track in tracks {
             if track.readiness != TrackReadiness::Ready {
                 return Err(dg_graph::Error::Runtime(format!(
