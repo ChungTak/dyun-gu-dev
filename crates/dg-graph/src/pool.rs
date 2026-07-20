@@ -74,7 +74,9 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
-    /// Creates a pool with `threads` workers. Errors when `threads` is zero.
+    /// Creates a pool with `threads` workers. Errors when `threads` is zero or
+    /// the OS fails to spawn a worker; previously spawned workers are stopped
+    /// and joined so they are not left detached on failure.
     pub fn new(threads: usize) -> Result<Self> {
         if threads == 0 {
             return Err(Error::Config(
@@ -87,12 +89,25 @@ impl ThreadPool {
             signal: Mutex::new(false),
             available: Condvar::new(),
         });
-        let workers = (0..threads)
-            .map(|index| {
-                let shared = shared.clone();
-                thread::spawn(move || worker_loop(&shared, index))
-            })
-            .collect();
+        let mut workers = Vec::with_capacity(threads);
+        for index in 0..threads {
+            let worker_shared = Arc::clone(&shared);
+            match thread::Builder::new().spawn(move || worker_loop(&worker_shared, index)) {
+                Ok(handle) => workers.push(handle),
+                Err(err) => {
+                    if let Ok(mut shutdown) = shared.signal.lock() {
+                        *shutdown = true;
+                    }
+                    shared.available.notify_all();
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(Error::Runtime(format!(
+                        "failed to spawn thread pool worker {index}: {err}"
+                    )));
+                }
+            }
+        }
         Ok(Self { shared, workers })
     }
 
