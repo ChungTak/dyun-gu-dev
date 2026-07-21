@@ -57,7 +57,11 @@ impl Strides {
     }
 
     pub fn contiguous_for(shape: &Shape) -> Result<Self> {
-        let mut values = vec![0; shape.rank()];
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(shape.rank())
+            .map_err(|_| Error::Shape("failed to allocate contiguous strides".to_string()))?;
+        values.resize(shape.rank(), 0);
         let mut stride = 1usize;
         for (index, dim) in shape.dims().iter().enumerate().rev() {
             values[index] = stride;
