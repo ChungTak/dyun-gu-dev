@@ -141,9 +141,10 @@ pub fn sigmoid(value: f32) -> f32 {
 
 pub fn softmax(values: &[f32]) -> Result<Vec<f32>> {
     if !values.iter().all(|v| v.is_finite()) {
-        return Err(Error::Config(
-            "softmax input contains non-finite values".to_string(),
-        ));
+        return Err(Error::BadFrame {
+            element: "softmax".to_string(),
+            message: "softmax input contains non-finite values".to_string(),
+        });
     }
     if values.is_empty() {
         return Ok(Vec::new());

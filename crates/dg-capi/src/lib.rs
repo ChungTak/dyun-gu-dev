@@ -3,7 +3,9 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+#[cfg(test)]
+use std::ffi::CStr;
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -13,7 +15,8 @@ use std::sync::{Mutex, OnceLock, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
-    ExternalHandle, MemoryDomain, ResourcePolicy, Shape, Tensor, TensorDesc, TypeCode,
+    ExternalHandle, MemoryDomain, ProcessRuntimePolicy, ResourcePolicy, Shape, Tensor, TensorDesc,
+    TypeCode,
 };
 use dg_graph::{
     ElementMetricsSnapshot, Graph, GraphDiff, GraphFormat, GraphSpec, GraphStatus, NodeSpec,
@@ -321,6 +324,9 @@ unsafe fn clone_engine_arc(ptr: *const DgEngine) -> Arc<DgEngine> {
 }
 
 /// Runtime bootstrap options for [`dg_runtime_init`].
+///
+/// Fixed-width process hard limits. Zero values mean "use the library default
+/// for that field". Non-zero values must pass `ProcessRuntimePolicy` validation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DgRuntimeInitOptions {
@@ -328,6 +334,78 @@ pub struct DgRuntimeInitOptions {
     pub struct_size: u32,
     /// ABI struct version; must be 0 for the current definition.
     pub struct_version: u32,
+    pub max_config_bytes: usize,
+    pub max_include_depth: usize,
+    pub max_include_count: usize,
+    pub max_nodes: usize,
+    pub max_connections: usize,
+    pub max_tensor_bytes: usize,
+    pub max_frame_bytes: usize,
+    pub max_model_bytes: usize,
+    pub max_buffer_packets: usize,
+    pub max_buffer_bytes: usize,
+}
+
+/// Process-wide policy installed by [`dg_runtime_init`].
+static PROCESS_POLICY: OnceLock<ProcessRuntimePolicy> = OnceLock::new();
+
+fn installed_process_policy() -> ProcessRuntimePolicy {
+    PROCESS_POLICY
+        .get()
+        .cloned()
+        .unwrap_or_else(ProcessRuntimePolicy::default)
+}
+
+fn installed_resource_policy() -> ResourcePolicy {
+    installed_process_policy().resource_policy().clone()
+}
+
+fn process_policy_from_options(
+    options: Option<&DgRuntimeInitOptions>,
+) -> Result<ProcessRuntimePolicy, (DgStatus, String)> {
+    let defaults = ProcessRuntimePolicy::default();
+    let default_resource = defaults.resource_policy().clone();
+    let Some(options) = options else {
+        return Ok(defaults);
+    };
+    let or_default = |value: usize, default: usize| {
+        if value == 0 {
+            default
+        } else {
+            value
+        }
+    };
+    let resource = ResourcePolicy {
+        max_config_bytes: or_default(options.max_config_bytes, default_resource.max_config_bytes),
+        max_include_depth: or_default(
+            options.max_include_depth,
+            default_resource.max_include_depth,
+        ),
+        max_include_count: or_default(
+            options.max_include_count,
+            default_resource.max_include_count,
+        ),
+        max_nodes: or_default(options.max_nodes, default_resource.max_nodes),
+        max_connections: or_default(options.max_connections, default_resource.max_connections),
+        max_tensor_bytes: or_default(options.max_tensor_bytes, default_resource.max_tensor_bytes),
+        max_frame_bytes: or_default(options.max_frame_bytes, default_resource.max_frame_bytes),
+        max_model_bytes: or_default(options.max_model_bytes, default_resource.max_model_bytes),
+        max_buffer_packets: or_default(
+            options.max_buffer_packets,
+            default_resource.max_buffer_packets,
+        ),
+        max_buffer_bytes: or_default(options.max_buffer_bytes, default_resource.max_buffer_bytes),
+    };
+    ProcessRuntimePolicy::new(
+        resource,
+        *defaults.memory_pool(),
+        *defaults.stream_registry(),
+        *defaults.deadlines(),
+        defaults.affinity_capacity(),
+        defaults.affinity_ttl_seconds,
+        defaults.metrics_serialization_bytes(),
+    )
+    .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))
 }
 
 fn lock_engine_write(
@@ -363,14 +441,8 @@ fn lock_backend(backend: &DgBackend) -> std::sync::MutexGuard<'_, Box<dyn InferB
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[allow(dead_code)]
 const MAX_VIEW_LEN: u64 = ResourcePolicy::DEFAULT_MAX_MODEL_BYTES as u64;
-#[allow(dead_code)]
 const MAX_SHAPE_RANK: usize = 8;
-/// Maximum number of bytes (including the terminating NUL) scanned from a
-/// `*const c_char` argument. This prevents unbounded reads when a caller passes
-/// a non-NUL-terminated or extremely long C string.
-const MAX_CSTRING_SCAN: usize = dg_core::ResourcePolicy::DEFAULT_MAX_CONFIG_BYTES.saturating_add(1);
 
 fn check_struct_version(
     name: &str,
@@ -532,8 +604,14 @@ fn build_external_handle(
 }
 
 impl DgStringView {
-    #[allow(dead_code)]
-    fn as_str(&self) -> Result<&str, (DgStatus, String)> {
+    /// Empty view (`data` null, `len` 0) for optional omitted strings.
+    pub const EMPTY: Self = Self {
+        data: ptr::null(),
+        len: 0,
+    };
+
+    /// Borrowed UTF-8 string. Zero-length allows a null `data` pointer.
+    pub fn as_str(&self) -> Result<&str, (DgStatus, String)> {
         if self.len as u64 > MAX_VIEW_LEN {
             return Err((
                 DgStatus::InvalidArgument,
@@ -557,11 +635,34 @@ impl DgStringView {
             )
         })
     }
+
+    /// Path string: UTF-8 without embedded NUL (Rust `str` already excludes NUL).
+    fn as_path_str(&self) -> Result<&str, (DgStatus, String)> {
+        let text = self.as_str()?;
+        if text.contains('\0') {
+            return Err((
+                DgStatus::InvalidArgument,
+                "path must not contain embedded NUL".to_string(),
+            ));
+        }
+        if text.is_empty() {
+            return Err((
+                DgStatus::InvalidArgument,
+                "path string view is empty".to_string(),
+            ));
+        }
+        Ok(text)
+    }
 }
 
 impl DgByteView {
-    #[allow(dead_code)]
-    fn as_bytes(&self) -> Result<&[u8], (DgStatus, String)> {
+    /// Empty view (`data` null, `len` 0).
+    pub const EMPTY: Self = Self {
+        data: ptr::null(),
+        len: 0,
+    };
+
+    pub fn as_bytes(&self) -> Result<&[u8], (DgStatus, String)> {
         if self.len as u64 > MAX_VIEW_LEN {
             return Err((
                 DgStatus::InvalidArgument,
@@ -579,8 +680,7 @@ impl DgByteView {
 }
 
 impl DgShapeView {
-    #[allow(dead_code)]
-    fn as_dims(&self) -> Result<&[usize], (DgStatus, String)> {
+    pub fn as_dims(&self) -> Result<&[usize], (DgStatus, String)> {
         if self.rank > MAX_SHAPE_RANK {
             return Err((
                 DgStatus::InvalidArgument,
@@ -698,7 +798,10 @@ impl Engine {
             if let Some(graph) = self.graph.as_mut() {
                 graph.reload(spec.clone())?;
             } else {
-                self.graph = Some(Graph::new(spec.clone())?);
+                self.graph = Some(Graph::new_with_process_policy(
+                    spec.clone(),
+                    installed_process_policy(),
+                )?);
             }
             self.spec = spec;
             self.outputs.clear();
@@ -830,7 +933,10 @@ impl Engine {
         }
         if self.graph.is_none() {
             self.spec.validate()?;
-            self.graph = Some(Graph::new(self.spec.clone())?);
+            self.graph = Some(Graph::new_with_process_policy(
+                self.spec.clone(),
+                installed_process_policy(),
+            )?);
         }
         let graph = self
             .graph
@@ -1054,9 +1160,11 @@ fn map_graph_error(error: dg_graph::Error) -> (DgStatus, String) {
         | E::Yaml(_)
         | E::TomlDe(_)
         | E::TomlSer(_) => DgStatus::ParseError,
-        E::Element { .. } | E::Runtime(_) | E::Io(_) | E::RuntimeBackend(_) => {
-            DgStatus::RuntimeError
-        }
+        E::Element { .. }
+        | E::BadFrame { .. }
+        | E::Runtime(_)
+        | E::Io(_)
+        | E::RuntimeBackend(_) => DgStatus::RuntimeError,
         E::NotRunning | E::InvalidState(_) => DgStatus::RuntimeError,
         E::NotBuilt(_) => DgStatus::NotBuilt,
         E::ResourceLimit { .. } => DgStatus::RuntimeError,
@@ -1312,44 +1420,8 @@ fn c_device(device: DeviceKind) -> DgDeviceKind {
     }
 }
 
-unsafe fn bytes<'a>(data: *const u8, length: usize) -> Result<&'a [u8], (DgStatus, String)> {
-    if length as u64 > MAX_VIEW_LEN {
-        return Err((
-            DgStatus::InvalidArgument,
-            "data length exceeds the C ABI view limit".to_string(),
-        ));
-    }
-    if length == 0 {
-        return Ok(&[]);
-    }
-    if data.is_null() {
-        return Err((DgStatus::NullPointer, "data pointer is null".to_string()));
-    }
-    // SAFETY: the caller must provide a readable region of `length` bytes.
-    Ok(unsafe { std::slice::from_raw_parts(data, length) })
-}
-
-unsafe fn dims<'a>(values: *const usize, rank: usize) -> Result<&'a [usize], (DgStatus, String)> {
-    if rank > MAX_SHAPE_RANK {
-        return Err((
-            DgStatus::InvalidArgument,
-            format!("shape rank {rank} exceeds the C ABI limit of {MAX_SHAPE_RANK}"),
-        ));
-    }
-    if rank == 0 {
-        return Ok(&[]);
-    }
-    if values.is_null() {
-        return Err((DgStatus::NullPointer, "shape pointer is null".to_string()));
-    }
-    // SAFETY: the caller must provide `rank` readable shape dimensions.
-    Ok(unsafe { std::slice::from_raw_parts(values, rank) })
-}
-
-unsafe fn c_string<'a>(value: *const c_char) -> Result<&'a CStr, (DgStatus, String)> {
-    unsafe { c_string_bounded(value, MAX_CSTRING_SCAN) }
-}
-
+/// Bounded C-string scan retained only for unit tests covering the legacy NUL path.
+#[cfg(test)]
 unsafe fn c_string_bounded<'a>(
     value: *const c_char,
     max_len: usize,
@@ -1363,10 +1435,6 @@ unsafe fn c_string_bounded<'a>(
             "string max length is zero".to_string(),
         ));
     }
-    // Scan for the NUL terminator up front so a dirty/non-NUL-terminated
-    // pointer cannot force an unbounded read. The actual C string is then
-    // reconstructed with `CStr::from_ptr`, which is safe because the NUL has
-    // been located within the scanned region.
     for i in 0..max_len {
         if unsafe { *value.add(i) } == 0 {
             // SAFETY: `value` points to a NUL-terminated C string of length `i`.
@@ -1404,7 +1472,7 @@ fn tensor_from_bytes(
     let expected = desc
         .storage_bytes()
         .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-    ResourcePolicy::default()
+    installed_resource_policy()
         .check_tensor_bytes(expected)
         .map_err(|error| (map_core_error(&error), error.to_string()))?;
     if expected != data.len() {
@@ -1597,35 +1665,66 @@ pub unsafe extern "C" fn dg_build_capabilities_json(
     })
 }
 
-/// Idempotent process-level runtime bootstrap (INT5-09).
+/// Idempotent process-level runtime bootstrap (INT5-09 / CORE7-02).
 ///
 /// Installs built-in stream connectors when the `stream`/`cheetah` features are
-/// enabled. `options` may be null for defaults; when non-null, `struct_size`
-/// must match `sizeof(DgRuntimeInitOptions)`.
+/// enabled and records the process hard policy. `options` may be null for
+/// defaults; when non-null, `struct_size` must match `sizeof(DgRuntimeInitOptions)`.
+///
+/// Repeating init with the same effective policy returns Ok. A different policy
+/// returns `InvalidState` without replacing the installed policy.
 #[no_mangle]
 pub unsafe extern "C" fn dg_runtime_init(
     options: *const DgRuntimeInitOptions,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
-        if !options.is_null() {
-            // Read only the version fields through a raw pointer to avoid creating
-            // a reference to a potentially uninitialized C struct.
-            let (struct_size, struct_version) = unsafe {
-                (
-                    std::ptr::addr_of!((*options).struct_size).read(),
-                    std::ptr::addr_of!((*options).struct_version).read(),
-                )
-            };
+        let policy = if options.is_null() {
+            process_policy_from_options(None)?
+        } else {
+            // Read fields through raw pointers so partially-initialized C structs
+            // do not create Rust references to uninit memory.
+            let struct_size = unsafe { std::ptr::addr_of!((*options).struct_size).read() };
+            let struct_version = unsafe { std::ptr::addr_of!((*options).struct_version).read() };
             check_struct_version(
                 "DgRuntimeInitOptions",
                 struct_size,
                 struct_version,
                 std::mem::size_of::<DgRuntimeInitOptions>(),
             )?;
+            // Only read limit fields when the caller declared the full struct size.
+            let opts = unsafe {
+                DgRuntimeInitOptions {
+                    struct_size,
+                    struct_version,
+                    max_config_bytes: std::ptr::addr_of!((*options).max_config_bytes).read(),
+                    max_include_depth: std::ptr::addr_of!((*options).max_include_depth).read(),
+                    max_include_count: std::ptr::addr_of!((*options).max_include_count).read(),
+                    max_nodes: std::ptr::addr_of!((*options).max_nodes).read(),
+                    max_connections: std::ptr::addr_of!((*options).max_connections).read(),
+                    max_tensor_bytes: std::ptr::addr_of!((*options).max_tensor_bytes).read(),
+                    max_frame_bytes: std::ptr::addr_of!((*options).max_frame_bytes).read(),
+                    max_model_bytes: std::ptr::addr_of!((*options).max_model_bytes).read(),
+                    max_buffer_packets: std::ptr::addr_of!((*options).max_buffer_packets).read(),
+                    max_buffer_bytes: std::ptr::addr_of!((*options).max_buffer_bytes).read(),
+                }
+            };
+            process_policy_from_options(Some(&opts))?
+        };
+
+        if let Some(existing) = PROCESS_POLICY.get() {
+            if existing != &policy {
+                return Err((
+                    DgStatus::InvalidArgument,
+                    "dg_runtime_init already completed with a different process policy".to_string(),
+                ));
+            }
+        } else {
+            let _ = PROCESS_POLICY.set(policy);
         }
-        static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-        let result = INIT.get_or_init(|| {
+
+        static CONNECTOR_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+        let result = CONNECTOR_INIT.get_or_init(|| {
             #[cfg(all(feature = "stream", feature = "cheetah"))]
             {
                 if let Err(error) = dg_stream::install_embedded_cheetah_connector() {
@@ -1726,21 +1825,19 @@ pub unsafe extern "C" fn dg_engine_destroy(
     }
 }
 
-/// Loads a graph specification from a UTF-8 string.
+/// Loads a graph specification from a UTF-8 string view (may be non-NUL-terminated).
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_load_string(
     engine: *mut DgEngine,
     format: i32,
-    content: *const c_char,
+    content: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let content = unsafe { c_string(content)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let content = content.as_str()?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
@@ -1761,21 +1858,21 @@ pub unsafe extern "C" fn dg_engine_load_string(
     }
 }
 
-/// Loads a graph specification from a UTF-8 path.
+/// Loads a graph specification from a UTF-8 path view.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_load_file(
     engine: *mut DgEngine,
-    path: *const c_char,
+    path: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let path = unsafe { c_string(path)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        let path = path.as_path_str()?;
+        let spec =
+            GraphSpec::load_from_path_with_policy(Path::new(path), installed_resource_policy())
+                .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
@@ -1794,7 +1891,7 @@ pub unsafe extern "C" fn dg_engine_load_file(
     }
 }
 
-/// Reloads a graph specification from a UTF-8 string.
+/// Reloads a graph specification from a UTF-8 string view.
 ///
 /// A built graph is updated in place and remains ready to run. Reload is rejected while inputs
 /// are pending so that queued data is never silently interpreted by a changed graph.
@@ -1802,16 +1899,14 @@ pub unsafe extern "C" fn dg_engine_load_file(
 pub unsafe extern "C" fn dg_engine_reload_string(
     engine: *mut DgEngine,
     format: i32,
-    content: *const c_char,
+    content: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let content = unsafe { c_string(content)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let content = content.as_str()?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
@@ -1825,24 +1920,24 @@ pub unsafe extern "C" fn dg_engine_reload_string(
     }
 }
 
-/// Reloads a graph specification from a UTF-8 path.
+/// Reloads a graph specification from a UTF-8 path view.
 ///
 /// A built graph is updated in place and remains ready to run. Reload is rejected while inputs
 /// are pending so that queued data is never silently interpreted by a changed graph.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_reload_file(
     engine: *mut DgEngine,
-    path: *const c_char,
+    path: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let path = unsafe { c_string(path)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        let path = path.as_path_str()?;
+        let spec =
+            GraphSpec::load_from_path_with_policy(Path::new(path), installed_resource_policy())
+                .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
@@ -1854,12 +1949,12 @@ pub unsafe extern "C" fn dg_engine_reload_file(
     }
 }
 
-/// Computes node and connection changes against a UTF-8 graph specification.
+/// Computes node and connection changes against a UTF-8 graph specification view.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_diff_string(
     engine: *const DgEngine,
     format: i32,
-    content: *const c_char,
+    content: DgStringView,
     out_added_nodes: *mut usize,
     out_removed_nodes: *mut usize,
     out_updated_nodes: *mut usize,
@@ -1878,9 +1973,7 @@ pub unsafe extern "C" fn dg_engine_diff_string(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let content = unsafe { c_string(content)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let content = content.as_str()?;
         let spec = GraphSpec::from_str_with_format(content, format_from_c(format)?)
             .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
@@ -1901,11 +1994,11 @@ pub unsafe extern "C" fn dg_engine_diff_string(
     }
 }
 
-/// Computes node and connection changes against a UTF-8 graph file.
+/// Computes node and connection changes against a UTF-8 graph file path view.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_diff_file(
     engine: *const DgEngine,
-    path: *const c_char,
+    path: DgStringView,
     out_added_nodes: *mut usize,
     out_removed_nodes: *mut usize,
     out_updated_nodes: *mut usize,
@@ -1924,10 +2017,10 @@ pub unsafe extern "C" fn dg_engine_diff_file(
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let path = unsafe { c_string(path)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        let spec = GraphSpec::load_from_path(Path::new(path)).map_err(map_graph_error)?;
+        let path = path.as_path_str()?;
+        let spec =
+            GraphSpec::load_from_path_with_policy(Path::new(path), installed_resource_policy())
+                .map_err(map_graph_error)?;
         spec.validate().map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let engine = lock_engine_read(&engine_arc)?;
@@ -1946,35 +2039,29 @@ pub unsafe extern "C" fn dg_engine_diff_file(
     }
 }
 
-/// Adds a node programmatically. `params_json` may be null for an empty object.
+/// Adds a node programmatically. Empty `params_json` (`len == 0`) means `{}`.
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_add_node(
     engine: *mut DgEngine,
-    name: *const c_char,
-    kind: *const c_char,
-    params_json: *const c_char,
+    name: DgStringView,
+    kind: DgStringView,
+    params_json: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let name = unsafe { c_string(name)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?
-            .to_string();
-        let kind = unsafe { c_string(kind)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?
-            .to_string();
-        let params = if params_json.is_null() {
-            Value::Object(Map::new())
-        } else {
-            let params = unsafe { c_string(params_json)? }
-                .to_str()
-                .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-            serde_json::from_str(params)
-                .map_err(|error| (DgStatus::ParseError, error.to_string()))?
+        let name = name.as_str()?.to_string();
+        let kind = kind.as_str()?.to_string();
+        let params = {
+            let params = params_json.as_str()?;
+            if params.is_empty() {
+                Value::Object(Map::new())
+            } else {
+                serde_json::from_str(params)
+                    .map_err(|error| (DgStatus::ParseError, error.to_string()))?
+            }
         };
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
@@ -2003,16 +2090,14 @@ pub unsafe extern "C" fn dg_engine_add_node(
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_remove_node(
     engine: *mut DgEngine,
-    name: *const c_char,
+    name: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let name = unsafe { c_string(name)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let name = name.as_str()?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
@@ -2038,16 +2123,14 @@ pub unsafe extern "C" fn dg_engine_remove_node(
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_connect(
     engine: *mut DgEngine,
-    connection: *const c_char,
+    connection: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let connection = unsafe { c_string(connection)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let connection = connection.as_str()?;
         dg_graph::ConnectionSpec::parse(connection).map_err(map_graph_error)?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
@@ -2070,16 +2153,14 @@ pub unsafe extern "C" fn dg_engine_connect(
 #[no_mangle]
 pub unsafe extern "C" fn dg_engine_disconnect(
     engine: *mut DgEngine,
-    connection: *const c_char,
+    connection: DgStringView,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     match ffi_result(out_error, || {
         if engine.is_null() {
             return Err((DgStatus::NullPointer, "engine pointer is null".to_string()));
         }
-        let connection = unsafe { c_string(connection)? }
-            .to_str()
-            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        let connection = connection.as_str()?;
         let engine_arc = unsafe { clone_engine_arc(engine) };
         let mut engine = lock_engine_write(&engine_arc)?;
         if engine.running.is_some() {
@@ -2116,7 +2197,10 @@ pub unsafe extern "C" fn dg_engine_build(
             ));
         }
         engine.spec.validate().map_err(map_graph_error)?;
-        engine.graph = Some(Graph::new(engine.spec.clone()).map_err(map_graph_error)?);
+        engine.graph = Some(
+            Graph::new_with_process_policy(engine.spec.clone(), installed_process_policy())
+                .map_err(map_graph_error)?,
+        );
         engine.outputs.clear();
         engine.stream_ended = false;
         Ok(())
@@ -2293,41 +2377,44 @@ pub unsafe extern "C" fn dg_engine_metrics(
 }
 
 /// Creates and initializes a backend without constructing a graph.
+///
+/// `model` is raw model bytes. Empty `options_json` means `{}`.
 #[no_mangle]
 pub unsafe extern "C" fn dg_backend_create(
     kind: i32,
-    model_data: *const u8,
-    model_length: usize,
-    options_json: *const c_char,
+    model: DgByteView,
+    options_json: DgStringView,
     out: *mut *mut DgBackend,
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     ffi_result_with_out(out, out_error, || {
-        ResourcePolicy::default()
-            .check_model_bytes(model_length)
+        let model_bytes = model.as_bytes()?;
+        installed_resource_policy()
+            .check_model_bytes(model_bytes.len())
             .map_err(|error| (map_core_error(&error), error.to_string()))?;
-        let model_bytes = unsafe { bytes(model_data, model_length)? };
-        let mut model = Vec::new();
-        model.try_reserve_exact(model_bytes.len()).map_err(|_| {
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(model_bytes.len()).map_err(|_| {
             (
                 DgStatus::RuntimeError,
                 format!("model allocation failed for {} bytes", model_bytes.len()),
             )
         })?;
-        model.extend_from_slice(model_bytes);
-        let options = if options_json.is_null() {
-            Value::Object(Map::new())
-        } else {
-            let text = unsafe { c_string(options_json)? }
-                .to_str()
-                .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-            serde_json::from_str(text).map_err(|error| (DgStatus::ParseError, error.to_string()))?
+        owned.extend_from_slice(model_bytes);
+        let options = {
+            let text = options_json.as_str()?;
+            if text.is_empty() {
+                Value::Object(Map::new())
+            } else {
+                serde_json::from_str(text)
+                    .map_err(|error| (DgStatus::ParseError, error.to_string()))?
+            }
         };
         let kind = backend_kind_from_c(kind)?;
         let config = BackendConfig::new(None, options);
         let mut option = configure_backend(backend_name(kind), config)
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        option.model_source = ModelSource::Bytes(Arc::new(model));
+        option.model_source = ModelSource::Bytes(Arc::new(owned));
+        option.process_policy = installed_process_policy();
         let mut backend =
             create_backend(kind).map_err(|error| (DgStatus::Unsupported, error.to_string()))?;
         backend
@@ -2568,13 +2655,11 @@ pub unsafe extern "C" fn dg_backend_run(
     }
 }
 
-/// Creates a host tensor from a caller-owned byte array.
+/// Creates a host tensor from a caller-owned byte view and shape view.
 #[no_mangle]
 pub unsafe extern "C" fn dg_tensor_create(
-    data: *const u8,
-    length: usize,
-    shape: *const usize,
-    rank: usize,
+    data: DgByteView,
+    shape: DgShapeView,
     dtype: i32,
     format: i32,
     device: i32,
@@ -2583,10 +2668,10 @@ pub unsafe extern "C" fn dg_tensor_create(
 ) -> DgStatus {
     ffi_result_with_out(out, out_error, || {
         // Validate the declared shape/dtype before forming a slice from the
-        // caller-supplied data pointer. This prevents a malicious `length` from
+        // caller-supplied data pointer. This prevents a malicious length from
         // forcing `from_raw_parts` to span a huge, unmapped region before we can
         // compare it against the actual tensor size.
-        let shape = unsafe { dims(shape, rank)? };
+        let shape = shape.as_dims()?;
         let parsed_dtype = data_type_from_c(dtype)?;
         let parsed_format = format_from_c_enum(format)?;
         let parsed_device = device_from_c(device)?;
@@ -2599,25 +2684,19 @@ pub unsafe extern "C" fn dg_tensor_create(
         let expected = desc
             .storage_bytes()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        ResourcePolicy::default()
+        installed_resource_policy()
             .check_tensor_bytes(expected)
             .map_err(|error| (map_core_error(&error), error.to_string()))?;
-        if length != expected {
+        let data = data.as_bytes()?;
+        if data.len() != expected {
             return Err((
                 DgStatus::InvalidArgument,
-                format!("tensor byte length {length} does not match shape and dtype ({expected})"),
+                format!(
+                    "tensor byte length {} does not match shape and dtype ({expected})",
+                    data.len()
+                ),
             ));
         }
-
-        let data = if length == 0 {
-            &[]
-        } else if data.is_null() {
-            return Err((DgStatus::NullPointer, "data pointer is null".to_string()));
-        } else {
-            // SAFETY: `length` has been validated to equal the storage required by
-            // the declared shape/dtype and fits within the default tensor limit.
-            unsafe { std::slice::from_raw_parts(data, length) }
-        };
 
         let tensor = tensor_from_bytes(data, shape, dtype, format, device)?;
         Ok(Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor)
@@ -2628,8 +2707,7 @@ pub unsafe extern "C" fn dg_tensor_create(
 #[no_mangle]
 pub unsafe extern "C" fn dg_tensor_create_external(
     desc: *const DgExternalMemoryV2,
-    shape: *const usize,
-    rank: usize,
+    shape: DgShapeView,
     dtype: i32,
     format: i32,
     out: *mut *mut DgTensor,
@@ -2638,7 +2716,7 @@ pub unsafe extern "C" fn dg_tensor_create_external(
     ffi_result_with_out(out, out_error, || {
         let (device, domain, size_bytes, fd, raw, release, user_data) =
             parse_external_memory_descriptor(desc)?;
-        let shape = unsafe { dims(shape, rank)? };
+        let shape = shape.as_dims()?;
         let tensor_desc = TensorDesc::new(
             Shape::new(shape.to_vec()),
             data_type_from_c(dtype)?,
@@ -2648,7 +2726,7 @@ pub unsafe extern "C" fn dg_tensor_create_external(
         let expected = tensor_desc
             .storage_bytes()
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        ResourcePolicy::default()
+        installed_resource_policy()
             .check_tensor_bytes(expected)
             .map_err(|error| (map_core_error(&error), error.to_string()))?;
         if expected != size_bytes {
@@ -2812,7 +2890,7 @@ pub unsafe extern "C" fn dg_buffer_import_external(
     ffi_result_with_out(out, out_error, || {
         let (device, domain, size_bytes, fd, raw, release, user_data) =
             parse_external_memory_descriptor(desc)?;
-        ResourcePolicy::default()
+        installed_resource_policy()
             .check_buffer_bytes(size_bytes)
             .map_err(|error| (map_core_error(&error), error.to_string()))?;
         let (external, guard) = build_external_handle(fd, raw, release, user_data)?;
@@ -3069,7 +3147,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3087,10 +3168,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -3180,7 +3265,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3198,10 +3286,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -3241,7 +3333,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3277,7 +3372,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3355,7 +3453,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3416,7 +3517,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3479,7 +3583,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3500,10 +3607,14 @@ connections:
             assert_eq!(
                 unsafe {
                     dg_tensor_create(
-                        input_bytes.as_ptr(),
-                        input_bytes.len(),
-                        shape.as_ptr(),
-                        shape.len(),
+                        DgByteView {
+                            data: input_bytes.as_ptr(),
+                            len: input_bytes.len(),
+                        },
+                        DgShapeView {
+                            dims: shape.as_ptr(),
+                            rank: shape.len(),
+                        },
                         DgDataType::F32 as i32,
                         DgDataFormat::Nc as i32,
                         DgDeviceKind::Cpu as i32,
@@ -3531,7 +3642,10 @@ connections:
                 dg_engine_reload_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3589,7 +3703,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3607,10 +3724,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -3677,7 +3798,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3698,7 +3822,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    new_spec.as_ptr(),
+                    DgStringView {
+                        data: new_spec.as_ptr(),
+                        len: new_spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3711,17 +3838,44 @@ connections:
 
         let connection = CString::new("input.out -> sink.in").expect("valid connection");
         assert_eq!(
-            unsafe { dg_engine_connect(engine, connection.as_ptr(), ptr::null_mut()) },
+            unsafe {
+                dg_engine_connect(
+                    engine,
+                    DgStringView {
+                        data: connection.as_ptr(),
+                        len: connection.to_bytes().len(),
+                    },
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::RuntimeError
         );
         assert_eq!(
-            unsafe { dg_engine_disconnect(engine, connection.as_ptr(), ptr::null_mut()) },
+            unsafe {
+                dg_engine_disconnect(
+                    engine,
+                    DgStringView {
+                        data: connection.as_ptr(),
+                        len: connection.to_bytes().len(),
+                    },
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::RuntimeError
         );
 
         let sink = CString::new("sink").expect("valid name");
         assert_eq!(
-            unsafe { dg_engine_remove_node(engine, sink.as_ptr(), ptr::null_mut()) },
+            unsafe {
+                dg_engine_remove_node(
+                    engine,
+                    DgStringView {
+                        data: sink.as_ptr(),
+                        len: sink.to_bytes().len(),
+                    },
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::RuntimeError
         );
 
@@ -3731,9 +3885,15 @@ connections:
             unsafe {
                 dg_engine_add_node(
                     engine,
-                    node_name.as_ptr(),
-                    node_kind.as_ptr(),
-                    ptr::null(),
+                    DgStringView {
+                        data: node_name.as_ptr(),
+                        len: node_name.to_bytes().len(),
+                    },
+                    DgStringView {
+                        data: node_kind.as_ptr(),
+                        len: node_kind.to_bytes().len(),
+                    },
+                    DgStringView::EMPTY,
                     ptr::null_mut(),
                 )
             },
@@ -3758,7 +3918,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3843,7 +4006,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     &mut error,
                 )
             },
@@ -3889,7 +4055,16 @@ connections: []
         );
         let mut error = ptr::null_mut();
         assert_eq!(
-            unsafe { dg_engine_load_file(engine, path_string.as_ptr(), &mut error) },
+            unsafe {
+                dg_engine_load_file(
+                    engine,
+                    DgStringView {
+                        data: path_string.as_ptr(),
+                        len: path_string.to_bytes().len(),
+                    },
+                    &mut error,
+                )
+            },
             DgStatus::ParseError
         );
         assert!(!error.is_null());
@@ -3932,7 +4107,10 @@ connections: []
         let status = unsafe {
             dg_engine_diff_file(
                 engine,
-                path_string.as_ptr(),
+                DgStringView {
+                    data: path_string.as_ptr(),
+                    len: path_string.to_bytes().len(),
+                },
                 &mut added,
                 &mut removed,
                 &mut updated,
@@ -3966,7 +4144,10 @@ connections: []
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    initial.as_ptr(),
+                    DgStringView {
+                        data: initial.as_ptr(),
+                        len: initial.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -3987,7 +4168,10 @@ connections: []
                 dg_engine_diff_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    updated.as_ptr(),
+                    DgStringView {
+                        data: updated.as_ptr(),
+                        len: updated.to_bytes().len(),
+                    },
                     &mut added_nodes,
                     &mut removed_nodes,
                     &mut updated_nodes,
@@ -4011,7 +4195,10 @@ connections: []
                 dg_engine_reload_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    invalid.as_ptr(),
+                    DgStringView {
+                        data: invalid.as_ptr(),
+                        len: invalid.to_bytes().len(),
+                    },
                     &mut error,
                 )
             },
@@ -4024,7 +4211,10 @@ connections: []
                 dg_engine_reload_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    updated.as_ptr(),
+                    DgStringView {
+                        data: updated.as_ptr(),
+                        len: updated.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4037,10 +4227,14 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4060,7 +4254,10 @@ connections: []
                 dg_engine_reload_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    initial.as_ptr(),
+                    DgStringView {
+                        data: initial.as_ptr(),
+                        len: initial.to_bytes().len(),
+                    },
                     &mut error,
                 )
             },
@@ -4126,9 +4323,14 @@ connections: []
             unsafe {
                 dg_backend_create(
                     DgBackendKind::Mock as i32,
-                    ptr::null(),
-                    0,
-                    options.as_ptr(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgStringView {
+                        data: options.as_ptr(),
+                        len: options.to_bytes().len(),
+                    },
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4189,10 +4391,14 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4247,9 +4453,14 @@ connections: []
             unsafe {
                 dg_backend_create(
                     DgBackendKind::Mock as i32,
-                    ptr::null(),
-                    0,
-                    options.as_ptr(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgStringView {
+                        data: options.as_ptr(),
+                        len: options.to_bytes().len(),
+                    },
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4265,10 +4476,14 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4321,9 +4536,14 @@ connections: []
             unsafe {
                 dg_backend_create(
                     DgBackendKind::Mock as i32,
-                    ptr::null(),
-                    0,
-                    options.as_ptr(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgStringView {
+                        data: options.as_ptr(),
+                        len: options.to_bytes().len(),
+                    },
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4362,7 +4582,17 @@ connections: []
         );
         let spec = graph_spec();
         assert_eq!(
-            unsafe { dg_engine_load_string(engine, 42, spec.as_ptr(), ptr::null_mut()) },
+            unsafe {
+                dg_engine_load_string(
+                    engine,
+                    42,
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
+                    ptr::null_mut(),
+                )
+            },
             DgStatus::InvalidArgument
         );
         assert_eq!(
@@ -4370,7 +4600,10 @@ connections: []
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4384,10 +4617,14 @@ connections: []
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     999,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4403,9 +4640,11 @@ connections: []
             unsafe {
                 dg_backend_create(
                     123,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgStringView::EMPTY,
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4434,6 +4673,16 @@ connections: []
         let bad_options = DgRuntimeInitOptions {
             struct_size: 1,
             struct_version: 0,
+            max_config_bytes: 0,
+            max_include_depth: 0,
+            max_include_count: 0,
+            max_nodes: 0,
+            max_connections: 0,
+            max_tensor_bytes: 0,
+            max_frame_bytes: 0,
+            max_model_bytes: 0,
+            max_buffer_packets: 0,
+            max_buffer_bytes: 0,
         };
         assert_eq!(
             unsafe { dg_runtime_init(&bad_options, ptr::null_mut()) },
@@ -4443,6 +4692,16 @@ connections: []
         let bad_version = DgRuntimeInitOptions {
             struct_size: std::mem::size_of::<DgRuntimeInitOptions>() as u32,
             struct_version: 9,
+            max_config_bytes: 0,
+            max_include_depth: 0,
+            max_include_count: 0,
+            max_nodes: 0,
+            max_connections: 0,
+            max_tensor_bytes: 0,
+            max_frame_bytes: 0,
+            max_model_bytes: 0,
+            max_buffer_packets: 0,
+            max_buffer_bytes: 0,
         };
         assert_eq!(
             unsafe { dg_runtime_init(&bad_version, ptr::null_mut()) },
@@ -4465,9 +4724,11 @@ connections: []
             unsafe {
                 dg_backend_create(
                     DgBackendKind::Mock as i32,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgStringView::EMPTY,
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4571,7 +4832,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4639,7 +4903,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4702,7 +4969,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4720,10 +4990,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    input_bytes.as_ptr(),
-                    input_bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: input_bytes.as_ptr(),
+                        len: input_bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4788,7 +5062,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4852,10 +5129,14 @@ connections:
         unsafe {
             assert_eq!(
                 dg_tensor_create(
-                    ptr::null(),
-                    0,
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len()
+                    },
                     DgDataType::F32 as i32,
                     DgDataFormat::Nc as i32,
                     DgDeviceKind::Cpu as i32,
@@ -4913,9 +5194,11 @@ connections:
             unsafe {
                 dg_backend_create(
                     DgBackendKind::Mock as i32,
-                    ptr::null(),
-                    oversized,
-                    ptr::null(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: oversized,
+                    },
+                    DgStringView::EMPTY,
                     &mut backend,
                     ptr::null_mut(),
                 )
@@ -4938,7 +5221,10 @@ connections:
                 dg_engine_load_string(
                     engine,
                     DgGraphFormat::Yaml as i32,
-                    spec.as_ptr(),
+                    DgStringView {
+                        data: spec.as_ptr(),
+                        len: spec.to_bytes().len(),
+                    },
                     ptr::null_mut(),
                 )
             },
@@ -4959,10 +5245,14 @@ connections:
             assert_eq!(
                 unsafe {
                     dg_tensor_create(
-                        input_bytes.as_ptr(),
-                        input_bytes.len(),
-                        shape.as_ptr(),
-                        shape.len(),
+                        DgByteView {
+                            data: input_bytes.as_ptr(),
+                            len: input_bytes.len(),
+                        },
+                        DgShapeView {
+                            dims: shape.as_ptr(),
+                            rank: shape.len(),
+                        },
                         DgDataType::F32 as i32,
                         DgDataFormat::Nc as i32,
                         DgDeviceKind::Cpu as i32,
@@ -5036,10 +5326,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    ptr::null(),
-                    0,
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: ptr::null(),
+                        len: 0,
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::U8 as i32,
                     DgDataFormat::N as i32,
                     DgDeviceKind::Cpu as i32,
@@ -5060,10 +5354,14 @@ connections:
         assert_eq!(
             unsafe {
                 dg_tensor_create(
-                    bytes.as_ptr(),
-                    bytes.len(),
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgByteView {
+                        data: bytes.as_ptr(),
+                        len: bytes.len(),
+                    },
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::U8 as i32,
                     DgDataFormat::N as i32,
                     DgDeviceKind::CudaGpu as i32,
@@ -5098,8 +5396,10 @@ connections:
             unsafe {
                 dg_tensor_create_external(
                     &desc,
-                    shape.as_ptr(),
-                    shape.len(),
+                    DgShapeView {
+                        dims: shape.as_ptr(),
+                        rank: shape.len(),
+                    },
                     DgDataType::U8 as i32,
                     DgDataFormat::N as i32,
                     &mut tensor,

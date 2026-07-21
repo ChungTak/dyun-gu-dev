@@ -5,7 +5,7 @@ use std::os::raw::{c_int, c_void};
 use dg_capi::{
     dg_buffer_free, dg_buffer_import_external, dg_buffer_size, dg_tensor_create_external,
     dg_tensor_free, DgBuffer, DgDataFormat, DgDataType, DgDeviceKind, DgExternalMemoryV2,
-    DgMemoryDomain, DgReleaseCallback, DgTensor,
+    DgMemoryDomain, DgReleaseCallback, DgShapeView, DgTensor,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -94,13 +94,12 @@ fuzz_target!(|data: &[u8]| {
     let mut tensor: *mut DgTensor = std::ptr::null_mut();
     let status = unsafe {
         dg_tensor_create_external(
-            &desc,
-            shape.as_ptr(),
-            rank,
-            dtype,
-            format,
-            &mut tensor,
-            std::ptr::null_mut(),
+                    &desc,
+                    DgShapeView { dims: shape.as_ptr(), rank: rank },
+                    dtype,
+                    format,
+                    &mut tensor,
+                    std::ptr::null_mut(),
         )
     };
     if status == dg_capi::DgStatus::Ok && !tensor.is_null() {

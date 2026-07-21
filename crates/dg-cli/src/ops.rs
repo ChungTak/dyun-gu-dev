@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 /// Prometheus/OpenMetrics exposition schema version. Bumped when field names,
 /// types, or label sets change.
-const METRICS_SCHEMA_VERSION: u32 = 1;
+const METRICS_SCHEMA_VERSION: u32 = 2;
 
 /// Shared snapshot of graph state exposed by the ops server.
 #[derive(Clone, Debug)]
@@ -189,10 +189,13 @@ fn is_ready(state: &Arc<RwLock<OpsState>>) -> bool {
     state
         .read()
         .map(|s| {
+            // CORE7-05 readiness: Running, no reload/drain/reconnect (via ready
+            // flag), no root cause, supervisor healthy.
             s.ready
                 && s.status == GraphStatus::Running
                 && s.root_cause.is_none()
                 && s.supervisor_healthy
+                && !s.element_metrics.values().any(|m| m.reconnecting)
         })
         .unwrap_or(false)
 }
@@ -285,6 +288,39 @@ fn render_metrics(snapshot: &OpsState) -> Result<String> {
         "dg_graph_reload_rejected_total {}",
         snapshot.reload_rejected_total
     )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "# HELP dg_graph_ready 1 if /readyz would succeed for this snapshot"
+    )?;
+    writeln!(out, "# TYPE dg_graph_ready gauge")?;
+    let ready = snapshot.ready
+        && snapshot.status == GraphStatus::Running
+        && snapshot.root_cause.is_none()
+        && snapshot.supervisor_healthy
+        && !snapshot.element_metrics.values().any(|m| m.reconnecting);
+    writeln!(out, "dg_graph_ready {}", u8::from(ready))?;
+    writeln!(
+        out,
+        "# HELP dg_graph_has_root_cause 1 if the graph retained a fatal root cause"
+    )?;
+    writeln!(out, "# TYPE dg_graph_has_root_cause gauge")?;
+    writeln!(
+        out,
+        "dg_graph_has_root_cause {}",
+        u8::from(snapshot.root_cause.is_some())
+    )?;
+    let frame_local_drops: u64 = snapshot
+        .element_metrics
+        .values()
+        .map(|m| m.drop_count)
+        .fold(0u64, u64::saturating_add);
+    writeln!(
+        out,
+        "# HELP dg_graph_frame_local_drops_total Sum of per-element frame-local drops"
+    )?;
+    writeln!(out, "# TYPE dg_graph_frame_local_drops_total counter")?;
+    writeln!(out, "dg_graph_frame_local_drops_total {frame_local_drops}")?;
     writeln!(out)?;
 
     for (node, metrics) in &snapshot.element_metrics {
@@ -440,6 +476,12 @@ fn render_metrics(snapshot: &OpsState) -> Result<String> {
                 "dg_backend_errors_total",
                 &node_label,
                 backend.backend_errors,
+            )?;
+            render_counter(
+                &mut out,
+                "dg_backend_cancels_total",
+                &node_label,
+                backend.cancelled,
             )?;
             render_counter(
                 &mut out,
@@ -609,7 +651,18 @@ mod tests {
             supervisor_healthy: true,
         };
         let text = render_metrics(&snapshot).expect("render_metrics succeeds");
-        assert!(text.contains("dg_cli_metrics_schema_version 1"));
+        assert!(
+            text.contains("dg_cli_metrics_schema_version 2"),
+            "schema version gauge must track METRICS_SCHEMA_VERSION: {text}"
+        );
+        assert!(
+            text.contains("dg_graph_ready 1"),
+            "ready gauge must be present: {text}"
+        );
+        assert!(
+            text.contains("dg_graph_frame_local_drops_total 0"),
+            "frame-local drop aggregate must be present: {text}"
+        );
         // No raw user-provided strings (e.g. a URL) should appear as metric names.
         assert!(!text.contains("http://"));
     }

@@ -170,7 +170,7 @@ const DEMO_FRAME_COUNT: usize = 3;
 
 #[cfg(feature = "stream")]
 pub fn run_demo(path: &Path, process_policy: ProcessRuntimePolicy) -> Result<DemoSummary> {
-    let spec = load_spec(path)?;
+    let spec = load_spec(path, &process_policy)?;
     let publishers = DEMO_INPUTS
         .iter()
         .map(|url| seed_demo_stream(url))
@@ -293,7 +293,7 @@ fn run_graph_with_watch(
         return Ok(ExitCode::from(3));
     }
 
-    let spec = match load_spec(path) {
+    let spec = match load_spec(path, &process_policy) {
         Ok(spec) => spec,
         Err(error) => {
             error!(error = %error, path = %path.display(), "configuration error");
@@ -530,7 +530,7 @@ fn ensure_runtime_connectors() -> Result<()> {
 }
 
 pub fn validate_graph(path: &Path, process_policy: ProcessRuntimePolicy) -> Result<()> {
-    let spec = load_spec(path)?;
+    let spec = load_spec(path, &process_policy)?;
     let _ = Graph::new_with_process_policy(spec, process_policy)
         .with_context(|| format!("validate graph config {}", path.display()))?;
     println!("valid: {}", path.display());
@@ -560,8 +560,9 @@ pub fn schema(kind: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn load_spec(path: &Path) -> Result<GraphSpec> {
-    GraphSpec::load_from_path(path).with_context(|| format!("load graph config {}", path.display()))
+fn load_spec(path: &Path, process_policy: &ProcessRuntimePolicy) -> Result<GraphSpec> {
+    GraphSpec::load_from_path_with_policy(path, process_policy.resource_policy().clone())
+        .with_context(|| format!("load graph config {}", path.display()))
 }
 
 /// Hard ceiling on the runtime-limits file size. Runtime limits are a small

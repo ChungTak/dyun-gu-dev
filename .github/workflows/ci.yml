@@ -42,6 +42,22 @@ jobs:
           toolchain: 1.94.1
       - run: cargo test --workspace --locked
 
+  package-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+      - name: Package layout + C11 example smoke (CORE7-10)
+        run: ./tools/package_smoke.sh --artifact-dir package-smoke
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: package-smoke
+          path: package-smoke/
+          retention-days: 7
+
   avcodec-profile-matrix:
     runs-on: ubuntu-latest
     strategy:

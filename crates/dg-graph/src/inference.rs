@@ -328,7 +328,10 @@ fn create_inference(node: &NodeSpec) -> Result<CreatedElement> {
 }
 
 fn create_inference_inner(value: Value) -> Result<CreatedElement> {
-    let plan = prepare_inference(value)?;
+    let mut plan = prepare_inference(value)?;
+    if let Some(process_policy) = crate::registry::build_process_policy() {
+        plan.option.process_policy = process_policy;
+    }
     let execution = if plan.instances <= 1 || plan.option.device.is_none() {
         let (option, lease) = acquire_inference_lease(plan.option)?;
         let mut runtime = Runtime::new(option)?;

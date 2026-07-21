@@ -81,6 +81,32 @@ fn media_frame(payload: &[u8]) -> MediaFrame {
 }
 
 #[test]
+fn cheetah_bridge_rejects_oversized_payload_before_policy_copy() {
+    use dg_core::ResourcePolicy;
+    use dg_stream::cheetah_avframe_to_media_frame_with_policy;
+
+    let source = metadata_frame();
+    // payload is non-empty; clamp max_frame_bytes below it so conversion fails
+    // without performing a successful host copy path under a tighter policy.
+    let mut policy = ResourcePolicy::default();
+    policy.max_frame_bytes = source.payload.len().saturating_sub(1).max(1);
+    if source.payload.len() <= 1 {
+        // metadata_frame always carries payload; keep the assertion meaningful.
+        policy.max_frame_bytes = 1;
+        let mut large = source.clone();
+        // Can't mutate Arc payload easily; build a fresh oversized frame if needed.
+        let _ = large;
+    }
+    let err = cheetah_avframe_to_media_frame_with_policy(Arc::new(source), &policy)
+        .expect_err("payload larger than policy must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("frame") || msg.contains("limit") || msg.contains("bytes"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
 fn cheetah_bridge_preserves_frame_metadata() {
     let source = metadata_frame();
     let converted = cheetah_avframe_to_media_frame(Arc::new(source.clone())).expect("convert");

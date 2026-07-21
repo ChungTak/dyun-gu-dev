@@ -23,7 +23,10 @@ use dg_graph::{
 use serde_json::{Map, Value};
 use tracing::{debug, warn};
 
-use crate::connector::{open_pull, open_push, validate_endpoint_url, PullEndpoint, StreamProtocol};
+use crate::connector::{
+    open_pull_with_policy, open_push_with_policy, validate_endpoint_url, PullEndpoint,
+    StreamProtocol,
+};
 use crate::hub::{KEYFRAME_TAG, MEDIA_TAG};
 use crate::stream::SubscriberSourceSyncExt;
 use crate::stream::{
@@ -202,7 +205,12 @@ impl StreamPullElement {
             if io.should_stop() {
                 return Err(crate::error::Error::Closed);
             }
-            match open_pull(self.protocol, &self.url, self.options.clone()) {
+            match open_pull_with_policy(
+                self.protocol,
+                &self.url,
+                self.options.clone(),
+                io.policy().clone(),
+            ) {
                 Ok(endpoint) => {
                     self.endpoint = Some(endpoint);
                     return Ok(());
@@ -403,7 +411,12 @@ impl StreamPushElement {
             if io.should_stop() {
                 return Err(crate::error::Error::Closed);
             }
-            match open_push(self.protocol, &self.url, self.options.clone()) {
+            match open_push_with_policy(
+                self.protocol,
+                &self.url,
+                self.options.clone(),
+                io.policy().clone(),
+            ) {
                 Ok(sink) => {
                     self.sink = Some(sink);
                     return Ok(());

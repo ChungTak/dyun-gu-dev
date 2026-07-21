@@ -4,7 +4,7 @@ use std::ffi::CString;
 
 use dg_capi::{
     dg_engine_build, dg_engine_create, dg_engine_destroy, dg_engine_init, dg_engine_load_string,
-    dg_engine_reload_string, dg_engine_stop, DgEngine, DgGraphFormat, DgStatus,
+    dg_engine_reload_string, dg_engine_stop, DgEngine, DgGraphFormat, DgStatus, DgStringView,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -42,10 +42,7 @@ fuzz_target!(|data: &[u8]| {
 
     let base = CString::new(BASE_SPEC).unwrap();
     let _ = unsafe {
-        dg_engine_load_string(
-            engine,
-            DgGraphFormat::Yaml as i32,
-            base.as_ptr(),
+        dg_engine_load_string(engine, DgGraphFormat::Yaml as i32, DgStringView { data: base.as_ptr(), len: base.to_bytes().len() },
             std::ptr::null_mut(),
         )
     };
@@ -58,7 +55,7 @@ fuzz_target!(|data: &[u8]| {
         DgGraphFormat::Toml as i32,
     ] {
         let _ = unsafe {
-            dg_engine_reload_string(engine, format, reload.as_ptr(), std::ptr::null_mut())
+            dg_engine_reload_string(engine, format, DgStringView { data: reload.as_ptr(), len: reload.to_bytes().len() }, std::ptr::null_mut())
         };
     }
 

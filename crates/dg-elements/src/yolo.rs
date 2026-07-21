@@ -169,10 +169,17 @@ impl Element for Postprocess {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let tensor = packet
-                .tensor_ref()
-                .ok_or_else(|| Error::Runtime("yolo postprocess expects a tensor".to_string()))?;
-            let detections = decode_detections(
+            let tensor = match packet.tensor_ref() {
+                Some(tensor) => tensor,
+                None => {
+                    let _ = io.absorb_frame_result::<()>(Err(Error::BadFrame {
+                        element: io.name.clone(),
+                        message: "yolo postprocess expects a tensor".to_string(),
+                    }))?;
+                    continue;
+                }
+            };
+            let detections = match io.absorb_frame_result(decode_detections(
                 tensor,
                 &packet.meta,
                 self.target_width,
@@ -180,7 +187,10 @@ impl Element for Postprocess {
                 self.class_count,
                 self.confidence_threshold,
                 self.nms_threshold,
-            )?;
+            ))? {
+                Some(detections) => detections,
+                None => continue,
+            };
             io.send(
                 "out",
                 Packet::detections(detections).with_meta(packet.meta.clone()),
@@ -456,15 +466,17 @@ fn tensor_values(tensor: &Tensor) -> Result<Vec<f32>> {
                 values.push(f32::from_ne_bytes(array));
             }
             if !values.iter().all(|value| value.is_finite()) {
-                return Err(Error::Config(
-                    "tensor contains non-finite floating point values".to_string(),
-                ));
+                return Err(Error::BadFrame {
+                    element: "yolo".to_string(),
+                    message: "tensor contains non-finite floating point values".to_string(),
+                });
             }
             Ok(values)
         }
-        dtype => Err(Error::Config(format!(
-            "yolo elements support only u8/f32 tensors, got {dtype:?}"
-        ))),
+        dtype => Err(Error::BadFrame {
+            element: "yolo".to_string(),
+            message: format!("yolo elements support only u8/f32 tensors, got {dtype:?}"),
+        }),
     }
 }
 

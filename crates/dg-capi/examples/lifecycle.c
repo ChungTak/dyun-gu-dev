@@ -3,6 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
+static DgStringView string_view(const char *text) {
+  DgStringView view;
+  view.data = text;
+  view.len = text ? strlen(text) : 0;
+  return view;
+}
+
 static void print_error(struct DgError *error) {
   if (error) {
     const char *message = dg_error_message(error);
@@ -35,7 +42,7 @@ int main(void) {
       "  - infer.out -> sink.in\n";
 
   if (dg_engine_create(&engine, &error) != Ok ||
-      dg_engine_load_string(engine, Yaml, spec, &error) != Ok ||
+      dg_engine_load_string(engine, Yaml, string_view(spec), &error) != Ok ||
       dg_engine_init(engine, &error) != Ok) {
     print_error(error);
     dg_engine_destroy(engine, 0, NULL);

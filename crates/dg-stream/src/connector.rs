@@ -74,10 +74,23 @@ pub(crate) fn validate_endpoint_url(protocol: StreamProtocol, url: &str) -> Resu
 /// `mock://` URLs resolve to the in-process [`MemoryStreamHub`]; protocol
 /// schemes (`rtsp://`, `http://`, ...) require the `cheetah` feature and an
 /// installed runtime connector.
+///
+/// Uses default resource policy for pre-copy frame checks. Prefer
+/// [`open_pull_with_policy`] on product paths that carry a process/effective policy.
 pub fn open_pull(
     protocol: StreamProtocol,
     url: &str,
     options: SubscriberOptions,
+) -> Result<PullEndpoint> {
+    open_pull_with_policy(protocol, url, options, dg_core::ResourcePolicy::default())
+}
+
+/// Opens a pull endpoint and applies `frame_policy` before any host frame copy.
+pub fn open_pull_with_policy(
+    protocol: StreamProtocol,
+    url: &str,
+    options: SubscriberOptions,
+    frame_policy: dg_core::ResourcePolicy,
 ) -> Result<PullEndpoint> {
     if !protocol.is_pull() {
         return Err(Error::InvalidArgument(format!(
@@ -97,7 +110,7 @@ pub fn open_pull(
         });
     }
     if protocol.network_schemes().contains(&scheme) {
-        return open_cheetah_pull(protocol, url, options);
+        return open_cheetah_pull(protocol, url, options, frame_policy);
     }
     Err(Error::InvalidArgument(format!(
         "scheme `{scheme}` is not supported by the {} protocol",
@@ -110,6 +123,16 @@ pub fn open_push(
     protocol: StreamProtocol,
     url: &str,
     options: PublisherOptions,
+) -> Result<Box<dyn PublisherSink>> {
+    open_push_with_policy(protocol, url, options, dg_core::ResourcePolicy::default())
+}
+
+/// Opens a push endpoint and applies `frame_policy` before host payload materialization.
+pub fn open_push_with_policy(
+    protocol: StreamProtocol,
+    url: &str,
+    options: PublisherOptions,
+    frame_policy: dg_core::ResourcePolicy,
 ) -> Result<Box<dyn PublisherSink>> {
     if protocol.is_pull() {
         return Err(Error::InvalidArgument(format!(
@@ -124,7 +147,7 @@ pub fn open_push(
         return Ok(Box::new(sink));
     }
     if protocol.network_schemes().contains(&scheme) {
-        return open_cheetah_push(protocol, url, options);
+        return open_cheetah_push(protocol, url, options, frame_policy);
     }
     Err(Error::InvalidArgument(format!(
         "scheme `{scheme}` is not supported by the {} protocol",
@@ -179,6 +202,7 @@ fn open_cheetah_pull(
     protocol: StreamProtocol,
     url: &str,
     options: SubscriberOptions,
+    frame_policy: dg_core::ResourcePolicy,
 ) -> Result<PullEndpoint> {
     ensure_cheetah_connector_installed()?;
     let connector = CHEETAH_CONNECTOR.get().ok_or_else(|| {
@@ -191,9 +215,10 @@ fn open_cheetah_pull(
     let (tracks, source) = connector.open_pull(protocol, url, options)?;
     Ok(PullEndpoint {
         tracks,
-        source: Box::new(CheetahSubscriberSourceAdapter::new(
+        source: Box::new(CheetahSubscriberSourceAdapter::with_policy(
             source,
             protocol.label(),
+            frame_policy,
         )),
     })
 }
@@ -203,6 +228,7 @@ fn open_cheetah_push(
     protocol: StreamProtocol,
     url: &str,
     options: PublisherOptions,
+    frame_policy: dg_core::ResourcePolicy,
 ) -> Result<Box<dyn PublisherSink>> {
     ensure_cheetah_connector_installed()?;
     let connector = CHEETAH_CONNECTOR.get().ok_or_else(|| {
@@ -213,9 +239,10 @@ fn open_cheetah_push(
         )
     })?;
     let sink = connector.open_push(protocol, url, options)?;
-    Ok(Box::new(CheetahPublisherSinkAdapter::new(
+    Ok(Box::new(CheetahPublisherSinkAdapter::with_policy(
         sink,
         protocol.label(),
+        frame_policy,
     )))
 }
 
@@ -224,6 +251,7 @@ fn open_cheetah_pull(
     protocol: StreamProtocol,
     url: &str,
     _options: SubscriberOptions,
+    _frame_policy: dg_core::ResourcePolicy,
 ) -> Result<PullEndpoint> {
     Err(cheetah_feature_disabled(protocol, url))
 }
@@ -233,6 +261,7 @@ fn open_cheetah_push(
     protocol: StreamProtocol,
     url: &str,
     _options: PublisherOptions,
+    _frame_policy: dg_core::ResourcePolicy,
 ) -> Result<Box<dyn PublisherSink>> {
     Err(cheetah_feature_disabled(protocol, url))
 }

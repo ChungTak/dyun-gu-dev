@@ -1,0 +1,89 @@
+name: sanitizers-miri
+
+# CORE7-08: Miri and sanitizer release gates for core software.
+# Capability-heavy backends are excluded; pure core/graph/capi subsets are required.
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/dg-core/**'
+      - 'crates/dg-graph/**'
+      - 'crates/dg-capi/**'
+      - 'crates/dg-runtime/**'
+      - 'crates/dg-scheduler/**'
+      - '.github/workflows/sanitizers.yml'
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri core memory/tensor tests
+        run: |
+          cargo +nightly miri setup
+          cargo +nightly miri test -p dg-core --lib --tests --locked
+      - name: Miri scheduler lease tests
+        run: cargo +nightly miri test -p dg-scheduler --lib --locked
+      - name: Miri graph pure tests (no FFI)
+        run: cargo +nightly miri test -p dg-graph --lib --locked
+      - name: Upload miri logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-reports
+          path: target/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  asan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: AddressSanitizer on core + capi tests
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+        run: |
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+            -p dg-core -p dg-runtime -p dg-graph -p dg-capi \
+            --lib --tests --locked
+      - name: Upload asan logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-reports
+          path: target/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  tsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: ThreadSanitizer on graph/capi concurrency paths
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+        run: |
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+            -p dg-graph -p dg-capi -p dg-scheduler \
+            --lib --tests --locked
+      - name: Upload tsan logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-reports
+          path: target/
+          retention-days: 7
+          if-no-files-found: ignore

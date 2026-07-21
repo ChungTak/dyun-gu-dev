@@ -13,19 +13,19 @@
 
 | ID | 等级 | 当前事实 | 目标关闭证据 | 状态 | Owner |
 |---|---|---|---|---|---|
-| R7-001 | P0 | CLI/C bootstrap 未安装可信 process policy，产品路径仍使用 default | Rust/CLI/C 同策略 + init/reload/boundary tests | In Progress | devin |
-| R7-002 | P0 | vendor backend 直接读模型，device output policy 未统一 | bounded reader + SDK shim/allocator pre-call tests | In Progress | devin |
-| R7-003 | P0 | bridge 按 default 检查并复制，较小 effective frame limit 检查过晚 | copy-before-reject 失败基线转绿，copy count=0 | In Progress | devin |
-| R7-004 | P0 | Cheetah timeout 创建 timer thread，上游无原生 deadline | pinned upstream native timeout/close + thread/fd tests | In Progress | devin |
-| R7-005 | P1 | vendor sync/cancel capability 与真实可中断性未统一验收 | common contract + capability/support matrix | In Progress | devin |
-| R7-006 | P1 | 多个 algorithm 数据错误仍可终止整个 graph | frame-local continuation + fatal classification tests | In Progress | devin |
-| R7-007 | P1 | pool/affinity/registry/resource/shutdown metrics 与 readiness 不完整 | ops golden、slow scrape、state matrix | In Progress | devin |
-| R7-008 | P0 | C ABI view 未接线、runtime options 空、制品 ABI 未验证 | C11/C++17 + symbol/SONAME/view/fuzz/sanitizer | In Progress | devin |
-| R7-009 | P0 | 最近 nightly `reload-transitions` fuzz 失败且当前 SHA 未重跑 | minimized corpus + fix + candidate nightly green | In Progress | devin |
-| R7-010 | P0 | 无 Miri、ASan/LSan/TSan 和并发模型 release gate | workflow artifacts 无 report | Open | devin |
-| R7-011 | P0 | soak 仅重复 workspace tests，无24h资源/性能证据 | real workload 2h/24h + threshold summary | In Progress | devin |
-| R7-012 | P1 | release package 未验证 `.so.2`、symlink、symbols、C examples | unpacked artifact smoke + manifest/rollback | In Progress | devin |
-| R7-013 | P2 | Plan 6 status/acceptance SHA 与当前 main 不一致 | Plan 7 handoff、候选身份与状态规则一致 | In Progress | devin |
+| R7-001 | P0 | CLI/C bootstrap 已可安装 process policy；C options 仍缺 deadline/pool 全字段 | Rust/CLI/C 同策略 + init/reload/boundary tests | Mitigated | local |
+| R7-002 | P0 | vendor 已用 `load_bounded`；device output 实机未验 | bounded reader + SDK shim/allocator pre-call tests | Mitigated | local |
+| R7-003 | P0 | bridge/open_* 预检 + core7_policy_bridge 测试；cheetah 路径仍缺实网 copy_count 证据 | copy-before-reject 失败基线转绿，copy count=0 | Mitigated | local |
+| R7-004 | P0 | 产品路径用 `tokio::time::timeout`；上游原生 deadline 与实网仍 CAP | pinned upstream native timeout/close + thread/fd tests | Mitigated | local |
+| R7-005 | P1 | vendor sync/cancel capability 与真实可中断性未统一验收 | common contract + capability/support matrix | In Progress | local |
+| R7-006 | P1 | 主流算法 element 已 FrameLocal；ResourceLimit 仍 NodeFatal | frame-local continuation + fatal classification tests | Mitigated | local |
+| R7-007 | P1 | readiness 加强 + schema v2 聚合 drop/cancel/ready gauges；pool/affinity 细项仍缺 | ops golden、slow scrape、state matrix | Mitigated | local |
+| R7-008 | P0 | views 主入口 + package_smoke 脚本；待 CI 首次 green artifact | C11/C++17 + symbol/SONAME/view/fuzz/sanitizer | Mitigated | local |
+| R7-009 | P0 | reload-transitions fuzz cleanup 已合入；当前候选 nightly 需重跑 | minimized corpus + fix + candidate nightly green | Mitigated | local |
+| R7-010 | P0 | 已加 sanitizers.yml；需 CI runner 实际通过并归档 report | workflow artifacts 无 report | In Progress | local |
+| R7-011 | P0 | soak 支持 candidate；nightly 增加 smoke + 2h workspace；24h 仍缺 | real workload 2h/24h + threshold summary | In Progress | local |
+| R7-012 | P1 | package_smoke 验证 .so.2/SONAME/symbols/C11；已接 ci/release | unpacked artifact smoke + manifest/rollback | Mitigated | local |
+| R7-013 | P2 | Plan 6/7 status 与候选身份文档已同步更新 | Plan 7 handoff、候选身份与状态规则一致 | In Progress | local |
 
 初始统计：P0 8、P1 4、P2 1。
 

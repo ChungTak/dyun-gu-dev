@@ -4,6 +4,7 @@ use std::ffi::CString;
 
 use dg_capi::{
     dg_engine_create, dg_engine_destroy, dg_engine_load_string, DgEngine, DgGraphFormat,
+    DgStringView,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -30,7 +31,7 @@ fuzz_target!(|data: &[u8]| {
     ] {
         // SAFETY: `engine` is a handle returned by `dg_engine_create`, and
         // `content` is a valid NUL-terminated C string.
-        let _ = unsafe { dg_engine_load_string(engine, format, content.as_ptr(), std::ptr::null_mut()) };
+        let _ = unsafe { dg_engine_load_string(engine, format, DgStringView { data: content.as_ptr(), len: content.to_bytes().len() }, std::ptr::null_mut()) };
     }
     // SAFETY: `engine` was returned by `dg_engine_create` and has not been freed.
     unsafe { dg_engine_destroy(engine, 0, std::ptr::null_mut()) };

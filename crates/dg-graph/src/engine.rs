@@ -17,7 +17,7 @@ use dg_core::{
 use tracing::{error, info};
 
 use crate::element::{Element, ElementHandle, ElementIo, EosState};
-use crate::error::{Error, ErrorScope, Result};
+use crate::error::{Error, Result};
 use crate::metrics::{ElementMetrics, ElementMetricsSnapshot, MetricsSink};
 use crate::pipe::{DataPipe, PipeReceiver, PipeSender};
 use crate::registry::create_element;
@@ -295,6 +295,7 @@ impl RuntimeGraph {
         let effective = Arc::new(policy.resource_policy().effective_for(&requested)?);
         let stop = Arc::new(AtomicBool::new(false));
         let mut nodes: BTreeMap<String, NodeRuntime> = BTreeMap::new();
+        let _policy_guard = crate::registry::BuildProcessPolicyGuard::install(policy.as_ref());
         for node in &spec.nodes {
             let threads = node.threads.unwrap_or(1);
             let created = create_element(node)?;
@@ -862,7 +863,10 @@ impl RunningGraph {
         let mut prepared = BTreeMap::new();
         for node in &candidate.nodes {
             if affected.contains(&node.name) {
-                prepared.insert(node.name.clone(), PreparedNode::new(node)?);
+                prepared.insert(
+                    node.name.clone(),
+                    PreparedNode::new(node, self.policy.as_ref())?,
+                );
             }
         }
         crate::fault::check(crate::fault::HotUpdateFaultPoint::AfterPrepare)?;
@@ -1145,7 +1149,7 @@ impl RunningGraph {
             if self.workers.contains_key(name) {
                 continue;
             }
-            let prepared_node = PreparedNode::new(node)?;
+            let prepared_node = PreparedNode::new(node, self.policy.as_ref())?;
             let control = Arc::new(crate::element::NodeControl::default());
             let eos = Arc::new(Mutex::new(EosState {
                 seen: false,
@@ -1369,7 +1373,8 @@ struct PreparedNode {
 }
 
 impl PreparedNode {
-    fn new(node: &NodeSpec) -> Result<Self> {
+    fn new(node: &NodeSpec, process_policy: &ProcessRuntimePolicy) -> Result<Self> {
+        let _policy_guard = crate::registry::BuildProcessPolicyGuard::install(process_policy);
         let threads = node.threads.unwrap_or(1);
         let mut elements = Vec::new();
         elements.try_reserve_exact(threads).map_err(|_| {
@@ -1498,7 +1503,7 @@ fn collect_report(
 }
 
 fn is_cancellation(error: &Error) -> bool {
-    matches!(error.scope(), ErrorScope::FrameLocal)
+    error.is_cancellation()
 }
 
 fn select_error(current: Option<Error>, candidate: Error) -> Option<Error> {
@@ -1738,6 +1743,7 @@ mod tests {
 
     use super::*;
     use crate::element::{CreatedElement, PortSchema};
+    use crate::error::ErrorScope;
     use crate::registry::ElementDescriptor;
     use crate::spec::{GraphSpecBuilder, NodeSpec};
 
@@ -1933,7 +1939,23 @@ mod tests {
     #[test]
     fn cancellation_is_only_the_not_running_error() {
         assert!(is_cancellation(&Error::NotRunning));
+        assert!(is_cancellation(&Error::Cancelled));
         assert!(!is_cancellation(&root_cause()));
+        assert!(!is_cancellation(&Error::BadFrame {
+            element: "post".to_string(),
+            message: "nan".to_string(),
+        }));
+    }
+
+    #[test]
+    fn bad_frame_is_frame_local_not_cancellation() {
+        let err = Error::BadFrame {
+            element: "post".to_string(),
+            message: "non-finite".to_string(),
+        };
+        assert_eq!(err.scope(), ErrorScope::FrameLocal);
+        assert!(!err.is_cancellation());
+        assert!(!err.scope().is_fatal());
     }
 
     #[test]

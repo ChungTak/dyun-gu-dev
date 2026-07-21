@@ -17,7 +17,10 @@ mod mock;
 mod stream;
 mod track;
 
-pub use connector::{open_pull, open_push, PullEndpoint, StreamProtocol};
+pub use connector::{
+    open_pull, open_pull_with_policy, open_push, open_push_with_policy, PullEndpoint,
+    StreamProtocol,
+};
 pub use error::{Error, Result};
 pub use hub::{HubPublisher, HubSubscriber, MemoryStreamHub, KEYFRAME_TAG, MEDIA_TAG};
 pub use ids::{PublishLease, StreamId, StreamKey, SubscriberId};
@@ -37,9 +40,10 @@ pub use dg_media::MediaFrame;
 
 #[cfg(feature = "cheetah")]
 pub use bridge::{
-    cheetah_avframe_to_media_frame, cheetah_track_info_to_media_frame,
-    media_frame_to_cheetah_avframe, media_frame_to_cheetah_track_info, media_frame_to_frame,
-    CheetahPublisherSinkAdapter, CheetahSubscriberSourceAdapter,
+    cheetah_avframe_to_media_frame, cheetah_avframe_to_media_frame_with_policy,
+    cheetah_track_info_to_media_frame, media_frame_to_cheetah_avframe,
+    media_frame_to_cheetah_avframe_with_policy, media_frame_to_cheetah_track_info,
+    media_frame_to_frame, CheetahPublisherSinkAdapter, CheetahSubscriberSourceAdapter,
 };
 
 #[cfg(feature = "cheetah")]

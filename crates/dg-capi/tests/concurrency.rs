@@ -10,9 +10,9 @@ use dg_capi::{
     dg_buffer_size, dg_engine_build, dg_engine_create, dg_engine_destroy, dg_engine_init,
     dg_engine_load_string, dg_engine_metrics, dg_engine_status, dg_owned_bytes_data,
     dg_owned_bytes_free, dg_owned_bytes_len, dg_tensor_create, dg_tensor_data, dg_tensor_free,
-    DgBackend, DgBackendCapabilities, DgBackendKind, DgBuffer, DgDataFormat, DgDataType,
-    DgDeviceKind, DgEngine, DgExternalMemoryV2, DgGraphFormat, DgGraphStatus, DgOwnedBytes,
-    DgStatus, DgTensor, DgTensorInfo,
+    DgBackend, DgBackendCapabilities, DgBackendKind, DgBuffer, DgByteView, DgDataFormat,
+    DgDataType, DgDeviceKind, DgEngine, DgExternalMemoryV2, DgGraphFormat, DgGraphStatus,
+    DgOwnedBytes, DgShapeView, DgStatus, DgStringView, DgTensor, DgTensorInfo,
 };
 
 const BASE_SPEC: &str = r#"apiVersion: dg/v1
@@ -49,7 +49,10 @@ unsafe fn load_and_build(engine: *mut DgEngine) {
         dg_engine_load_string(
             engine,
             DgGraphFormat::Yaml as i32,
-            spec.as_ptr(),
+            DgStringView {
+                data: spec.as_ptr(),
+                len: spec.to_bytes().len()
+            },
             ptr::null_mut(),
         ),
         DgStatus::Ok
@@ -162,10 +165,14 @@ fn tensor_create_invalid_dtype_zeroes_output_pointer() {
     unsafe {
         assert_eq!(
             dg_tensor_create(
-                data.as_ptr(),
-                data.len(),
-                shape.as_ptr(),
-                shape.len(),
+                DgByteView {
+                    data: data.as_ptr(),
+                    len: data.len()
+                },
+                DgShapeView {
+                    dims: shape.as_ptr(),
+                    rank: shape.len()
+                },
                 -1,
                 0,
                 0,
@@ -187,9 +194,14 @@ fn concurrent_backend_queries_and_run_do_not_race() {
         assert_eq!(
             dg_backend_create(
                 DgBackendKind::Mock as i32,
-                ptr::null(),
-                0,
-                options.as_ptr(),
+                DgByteView {
+                    data: ptr::null(),
+                    len: 0
+                },
+                DgStringView {
+                    data: options.as_ptr(),
+                    len: options.to_bytes().len()
+                },
                 &mut backend,
                 ptr::null_mut(),
             ),
@@ -207,10 +219,14 @@ fn concurrent_backend_queries_and_run_do_not_race() {
     unsafe {
         assert_eq!(
             dg_tensor_create(
-                input_bytes.as_ptr(),
-                input_bytes.len(),
-                shape.as_ptr(),
-                shape.len(),
+                DgByteView {
+                    data: input_bytes.as_ptr(),
+                    len: input_bytes.len()
+                },
+                DgShapeView {
+                    dims: shape.as_ptr(),
+                    rank: shape.len()
+                },
                 DgDataType::F32 as i32,
                 DgDataFormat::Nc as i32,
                 DgDeviceKind::Cpu as i32,
@@ -333,10 +349,14 @@ fn concurrent_tensor_data_reads_are_safe() {
     unsafe {
         assert_eq!(
             dg_tensor_create(
-                data.as_ptr(),
-                data.len(),
-                shape.as_ptr(),
-                shape.len(),
+                DgByteView {
+                    data: data.as_ptr(),
+                    len: data.len()
+                },
+                DgShapeView {
+                    dims: shape.as_ptr(),
+                    rank: shape.len()
+                },
                 DgDataType::F32 as i32,
                 DgDataFormat::Nc as i32,
                 DgDeviceKind::Cpu as i32,

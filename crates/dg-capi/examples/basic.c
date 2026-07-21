@@ -4,6 +4,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+static DgStringView string_view(const char *text) {
+  DgStringView view;
+  view.data = text;
+  view.len = text ? strlen(text) : 0;
+  return view;
+}
 
 static void print_error(struct DgError *error) {
   if (error) {
@@ -58,19 +66,26 @@ int main(void) {
   size_t updated_nodes = 0;
   size_t added_connections = 0;
   size_t removed_connections = 0;
+  DgByteView input_bytes;
+  DgShapeView shape_view;
+
+  input_bytes.data = (const uint8_t *)input;
+  input_bytes.len = sizeof(input);
+  shape_view.dims = shape;
+  shape_view.rank = 2;
 
   if (dg_engine_create(&engine, &error) != Ok) {
     print_error(error);
     return 1;
   }
 
-  if (dg_engine_load_string(engine, Yaml, spec, &error) != Ok ||
-      dg_engine_diff_string(engine, Yaml, spec, &added_nodes, &removed_nodes,
-                            &updated_nodes, &added_connections,
+  if (dg_engine_load_string(engine, Yaml, string_view(spec), &error) != Ok ||
+      dg_engine_diff_string(engine, Yaml, string_view(spec), &added_nodes,
+                            &removed_nodes, &updated_nodes, &added_connections,
                             &removed_connections, &error) != Ok ||
       dg_engine_build(engine, &error) != Ok ||
-      dg_tensor_create((const uint8_t *)input, sizeof(input), shape, 2, F32,
-                       Nc, Cpu, &tensor, &error) != Ok ||
+      dg_tensor_create(input_bytes, shape_view, F32, Nc, Cpu, &tensor,
+                       &error) != Ok ||
       dg_engine_push(engine, tensor, &error) != Ok ||
       dg_engine_run(engine, &error) != Ok ||
       dg_engine_poll(engine, &output, &error) != Ok ||

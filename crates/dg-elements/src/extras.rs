@@ -296,21 +296,29 @@ impl Element for ResnetPostprocess {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let values = f32_values(packet.tensor_ref().ok_or_else(|| {
-                Error::Runtime("resnet postprocess expects a tensor".to_string())
-            })?)?;
-            let probabilities = softmax(&values)?;
-            let results = top_k(&probabilities, self.top_k)?
-                .into_iter()
-                .map(|(index, score)| {
-                    Ok(Classification {
-                        class_id: u32::try_from(index)
-                            .map_err(|_| Error::Runtime("class id is out of range".to_string()))?,
-                        score,
-                        label: self.labels.get(index).cloned(),
+            let processed = (|| {
+                let values = f32_values(packet.tensor_ref().ok_or_else(|| Error::BadFrame {
+                    element: io.name.clone(),
+                    message: "resnet postprocess expects a tensor".to_string(),
+                })?)?;
+                let probabilities = softmax(&values)?;
+                top_k(&probabilities, self.top_k)?
+                    .into_iter()
+                    .map(|(index, score)| {
+                        Ok(Classification {
+                            class_id: u32::try_from(index).map_err(|_| Error::BadFrame {
+                                element: io.name.clone(),
+                                message: "class id is out of range".to_string(),
+                            })?,
+                            score,
+                            label: self.labels.get(index).cloned(),
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>>>()
+            })();
+            let Some(results) = io.absorb_frame_result(processed)? else {
+                continue;
+            };
             io.send(
                 "out",
                 Packet::classifications(results).with_meta(packet.meta),
@@ -327,19 +335,23 @@ impl Element for Retinaface {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let values = f32_values(
-                packet
-                    .tensor_ref()
-                    .ok_or_else(|| Error::Runtime("retinaface expects a tensor".to_string()))?,
-            )?;
-            let faces = decode_retinaface(
-                &values,
-                &self.anchors,
-                self.width,
-                self.height,
-                self.score_threshold,
-                self.nms_threshold,
-            )?;
+            let decoded = (|| {
+                let values = f32_values(packet.tensor_ref().ok_or_else(|| Error::BadFrame {
+                    element: io.name.clone(),
+                    message: "retinaface expects a tensor".to_string(),
+                })?)?;
+                decode_retinaface(
+                    &values,
+                    &self.anchors,
+                    self.width,
+                    self.height,
+                    self.score_threshold,
+                    self.nms_threshold,
+                )
+            })();
+            let Some(faces) = io.absorb_frame_result(decoded)? else {
+                continue;
+            };
             io.send("out", Packet::faces(faces).with_meta(packet.meta))?;
         }
     }
@@ -353,10 +365,16 @@ impl Element for ByteTrack {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let detections = packet.detections_ref().ok_or_else(|| {
-                Error::Runtime("bytetrack expects detections payload".to_string())
-            })?;
-            let results = self.update(detections)?;
+            let processed = (|| {
+                let detections = packet.detections_ref().ok_or_else(|| Error::BadFrame {
+                    element: io.name.clone(),
+                    message: "bytetrack expects detections payload".to_string(),
+                })?;
+                self.update(detections)
+            })();
+            let Some(results) = io.absorb_frame_result(processed)? else {
+                continue;
+            };
             io.send("out", Packet::tracks(results).with_meta(packet.meta))?;
         }
     }
@@ -370,10 +388,16 @@ impl Element for PpocrDet {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let tensor = packet
-                .tensor_ref()
-                .ok_or_else(|| Error::Runtime("ppocr det expects a tensor".to_string()))?;
-            let results = detect_text_regions(tensor, self.threshold)?;
+            let processed = (|| {
+                let tensor = packet.tensor_ref().ok_or_else(|| Error::BadFrame {
+                    element: io.name.clone(),
+                    message: "ppocr det expects a tensor".to_string(),
+                })?;
+                detect_text_regions(tensor, self.threshold)
+            })();
+            let Some(results) = io.absorb_frame_result(processed)? else {
+                continue;
+            };
             io.send("out", Packet::ocr(results).with_meta(packet.meta))?;
         }
     }
@@ -387,44 +411,49 @@ impl Element for PpocrRec {
                 io.broadcast_eos()?;
                 return Ok(());
             }
-            let logits = f32_values(
-                packet
-                    .tensor_ref()
-                    .ok_or_else(|| Error::Runtime("ppocr rec expects a tensor".to_string()))?,
-            )?;
-            let class_count = self
-                .alphabet
-                .len()
-                .checked_add(1)
-                .ok_or_else(|| Error::Runtime("ocr alphabet size overflow".to_string()))?;
-            if class_count == 0 || logits.len() % class_count != 0 {
-                return Err(Error::Runtime(
-                    "ocr logits do not match alphabet size".to_string(),
-                ));
-            }
-            let row_count = logits.len() / class_count;
-            if row_count > MAX_OCR_ROWS {
-                return Err(Error::ResourceLimit {
-                    resource: "ppocr_rec rows".to_string(),
-                    requested: row_count,
-                    limit: MAX_OCR_ROWS,
-                });
-            }
-            let mut rows: Vec<&[f32]> = Vec::new();
-            rows.try_reserve_exact(row_count).map_err(|_| {
-                Error::Runtime("ppocr_rec row vector allocation failed".to_string())
-            })?;
-            rows.extend(logits.chunks_exact(class_count));
-            let text = ctc_greedy_decode(&rows, &self.alphabet, self.blank)?;
-            io.send(
-                "out",
-                Packet::ocr(vec![OcrText {
+            let processed = (|| {
+                let logits = f32_values(packet.tensor_ref().ok_or_else(|| Error::BadFrame {
+                    element: io.name.clone(),
+                    message: "ppocr rec expects a tensor".to_string(),
+                })?)?;
+                let class_count =
+                    self.alphabet
+                        .len()
+                        .checked_add(1)
+                        .ok_or_else(|| Error::BadFrame {
+                            element: io.name.clone(),
+                            message: "ocr alphabet size overflow".to_string(),
+                        })?;
+                if class_count == 0 || logits.len() % class_count != 0 {
+                    return Err(Error::BadFrame {
+                        element: io.name.clone(),
+                        message: "ocr logits do not match alphabet size".to_string(),
+                    });
+                }
+                let row_count = logits.len() / class_count;
+                if row_count > MAX_OCR_ROWS {
+                    return Err(Error::ResourceLimit {
+                        resource: "ppocr_rec rows".to_string(),
+                        requested: row_count,
+                        limit: MAX_OCR_ROWS,
+                    });
+                }
+                let mut rows: Vec<&[f32]> = Vec::new();
+                rows.try_reserve_exact(row_count).map_err(|_| {
+                    Error::Runtime("ppocr_rec row vector allocation failed".to_string())
+                })?;
+                rows.extend(logits.chunks_exact(class_count));
+                let text = ctc_greedy_decode(&rows, &self.alphabet, self.blank)?;
+                Ok(vec![OcrText {
                     text,
                     score: 1.0,
                     bbox: None,
                 }])
-                .with_meta(packet.meta),
-            )?;
+            })();
+            let Some(results) = io.absorb_frame_result(processed)? else {
+                continue;
+            };
+            io.send("out", Packet::ocr(results).with_meta(packet.meta))?;
         }
     }
 }
@@ -1207,9 +1236,10 @@ fn f32_values(tensor: &Tensor) -> Result<Vec<f32>> {
         values.push(f32::from_ne_bytes(bytes));
     }
     if !values.iter().all(|value| value.is_finite()) {
-        return Err(Error::Config(
-            "tensor contains non-finite floating point values".to_string(),
-        ));
+        return Err(Error::BadFrame {
+            element: "algorithm".to_string(),
+            message: "tensor contains non-finite floating point values".to_string(),
+        });
     }
     Ok(values)
 }

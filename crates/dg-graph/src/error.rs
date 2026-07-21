@@ -52,6 +52,9 @@ pub enum Error {
     CycleDetected,
     #[error("element error in {element}: {message}")]
     Element { element: String, message: String },
+    /// Single-frame data-plane error: drop the frame and continue the stream.
+    #[error("bad frame in {element}: {message}")]
+    BadFrame { element: String, message: String },
     #[error("runtime error: {0}")]
     Runtime(String),
     #[error("graph is not running")]
@@ -98,6 +101,9 @@ impl Error {
             // Cancellation / not-running are frame-local control signals; they do
             // not imply any persistent failure.
             Error::Cancelled | Error::NotRunning => ErrorScope::FrameLocal,
+            // Single-frame data errors (NaN, shape, decode corruption) drop and
+            // continue without failing the graph or sibling streams.
+            Error::BadFrame { .. } => ErrorScope::FrameLocal,
             // Invariant violations corrupt shared graph state and are always
             // graph-fatal. Worker panics are reported as Invariant.
             Error::Invariant(_) => ErrorScope::GraphFatal,
@@ -106,5 +112,10 @@ impl Error {
             // element-level runtime failures.
             _ => ErrorScope::NodeFatal,
         }
+    }
+
+    /// Returns true for cooperative stop / not-running signals (not data drops).
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, Error::Cancelled | Error::NotRunning)
     }
 }

@@ -178,6 +178,9 @@ typedef struct DgAbiVersion {
 
 /**
  * Runtime bootstrap options for [`dg_runtime_init`].
+ *
+ * Fixed-width process hard limits. Zero values mean "use the library default
+ * for that field". Non-zero values must pass `ProcessRuntimePolicy` validation.
  */
 typedef struct DgRuntimeInitOptions {
   /**
@@ -188,7 +191,35 @@ typedef struct DgRuntimeInitOptions {
    * ABI struct version; must be 0 for the current definition.
    */
   uint32_t struct_version;
+  size_t max_config_bytes;
+  size_t max_include_depth;
+  size_t max_include_count;
+  size_t max_nodes;
+  size_t max_connections;
+  size_t max_tensor_bytes;
+  size_t max_frame_bytes;
+  size_t max_model_bytes;
+  size_t max_buffer_packets;
+  size_t max_buffer_bytes;
 } DgRuntimeInitOptions;
+
+/**
+ * Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
+ * the duration of the ABI call.
+ */
+typedef struct DgStringView {
+  const char *data;
+  size_t len;
+} DgStringView;
+
+/**
+ * Borrowed byte view. The caller keeps the underlying memory valid for the
+ * duration of the ABI call.
+ */
+typedef struct DgByteView {
+  const uint8_t *data;
+  size_t len;
+} DgByteView;
 
 /**
  * Runtime capabilities returned by a direct backend.
@@ -228,6 +259,15 @@ typedef struct DgTensorInfo {
 } DgTensorInfo;
 
 /**
+ * Borrowed shape dimensions view. The caller keeps the underlying memory valid
+ * for the duration of the ABI call.
+ */
+typedef struct DgShapeView {
+  const size_t *dims;
+  size_t rank;
+} DgShapeView;
+
+/**
  * Release callback for imported raw external memory. It is invoked exactly once
  * when the library no longer references the external handle.
  */
@@ -250,33 +290,6 @@ typedef struct DgExternalMemoryV2 {
   DgReleaseCallback release;
   void *user_data;
 } DgExternalMemoryV2;
-
-/**
- * Borrowed UTF-8 string view. The caller keeps the underlying memory valid for
- * the duration of the ABI call.
- */
-typedef struct DgStringView {
-  const char *data;
-  size_t len;
-} DgStringView;
-
-/**
- * Borrowed byte view. The caller keeps the underlying memory valid for the
- * duration of the ABI call.
- */
-typedef struct DgByteView {
-  const uint8_t *data;
-  size_t len;
-} DgByteView;
-
-/**
- * Borrowed shape dimensions view. The caller keeps the underlying memory valid
- * for the duration of the ABI call.
- */
-typedef struct DgShapeView {
-  const size_t *dims;
-  size_t rank;
-} DgShapeView;
 
 /**
  * Returns the package version as a static UTF-8 C string.
@@ -345,11 +358,14 @@ void dg_owned_bytes_free(struct DgOwnedBytes *owned);
 enum DgStatus dg_build_capabilities_json(struct DgOwnedBytes **out, struct DgError **out_error);
 
 /**
- * Idempotent process-level runtime bootstrap (INT5-09).
+ * Idempotent process-level runtime bootstrap (INT5-09 / CORE7-02).
  *
  * Installs built-in stream connectors when the `stream`/`cheetah` features are
- * enabled. `options` may be null for defaults; when non-null, `struct_size`
- * must match `sizeof(DgRuntimeInitOptions)`.
+ * enabled and records the process hard policy. `options` may be null for
+ * defaults; when non-null, `struct_size` must match `sizeof(DgRuntimeInitOptions)`.
+ *
+ * Repeating init with the same effective policy returns Ok. A different policy
+ * returns `InvalidState` without replacing the installed policy.
  */
 enum DgStatus dg_runtime_init(const struct DgRuntimeInitOptions *options,
                               struct DgError **out_error);
@@ -373,47 +389,47 @@ enum DgStatus dg_engine_destroy(struct DgEngine *engine,
                                 struct DgError **out_error);
 
 /**
- * Loads a graph specification from a UTF-8 string.
+ * Loads a graph specification from a UTF-8 string view (may be non-NUL-terminated).
  */
 enum DgStatus dg_engine_load_string(struct DgEngine *engine,
                                     int32_t format,
-                                    const char *content,
+                                    struct DgStringView content,
                                     struct DgError **out_error);
 
 /**
- * Loads a graph specification from a UTF-8 path.
+ * Loads a graph specification from a UTF-8 path view.
  */
 enum DgStatus dg_engine_load_file(struct DgEngine *engine,
-                                  const char *path,
+                                  struct DgStringView path,
                                   struct DgError **out_error);
 
 /**
- * Reloads a graph specification from a UTF-8 string.
+ * Reloads a graph specification from a UTF-8 string view.
  *
  * A built graph is updated in place and remains ready to run. Reload is rejected while inputs
  * are pending so that queued data is never silently interpreted by a changed graph.
  */
 enum DgStatus dg_engine_reload_string(struct DgEngine *engine,
                                       int32_t format,
-                                      const char *content,
+                                      struct DgStringView content,
                                       struct DgError **out_error);
 
 /**
- * Reloads a graph specification from a UTF-8 path.
+ * Reloads a graph specification from a UTF-8 path view.
  *
  * A built graph is updated in place and remains ready to run. Reload is rejected while inputs
  * are pending so that queued data is never silently interpreted by a changed graph.
  */
 enum DgStatus dg_engine_reload_file(struct DgEngine *engine,
-                                    const char *path,
+                                    struct DgStringView path,
                                     struct DgError **out_error);
 
 /**
- * Computes node and connection changes against a UTF-8 graph specification.
+ * Computes node and connection changes against a UTF-8 graph specification view.
  */
 enum DgStatus dg_engine_diff_string(const struct DgEngine *engine,
                                     int32_t format,
-                                    const char *content,
+                                    struct DgStringView content,
                                     size_t *out_added_nodes,
                                     size_t *out_removed_nodes,
                                     size_t *out_updated_nodes,
@@ -422,10 +438,10 @@ enum DgStatus dg_engine_diff_string(const struct DgEngine *engine,
                                     struct DgError **out_error);
 
 /**
- * Computes node and connection changes against a UTF-8 graph file.
+ * Computes node and connection changes against a UTF-8 graph file path view.
  */
 enum DgStatus dg_engine_diff_file(const struct DgEngine *engine,
-                                  const char *path,
+                                  struct DgStringView path,
                                   size_t *out_added_nodes,
                                   size_t *out_removed_nodes,
                                   size_t *out_updated_nodes,
@@ -434,33 +450,33 @@ enum DgStatus dg_engine_diff_file(const struct DgEngine *engine,
                                   struct DgError **out_error);
 
 /**
- * Adds a node programmatically. `params_json` may be null for an empty object.
+ * Adds a node programmatically. Empty `params_json` (`len == 0`) means `{}`.
  */
 enum DgStatus dg_engine_add_node(struct DgEngine *engine,
-                                 const char *name,
-                                 const char *kind,
-                                 const char *params_json,
+                                 struct DgStringView name,
+                                 struct DgStringView kind,
+                                 struct DgStringView params_json,
                                  struct DgError **out_error);
 
 /**
  * Removes a node by name and its incident connections.
  */
 enum DgStatus dg_engine_remove_node(struct DgEngine *engine,
-                                    const char *name,
+                                    struct DgStringView name,
                                     struct DgError **out_error);
 
 /**
  * Adds a graph edge in `source.port -> destination.port` form.
  */
 enum DgStatus dg_engine_connect(struct DgEngine *engine,
-                                const char *connection,
+                                struct DgStringView connection,
                                 struct DgError **out_error);
 
 /**
  * Removes a graph edge.
  */
 enum DgStatus dg_engine_disconnect(struct DgEngine *engine,
-                                   const char *connection,
+                                   struct DgStringView connection,
                                    struct DgError **out_error);
 
 /**
@@ -510,11 +526,12 @@ enum DgStatus dg_engine_metrics(const struct DgEngine *engine,
 
 /**
  * Creates and initializes a backend without constructing a graph.
+ *
+ * `model` is raw model bytes. Empty `options_json` means `{}`.
  */
 enum DgStatus dg_backend_create(int32_t kind,
-                                const uint8_t *model_data,
-                                size_t model_length,
-                                const char *options_json,
+                                struct DgByteView model,
+                                struct DgStringView options_json,
                                 struct DgBackend **out,
                                 struct DgError **out_error);
 
@@ -559,12 +576,10 @@ enum DgStatus dg_backend_run(struct DgBackend *backend,
                              struct DgError **out_error);
 
 /**
- * Creates a host tensor from a caller-owned byte array.
+ * Creates a host tensor from a caller-owned byte view and shape view.
  */
-enum DgStatus dg_tensor_create(const uint8_t *data,
-                               size_t length,
-                               const size_t *shape,
-                               size_t rank,
+enum DgStatus dg_tensor_create(struct DgByteView data,
+                               struct DgShapeView shape,
                                int32_t dtype,
                                int32_t format,
                                int32_t device,
@@ -575,8 +590,7 @@ enum DgStatus dg_tensor_create(const uint8_t *data,
  * Creates a tensor backed by an imported external buffer.
  */
 enum DgStatus dg_tensor_create_external(const struct DgExternalMemoryV2 *desc,
-                                        const size_t *shape,
-                                        size_t rank,
+                                        struct DgShapeView shape,
                                         int32_t dtype,
                                         int32_t format,
                                         struct DgTensor **out,

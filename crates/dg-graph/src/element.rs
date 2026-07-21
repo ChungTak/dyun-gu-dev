@@ -164,6 +164,25 @@ impl ElementIo {
         self.metrics.record_drop();
     }
 
+    /// Maps a per-frame processing result: success yields `Some`, frame-local
+    /// errors are counted as drops and yield `None`, other errors propagate.
+    pub fn absorb_frame_result<T>(
+        &self,
+        result: crate::error::Result<T>,
+    ) -> crate::error::Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error)
+                if matches!(error.scope(), crate::error::ErrorScope::FrameLocal)
+                    && !error.is_cancellation() =>
+            {
+                self.record_drop();
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Snapshot of element metrics for diagnostics (e.g. drop counts after frame-local errors).
     pub fn metrics_snapshot(&self) -> crate::metrics::ElementMetricsSnapshot {
         self.metrics.snapshot()

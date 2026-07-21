@@ -65,18 +65,19 @@ fn preprocess_rejects_external_only_tensor() {
 }
 
 #[test]
-fn postprocess_rejects_non_finite_model_output() {
-    let mut values = [0.0_f32; 6];
-    values[4] = f32::NAN;
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+fn postprocess_drops_non_finite_frame_and_continues() {
+    // Bad frame: NaN in model output → FrameLocal drop; graph finishes cleanly.
+    let mut bad_values = [0.0_f32; 6];
+    bad_values[4] = f32::NAN;
+    let bad_bytes: Vec<u8> = bad_values.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let desc = TensorDesc::new(
         Shape::new([1, 6, 1]),
         DataType::F32,
         DataFormat::NC,
         DeviceKind::Cpu,
     );
-    let input = Tensor::allocate(&dg_core::CpuDevice::new(), desc).expect("allocate");
-    input.buffer().write_from_slice(&bytes).expect("write");
+    let bad = Tensor::allocate(&dg_core::CpuDevice::new(), desc).expect("allocate");
+    bad.buffer().write_from_slice(&bad_bytes).expect("write");
 
     let spec = GraphSpecBuilder::new()
         .add_node(NodeSpec {
@@ -124,10 +125,19 @@ fn postprocess_rejects_non_finite_model_output() {
         .expect("build graph");
 
     let graph = Graph::new(spec).expect("build graph");
-    let err = graph
-        .run_with_inputs(HashMap::from([("input".to_string(), vec![input])]))
-        .expect_err("non-finite tensor must be rejected");
-    assert!(err.to_string().contains("non-finite"), "{err}");
+    let report = graph
+        .run_with_inputs(HashMap::from([("input".to_string(), vec![bad])]))
+        .expect("NaN output must be frame-local and must not fail the graph");
+    let post_metrics = report.element_metrics.get("post").expect("post metrics");
+    assert!(
+        post_metrics.drop_count >= 1,
+        "NaN frame should be counted as a frame-local drop: {post_metrics:?}"
+    );
+    let sink_packets = report.sinks.get("sink").cloned().unwrap_or_default();
+    assert!(
+        sink_packets.is_empty(),
+        "dropped NaN frame must not produce sink detections"
+    );
 }
 
 fn resnet_input_tensor() -> Tensor {

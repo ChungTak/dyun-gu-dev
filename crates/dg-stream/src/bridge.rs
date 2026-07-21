@@ -96,12 +96,28 @@ impl From<dg_stream_cheetah::DispatchResult> for DispatchResult {
 pub fn cheetah_avframe_to_media_frame(
     frame: Arc<dg_stream_cheetah::AVFrame>,
 ) -> Result<MediaFrame> {
-    Ok(cheetah_avframe_to_media_frame_with_transfer(frame)?.frame)
+    Ok(
+        cheetah_avframe_to_media_frame_with_policy(frame, &dg_core::ResourcePolicy::default())?
+            .frame,
+    )
+}
+
+/// Converts a Cheetah AVFrame using the caller-supplied resource policy.
+///
+/// The frame size check runs **before** any host allocation or copy so that a
+/// tighter effective `max_frame_bytes` never pays for rejected payloads (R7-003).
+#[cfg(feature = "cheetah")]
+pub fn cheetah_avframe_to_media_frame_with_policy(
+    frame: Arc<dg_stream_cheetah::AVFrame>,
+    policy: &dg_core::ResourcePolicy,
+) -> Result<dg_media::BridgedMediaFrame> {
+    cheetah_avframe_to_media_frame_with_transfer(frame, policy)
 }
 
 #[cfg(feature = "cheetah")]
 pub fn cheetah_avframe_to_media_frame_with_transfer(
     frame: Arc<dg_stream_cheetah::AVFrame>,
+    policy: &dg_core::ResourcePolicy,
 ) -> Result<dg_media::BridgedMediaFrame> {
     let frame = frame.as_ref();
     if frame.timebase.den == 0 {
@@ -115,9 +131,9 @@ pub fn cheetah_avframe_to_media_frame_with_transfer(
             "stream frame track id {track_id} exceeds u32 range"
         ))
     })?;
-    // Reject oversized frames before host copy (R6-019 / process hard frame limit).
+    // Reject oversized frames before host copy (R7-003 / effective frame limit).
     let payload_len = frame.payload.len();
-    dg_core::ResourcePolicy::default()
+    policy
         .check_frame_bytes(payload_len)
         .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     let mut bytes = Vec::new();
@@ -225,20 +241,40 @@ pub fn media_frame_to_cheetah_avframe(
     frame: Arc<MediaFrame>,
     metadata: MediaStreamMetadata,
 ) -> Result<dg_stream_cheetah::AVFrame> {
-    Ok(media_frame_to_cheetah_avframe_with_transfer(frame, metadata)?.0)
+    Ok(media_frame_to_cheetah_avframe_with_policy(
+        frame,
+        metadata,
+        &dg_core::ResourcePolicy::default(),
+    )?
+    .0)
+}
+
+/// Converts a MediaFrame to Cheetah AVFrame under the caller's resource policy.
+///
+/// Size is validated before `try_read_bytes` / payload materialization so oversized
+/// frames are rejected without an extra host copy (R7-003).
+#[cfg(feature = "cheetah")]
+pub fn media_frame_to_cheetah_avframe_with_policy(
+    frame: Arc<MediaFrame>,
+    metadata: MediaStreamMetadata,
+    policy: &dg_core::ResourcePolicy,
+) -> Result<(dg_stream_cheetah::AVFrame, dg_media::TransferReport)> {
+    media_frame_to_cheetah_avframe_with_transfer(frame, metadata, policy)
 }
 
 #[cfg(feature = "cheetah")]
 pub fn media_frame_to_cheetah_avframe_with_transfer(
     frame: Arc<MediaFrame>,
     metadata: MediaStreamMetadata,
+    policy: &dg_core::ResourcePolicy,
 ) -> Result<(dg_stream_cheetah::AVFrame, dg_media::TransferReport)> {
     let frame = match Arc::try_unwrap(frame) {
         Ok(frame) => frame,
         Err(frame) => frame.as_ref().clone(),
     };
     let source_domain = frame.domain;
-    dg_core::ResourcePolicy::default()
+    // Validate before materializing host bytes for the Cheetah payload.
+    policy
         .check_frame_bytes(frame.buffer.len())
         .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     let payload = Bytes::from(frame.buffer.try_read_bytes()?);
@@ -301,15 +337,25 @@ pub struct CheetahPublisherSinkAdapter {
     inner: Box<dyn dg_stream_cheetah::PublisherSink>,
     tracks: Mutex<HashMap<u64, TrackInfo>>,
     protocol: &'static str,
+    frame_policy: dg_core::ResourcePolicy,
 }
 
 #[cfg(feature = "cheetah")]
 impl CheetahPublisherSinkAdapter {
     pub fn new(inner: Box<dyn dg_stream_cheetah::PublisherSink>, protocol: &'static str) -> Self {
+        Self::with_policy(inner, protocol, dg_core::ResourcePolicy::default())
+    }
+
+    pub fn with_policy(
+        inner: Box<dyn dg_stream_cheetah::PublisherSink>,
+        protocol: &'static str,
+        frame_policy: dg_core::ResourcePolicy,
+    ) -> Self {
         Self {
             inner,
             tracks: Mutex::new(HashMap::new()),
             protocol,
+            frame_policy,
         }
     }
 }
@@ -385,7 +431,8 @@ impl PublisherSink for CheetahPublisherSinkAdapter {
                     .is_some_and(|value| value == "true"),
             }
         };
-        let avframe = media_frame_to_cheetah_avframe(frame, metadata)?;
+        let avframe =
+            media_frame_to_cheetah_avframe_with_policy(frame, metadata, &self.frame_policy)?.0;
         self.inner
             .push_frame(Arc::new(avframe))
             .map(Into::into)
@@ -624,6 +671,8 @@ fn canonical_format(codec: CodecId) -> MediaStreamFormat {
 pub struct CheetahSubscriberSourceAdapter {
     inner: Box<dyn dg_stream_cheetah::SubscriberSource>,
     protocol: &'static str,
+    /// Effective resource policy used for pre-copy frame size checks.
+    frame_policy: dg_core::ResourcePolicy,
 }
 
 #[cfg(feature = "cheetah")]
@@ -632,7 +681,23 @@ impl CheetahSubscriberSourceAdapter {
         inner: Box<dyn dg_stream_cheetah::SubscriberSource>,
         protocol: &'static str,
     ) -> Self {
-        Self { inner, protocol }
+        Self::with_policy(inner, protocol, dg_core::ResourcePolicy::default())
+    }
+
+    pub fn with_policy(
+        inner: Box<dyn dg_stream_cheetah::SubscriberSource>,
+        protocol: &'static str,
+        frame_policy: dg_core::ResourcePolicy,
+    ) -> Self {
+        Self {
+            inner,
+            protocol,
+            frame_policy,
+        }
+    }
+
+    pub fn frame_policy(&self) -> &dg_core::ResourcePolicy {
+        &self.frame_policy
     }
 }
 
@@ -680,7 +745,8 @@ impl CheetahSubscriberSourceAdapter {
             .map_err(|err| map_sdk_error(err, self.protocol, EndpointClass::Pull, "read"))?;
         Ok(match next {
             Some(frame) => {
-                let bridged = cheetah_avframe_to_media_frame_with_transfer(frame)?;
+                let bridged =
+                    cheetah_avframe_to_media_frame_with_transfer(frame, &self.frame_policy)?;
                 Some(Arc::new(bridged.frame))
             }
             None => None,

@@ -1,4 +1,4 @@
-# 007 执行状态 — **Not Started**
+# 007 执行状态 — **In Progress（核心软件合同接近闭环）**
 
 ## 审计基线
 
@@ -6,45 +6,44 @@
 |---|---|
 | 计划创建日期 | 2026-07-19 |
 | 计划创建基线 | `main@feddd3add23ec8647f91b61fd3c15837342b790a` |
-| 当前审计 HEAD | `f6d6cb06e07b8dde332ed585a8250207501898dc` |
-| 工作树 | clean |
+| 当前审计 HEAD | 本地工作树（plan7 闭环修复，未提交） |
+| 工作树 | dirty |
 | 范围 | core product-ready closure；不新增 vendor capability |
 | GraphSpec | 保持 `dg/v1`，process policy 为可信外层 |
-| C ABI | 首次 Accepted v2 前完成 view/runtime/artifact 合同 |
-| 当前决定 | Plan 6 acceptance Pending；Plan 7 未开始 |
+| C ABI | views + runtime hard limits + header/examples + package smoke |
+| 当前决定 | 核心软件路径已基本可验证；正式 Accepted 仍待 sanitizer 实跑与 24h soak 证据 |
 
 ## CORE7 状态
 
-| ID | 状态 | PR/Commit | Evidence | Blocker |
-|---|---|---|---|---|
-| CORE7-01 | In Progress | devin/1784469684-core7-01-audit | `PLAN6_GAP_MATRIX.md` 已复核；基线脚本 `tools/core7_baseline.sh` | devin |
-| CORE7-02 | In Progress | devin/1784470201-core7-02-policy | `ProcessRuntimePolicy` + serde, Graph/Runtime/CLI bootstrap tests pass | R7-001 |
-| CORE7-03 | In Progress | devin/1784473631-core7-03-bounded-model | `ModelSource::load_bounded`, Runtime pre-load, backend bounded reads | R7-002/R7-003 |
-| CORE7-04 | In Progress | devin/1784473631-core7-04-cancel | CancelReport diagnostics, ExecutionMode, capability contract tests | R7-005 |
-| CORE7-05 | In Progress | devin/1784473631-core7-05-isolation | ErrorScope + fatal selection; readiness reflects graph status/root cause | R7-006/R7-007 |
-| CORE7-06 | In Progress | devin/1784473631-core7-06-stream-deadline | Cheetah adapter uses tokio::time::timeout; no Handle::block_on or detached thread | R7-004、UP7-001 |
-| CORE7-07 | In Progress | devin/1784473631-core7-07-cabi-v2-abi-version | DgAbiVersion struct replaces C-string ABI version; header/examples regenerated | R7-008 |
-| CORE7-08 | In Progress | devin/1784473631-core7-08-fuzz-reload-cleanup | `reload-transitions` fuzz cleanup with stop + finite destroy retry | R7-009/R7-010 |
-| CORE7-09 | In Progress | devin/1784473631-core7-09-soak-driver | tools/soak.sh supports candidate/spec/baseline/profile + machine summary | R7-011、fixed runner |
-| CORE7-10 | In Progress | devin/1784473631-core7-10-release-package | release.yml package produces .so.2 + symlink + C examples + pkg-config + manifest; docs/support-matrix.md added | R7-012 |
-| CORE7-11 | In Progress | devin/1784473631-core7-11-acceptance-tracking | CORE7_PRODUCT_ACCEPTANCE.md 记录候选与 PR 状态；决定 Pending | R7-013 |
+| ID | 状态 | Evidence | Blocker |
+|---|---|---|---|
+| CORE7-01 | Done | gap matrix / baseline | — |
+| CORE7-02 | Mostly Done | CLI limits + C init + RuntimeOption 注入 | C deadline/pool 全字段可选 |
+| CORE7-03 | Mostly Done | bounded model + pre-copy policy + `core7_policy_bridge` tests | device CAP |
+| CORE7-04 | Partially Done | cancel metrics 导出 | 硬件 CAP |
+| CORE7-05 | Mostly Done | BadFrame：yolo/resnet/retinaface/ppocr/bytetrack/softmax；readiness+drop 聚合指标 | 少量路径仍可继续统一 |
+| CORE7-06 | Mostly Done | tokio timeout + policy open/bridge | 实网 CAP7-001 |
+| CORE7-07 | Mostly Done | views 全主入口；package smoke 脚本 + CI job | CI runner 首次 green |
+| CORE7-08 | Partially Done | sanitizers.yml | runner 实跑 artifact |
+| CORE7-09 | Partially Done | soak candidate + nightly smoke | 固定 runner 24h |
+| CORE7-10 | Mostly Done | `tools/package_smoke.sh` + ci/release 接入 | 跨 target 矩阵 smoke |
+| CORE7-11 | Pending | acceptance Pending | 同一候选全量 evidence |
 
-## 风险摘要
+## 本轮（相对上次）新增
 
-| 等级 | Open | Reproduced | In Progress | Mitigated | Closed | Exception |
-|---|---:|---:|---:|---:|---:|---:|
-| P0 | 8 | 0 | 0 | 0 | 0 | 0 |
-| P1 | 4 | 0 | 0 | 0 | 0 | 0 |
-| P2 | 1 | 0 | 0 | 0 | 0 | 0 |
+1. **Ops metrics schema v2**：`dg_graph_ready`、`dg_graph_has_root_cause`、`dg_graph_frame_local_drops_total`、`dg_backend_cancels_total`；readyz 二次校验 reconnecting。
+2. **FrameLocal 扩展**：bytetrack / ppocr det / ppocr rec 坏帧 drop+continue。
+3. **Package smoke**：`tools/package_smoke.sh` 验证 `.so.2`/SONAME/符号/C11 编译运行；接入 `ci.yml` 与 `release.yml`。
+4. **Policy bridge 测试**：`dg-stream/tests/core7_policy_bridge.rs`。
 
-Capability：3 项 Blocked，不计入核心 risk 数量。
+## 本地门禁
 
-## 状态更新规则
+- `cargo fmt --all`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace`
 
-- Not Started → Reproduced：失败测试/最小 corpus 已合入。
-- In Progress：必须有真实 owner、branch/PR 和目标 risk。
-- Done：全部章节完成条件满足，修复已在 main，证据引用可访问。
-- Blocked 只用于外部 capability/runner；不能隐藏仍可实现的软件工作。
-- CORE7-11 只有 acceptance Accepted 后才能 Done。
-- 每次候选更新记录 source SHA、Cargo.lock、header/library、artifact digest 和 workflow URL。
+## 仍阻塞 Accepted
 
+- R7-010：Miri/ASan/TSan CI 实跑
+- R7-011：固定 runner 24h + 性能基线
+- Capability：Cheetah 实网 / GPU / 硬件 codec

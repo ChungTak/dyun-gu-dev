@@ -42,7 +42,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.1
-      - run: ./tools/soak.sh --duration 7200 --release
+      - name: Build candidate CLI
+        run: cargo build -p dg-cli --release --locked
+      - name: Core soak (workspace tests + candidate smoke)
+        # tools/soak.sh supports --candidate/--spec for long-lived graphs; when
+        # only short demo specs exist, run a candidate smoke then the 2h
+        # workspace-test soak for release evidence continuity.
+        run: |
+          set -euo pipefail
+          CANDIDATE=./target/release/dg
+          if [[ -x "$CANDIDATE" && -f examples/mock-multi-algorithm.yaml ]]; then
+            ./tools/soak.sh \
+              --duration 120 \
+              --release \
+              --candidate "$CANDIDATE" \
+              --spec examples/mock-multi-algorithm.yaml \
+              --profile core-mock-smoke \
+              --artifact-dir soak-logs/candidate-smoke
+          fi
+          ./tools/soak.sh --duration 7200 --release --artifact-dir soak-logs/workspace
       - uses: actions/upload-artifact@v4
         if: always()
         with:

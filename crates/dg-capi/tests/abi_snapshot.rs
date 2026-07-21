@@ -85,6 +85,22 @@ fn version_and_owned_handle_symbols_remain_exported() {
     assert!(header.contains("const char *dg_version(void)"));
     assert!(header.contains("struct DgAbiVersion"));
     assert!(header.contains("dg_abi_version("));
+    assert!(
+        header.contains("max_frame_bytes"),
+        "DgRuntimeInitOptions must include process hard frame limit"
+    );
+    assert!(
+        header.contains("struct DgStringView"),
+        "C ABI v2 requires DgStringView"
+    );
+    assert!(
+        header.contains("struct DgByteView"),
+        "C ABI v2 requires DgByteView"
+    );
+    assert!(
+        header.contains("struct DgShapeView"),
+        "C ABI v2 requires DgShapeView"
+    );
     for symbol in [
         "DgError",
         "DgOwnedBytes",

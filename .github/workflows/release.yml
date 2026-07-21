@@ -104,11 +104,22 @@ jobs:
           PY
 
           tar -C dist -czf "dist/$package.tar.gz" "$package"
+      - name: Host package smoke (x86_64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          # Reuse the just-built release artifacts; avoid a second full build.
+          ./tools/package_smoke.sh --artifact-dir package-smoke --skip-build --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: dyun-gu-${{ github.ref_name }}-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && always()
+        with:
+          name: package-smoke-${{ github.ref_name }}
+          path: package-smoke/
+          retention-days: 14
 
   oci:
     runs-on: ubuntu-latest
