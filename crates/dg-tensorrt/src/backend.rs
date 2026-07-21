@@ -578,7 +578,15 @@ impl TensorRtBackend {
                 "TensorRT backend is not initialized".to_string(),
             ));
         };
-        let mut output_infos = Vec::with_capacity(self.outputs.len());
+        let mut output_infos = Vec::new();
+        output_infos
+            .try_reserve_exact(self.outputs.len())
+            .map_err(|_| {
+                Error::Backend(format!(
+                    "failed to allocate TensorRT output info vector for {} bindings",
+                    self.outputs.len()
+                ))
+            })?;
         for binding in &self.outputs {
             let dims = context.tensor_shape(&binding.name)?;
             let shape = dims_to_shape(&dims, &binding.name)?;
