@@ -26,16 +26,28 @@ enum BufferStorage {
     },
 }
 
+/// Fallibly clones a byte slice into a new `Vec`.
+///
+/// `Vec::clone`/`.to_vec()` abort on allocation failure; this helper returns
+/// an error instead so callers can report OOM as a typed buffer error.
+fn clone_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes.len())
+        .map_err(|_| Error::Buffer("failed to allocate buffer read copy".to_string()))?;
+    out.extend_from_slice(bytes);
+    Ok(out)
+}
+
 impl BufferStorage {
     fn try_read_bytes(&self) -> Result<Vec<u8>> {
         match self {
-            Self::Host(bytes) => Ok(read_guard(bytes).clone()),
+            Self::Host(bytes) => clone_bytes(&read_guard(bytes)),
             Self::External { bytes: None, .. } => Err(Error::Buffer(
                 "external buffer is not host-mapped; call map or stage explicitly".to_string(),
             )),
             Self::External {
                 bytes: Some(bytes), ..
-            } => Ok(read_guard(bytes).clone()),
+            } => clone_bytes(&read_guard(bytes)),
         }
     }
 
