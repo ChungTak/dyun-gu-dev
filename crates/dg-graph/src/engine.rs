@@ -433,7 +433,12 @@ impl RuntimeGraph {
                 }
             }
         }
-        let mut exec_nodes = Vec::with_capacity(total_elements);
+        let mut exec_nodes = Vec::new();
+        exec_nodes.try_reserve_exact(total_elements).map_err(|_| {
+            Error::Config(format!(
+                "failed to allocate exec node vector for {total_elements} elements"
+            ))
+        })?;
         let mut metrics = BTreeMap::new();
         for node in nodes.into_values() {
             let node_metrics = Arc::new(ElementMetrics::default());
@@ -521,7 +526,13 @@ impl RuntimeGraph {
                 Error::Runtime(format!("node {} has no executable workers", node_spec.name))
             })?;
             let control = first.io.control.clone();
-            let mut handles = Vec::with_capacity(exec_nodes.len());
+            let mut handles = Vec::new();
+            handles.try_reserve_exact(exec_nodes.len()).map_err(|_| {
+                Error::Config(format!(
+                    "failed to allocate worker handle vector for {} nodes",
+                    exec_nodes.len()
+                ))
+            })?;
             for node in exec_nodes {
                 let stop = self.stop.clone();
                 let name = node_spec.name.clone();
@@ -1047,7 +1058,15 @@ impl RunningGraph {
                     routes_out.insert(parsed.from_port, route);
                 }
             }
-            let mut handles = Vec::with_capacity(prepared_node.elements.len());
+            let mut handles = Vec::new();
+            handles
+                .try_reserve_exact(prepared_node.elements.len())
+                .map_err(|_| {
+                    Error::Config(format!(
+                        "failed to allocate worker handle vector for node {} elements",
+                        node.name
+                    ))
+                })?;
             for element in prepared_node.elements {
                 let io = ElementIo {
                     name: node.name.clone(),
@@ -1152,7 +1171,15 @@ impl RunningGraph {
                     routes_out.insert(parsed.from_port, route);
                 }
             }
-            let mut handles = Vec::with_capacity(prepared_node.elements.len());
+            let mut handles = Vec::new();
+            handles
+                .try_reserve_exact(prepared_node.elements.len())
+                .map_err(|_| {
+                    Error::Config(format!(
+                        "failed to allocate worker handle vector for node {} elements",
+                        node.name
+                    ))
+                })?;
             for element in prepared_node.elements {
                 let io = ElementIo {
                     name: node.name.clone(),
