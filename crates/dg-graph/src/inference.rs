@@ -375,7 +375,15 @@ fn create_inference_pool(plan: InferencePlan) -> Result<InferenceExecution> {
     let pool = InstancePool::new(scheduler.clone(), kind, instance_count, core_selection)
         .map_err(|error| Error::Config(format!("failed to create inference pool: {error}")))?;
     let metrics = Arc::new(dg_runtime::BackendMetrics::default());
-    let mut runtimes = Vec::with_capacity(pool.instance_count());
+    let mut runtimes = Vec::new();
+    runtimes
+        .try_reserve_exact(pool.instance_count())
+        .map_err(|_| {
+            Error::Config(format!(
+                "failed to allocate inference runtime vector for {} instances",
+                pool.instance_count()
+            ))
+        })?;
     for placement in pool.placements() {
         let option = option_for_placement(&plan.option, *placement, scheduler);
         let mut runtime = Runtime::new_with_metrics(option, Arc::clone(&metrics))?;
