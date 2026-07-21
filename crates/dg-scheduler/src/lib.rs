@@ -18,6 +18,11 @@ use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Hard ceiling on the number of instances a single `InstancePool` may hold.
+/// Values larger than this are treated as an explicit configuration error
+/// rather than risking an allocator abort when building the placements vector.
+pub const MAX_INSTANCE_COUNT: usize = 1024;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
     #[error("topology cannot be empty")]
@@ -50,6 +55,8 @@ pub enum Error {
     NoAvailableCore,
     #[error("instance pool must contain at least one instance")]
     InvalidInstanceCount,
+    #[error("instance count {requested} exceeds maximum {limit}")]
+    InstanceCountOutOfRange { requested: usize, limit: usize },
     #[error("scheduler core load overflow")]
     LoadOverflow,
 }
@@ -479,6 +486,12 @@ impl InstancePool {
     ) -> Result<Self> {
         if instance_count == 0 {
             return Err(Error::InvalidInstanceCount);
+        }
+        if instance_count > MAX_INSTANCE_COUNT {
+            return Err(Error::InstanceCountOutOfRange {
+                requested: instance_count,
+                limit: MAX_INSTANCE_COUNT,
+            });
         }
         let available = scheduler
             .topology()
@@ -1299,5 +1312,19 @@ mod tests {
             CoreSelection::Single(40),
         ));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn instance_pool_rejects_excessive_instance_count() {
+        let scheduler =
+            Scheduler::new(Topology::single_chip(DeviceKind::RknnNpu, 3).expect("topology"))
+                .expect("scheduler");
+        let result = InstancePool::new(
+            scheduler,
+            DeviceKind::RknnNpu,
+            MAX_INSTANCE_COUNT + 1,
+            CoreSelection::Auto,
+        );
+        assert!(matches!(result, Err(Error::InstanceCountOutOfRange { .. })));
     }
 }
