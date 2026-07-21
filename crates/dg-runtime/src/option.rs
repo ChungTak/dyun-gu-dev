@@ -45,6 +45,13 @@ impl ModelSource {
                     })?;
                 let mut reader = file.take(limit);
                 let mut buf = Vec::new();
+                buf.try_reserve_exact(max_bytes.saturating_add(1))
+                    .map_err(|_| {
+                        Error::Io(format!(
+                            "failed to allocate model read buffer for {}+1 bytes",
+                            max_bytes
+                        ))
+                    })?;
                 reader.read_to_end(&mut buf)?;
                 if buf.len() > max_bytes {
                     return Err(Error::Core(dg_core::Error::Config(format!(
