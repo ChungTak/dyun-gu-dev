@@ -45,7 +45,18 @@ pub(crate) fn trt_dtype_to_datatype(value: i32) -> Result<DataType> {
 
 /// Converts resolved (non-dynamic) TensorRT dims into a `Shape`.
 pub(crate) fn dims_to_shape(dims: &[i64], tensor: &str) -> Result<Shape> {
-    let mut resolved = Vec::with_capacity(dims.len());
+    if dims.len() > TRT_MAX_DIMS {
+        return Err(Error::Backend(format!(
+            "tensor {tensor} rank {} exceeds TensorRT maximum {TRT_MAX_DIMS}",
+            dims.len()
+        )));
+    }
+    let mut resolved = Vec::new();
+    resolved.try_reserve_exact(dims.len()).map_err(|_| {
+        Error::Backend(format!(
+            "failed to allocate TensorRT shape vector for {tensor}"
+        ))
+    })?;
     for dim in dims {
         let dim = usize::try_from(*dim).map_err(|_| {
             Error::Backend(format!(
@@ -60,7 +71,18 @@ pub(crate) fn dims_to_shape(dims: &[i64], tensor: &str) -> Result<Shape> {
 /// Converts engine-level dims into a `Shape`, substituting `1` for dynamic
 /// (`-1`) dimensions. Returns whether any dimension was dynamic.
 pub(crate) fn engine_dims_to_shape(dims: &[i64], tensor: &str) -> Result<(Shape, bool)> {
-    let mut resolved = Vec::with_capacity(dims.len());
+    if dims.len() > TRT_MAX_DIMS {
+        return Err(Error::Backend(format!(
+            "tensor {tensor} rank {} exceeds TensorRT maximum {TRT_MAX_DIMS}",
+            dims.len()
+        )));
+    }
+    let mut resolved = Vec::new();
+    resolved.try_reserve_exact(dims.len()).map_err(|_| {
+        Error::Backend(format!(
+            "failed to allocate TensorRT shape vector for {tensor}"
+        ))
+    })?;
     let mut dynamic = false;
     for dim in dims {
         if *dim == -1 {

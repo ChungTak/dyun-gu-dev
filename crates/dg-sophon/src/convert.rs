@@ -144,13 +144,23 @@ pub fn bm_shape_dims(shape: &Shape) -> Result<(i32, [i32; BM_MAX_DIMS])> {
 pub fn shape_from_bm(num_dims: i32, dims: &[i32]) -> Result<Shape> {
     let rank = usize::try_from(num_dims)
         .map_err(|_| Error::Backend("Sophon reported a negative dimension count".to_string()))?;
+    if rank > BM_MAX_DIMS {
+        return Err(Error::Backend(format!(
+            "Sophon reported {rank} dims but bm_shape_t limit is {BM_MAX_DIMS}"
+        )));
+    }
     if rank > dims.len() {
         return Err(Error::Backend(format!(
             "Sophon reported {rank} dims but only {} are available",
             dims.len()
         )));
     }
-    let mut extents = Vec::with_capacity(rank);
+    let mut extents = Vec::new();
+    extents.try_reserve_exact(rank).map_err(|_| {
+        Error::Backend(format!(
+            "failed to allocate Sophon shape vector for {rank} dimensions"
+        ))
+    })?;
     for &dim in dims.iter().take(rank) {
         let extent = usize::try_from(dim)
             .map_err(|_| Error::Backend("Sophon reported a negative dimension".to_string()))?;
