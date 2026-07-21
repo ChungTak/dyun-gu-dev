@@ -874,7 +874,15 @@ impl GraphSpec {
             node_kinds.insert(node.name.as_str(), node.kind.as_str());
         }
 
-        let mut edges = Vec::with_capacity(self.connections.len());
+        let mut edges = Vec::new();
+        edges
+            .try_reserve_exact(self.connections.len())
+            .map_err(|_| {
+                Error::Config(format!(
+                    "failed to allocate edge validation vector for {} connections",
+                    self.connections.len()
+                ))
+            })?;
         let mut seen_edges = BTreeSet::new();
         let mut connected_inputs = BTreeSet::new();
         for (connection_index, connection) in self.connections.iter().enumerate() {
