@@ -1337,6 +1337,14 @@ struct PreparedNode {
 impl PreparedNode {
     fn new(node: &NodeSpec) -> Result<Self> {
         let threads = node.threads.unwrap_or(1);
+        let mut elements = Vec::new();
+        elements.try_reserve_exact(threads).map_err(|_| {
+            Error::Config(format!(
+                "failed to allocate {threads} element instances for node {}",
+                node.name
+            ))
+        })?;
+
         let created = create_element(node)?;
         if threads > 1 && (node.kind == "source" || !matches!(&created.handle, ElementHandle::None))
         {
@@ -1346,7 +1354,7 @@ impl PreparedNode {
             )));
         }
         let handle = created.handle;
-        let mut elements = vec![created.element];
+        elements.push(created.element);
         for _ in 1..threads {
             let created = create_element(node)?;
             if node.kind == "source" || !matches!(&created.handle, ElementHandle::None) {
