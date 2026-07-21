@@ -246,7 +246,11 @@ fn for_each_run(
         .checked_mul(elem_bytes)
         .ok_or_else(|| Error::Backend("for_each_run: run length overflow".to_string()))?;
     let outer = &dims[..rank - 1];
-    let mut index = vec![0usize; outer.len()];
+    let mut index: Vec<usize> = Vec::new();
+    index
+        .try_reserve_exact(outer.len())
+        .map_err(|_| Error::Backend("rknn for_each_run index allocation failed".to_string()))?;
+    index.resize(outer.len(), 0);
     let mut contig = 0usize;
     loop {
         let pad = index.iter().zip(stride_values).try_fold(
