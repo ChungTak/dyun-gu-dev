@@ -2,11 +2,12 @@
 
 use dg_core::ResourcePolicy;
 use dg_runtime::{BackendKind, BackendOptions, MockOptions, ModelSource, Runtime, RuntimeOption};
+use std::sync::Arc;
 
 fn option_with_model(size: usize) -> RuntimeOption {
     RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(vec![0; size]),
+        ModelSource::Bytes(Arc::new(vec![0; size])),
         BackendOptions::Mock(MockOptions::default()),
     )
 }

@@ -1,5 +1,6 @@
 //! CORE7-04 runtime/backend cancel and capability contract tests.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor, TensorDesc};
@@ -25,7 +26,7 @@ fn mock_option(delay: Option<Duration>) -> RuntimeOption {
     let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
     RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],

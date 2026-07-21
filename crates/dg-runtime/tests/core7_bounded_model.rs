@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::sync::Arc;
 
 use dg_runtime::{BackendKind, BackendOptions, MockOptions, ModelSource, Runtime, RuntimeOption};
 
@@ -26,14 +27,14 @@ fn option_with_model_source(source: ModelSource, max_model_bytes: usize) -> Runt
 
 #[test]
 fn model_source_bytes_at_limit_is_accepted() {
-    let source = ModelSource::Bytes(vec![1, 2, 3, 4]);
+    let source = ModelSource::Bytes(Arc::new(vec![1, 2, 3, 4]));
     let loaded = source.load_bounded(4).expect("load at limit");
     assert_eq!(loaded.as_ref(), &[1, 2, 3, 4]);
 }
 
 #[test]
 fn model_source_bytes_over_limit_is_rejected() {
-    let source = ModelSource::Bytes(vec![1, 2, 3, 4]);
+    let source = ModelSource::Bytes(Arc::new(vec![1, 2, 3, 4]));
     assert!(source.load_bounded(3).is_err());
 }
 

@@ -57,6 +57,8 @@ pub fn validate_deploy_mode(requested: DeployMode, compiled: DeployMode) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use dg_core::{DataType, DeviceKind};
     use dg_runtime::{BackendOptions, ModelSource, RuntimeOption};
@@ -64,7 +66,7 @@ mod tests {
     fn base_option() -> RuntimeOption {
         RuntimeOption::new(
             BackendKind::Sophon,
-            ModelSource::Bytes(vec![0u8; 4]),
+            ModelSource::Bytes(Arc::new(vec![0u8; 4])),
             BackendOptions::Sophon(SophonOptions::default()),
         )
     }

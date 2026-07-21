@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dg_core::{
@@ -17,7 +18,7 @@ fn mock_backend_registry_and_run_identity() {
     let output_info = input_info.clone();
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![input_info.clone()],
             output_infos: vec![output_info.clone()],
@@ -54,7 +55,7 @@ fn mock_backend_registry_and_run_identity() {
 fn runtime_capabilities_reflect_mock_probe() {
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions::default()),
     );
     let runtime = Runtime::new(option).expect("construct runtime");
@@ -74,7 +75,7 @@ fn runtime_capabilities_reflect_mock_probe() {
 fn mock_backend_rejects_unsupported_precision() {
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions::default()),
     )
     .with_precision(DataType::new(TypeCode::OpaqueHandle, 8, 1));
@@ -89,7 +90,7 @@ fn mock_backend_rejects_unsupported_precision() {
 fn runtime_rejects_requests_missing_from_probed_capabilities() {
     let base = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions::default()),
     );
 
@@ -153,7 +154,7 @@ fn tensor_info_carries_quantization_and_stride_metadata() {
 fn unknown_backend_is_rejected() {
     let option = RuntimeOption::new(
         BackendKind::OpenVINO,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::OpenVINO(Default::default()),
     );
 
@@ -209,7 +210,7 @@ fn backend_registry_rejects_unknown_names_and_missing_models() {
 fn runtime_option_preflight_rejects_unsupported_common_capabilities() {
     let base = RuntimeOption::new(
         BackendKind::TensorRt,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::TensorRt(TensorRtOptions::default()),
     );
 
@@ -269,7 +270,7 @@ fn runtime_option_builders_and_model_format_inference() {
         ModelFormat::Auto
     );
     assert_eq!(
-        ModelFormat::from_source(&ModelSource::Bytes(Vec::new())),
+        ModelFormat::from_source(&ModelSource::Bytes(Arc::new(Vec::new()))),
         ModelFormat::Auto
     );
 }
@@ -279,7 +280,7 @@ fn runtime_submit_poll_round_trip_and_overlap_guard() {
     let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],
@@ -330,7 +331,7 @@ fn delayed_mock_submit_returns_immediately_and_poll_becomes_ready() {
     let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],
@@ -403,7 +404,7 @@ fn delayed_mock_out_of_order_completion_preserves_sequence() {
     // Per-request delays: the second submission finishes first, then third, then first.
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],
@@ -461,7 +462,7 @@ fn delayed_mock_in_flight_limit_and_cancel() {
     let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],
@@ -528,7 +529,7 @@ fn delayed_mock_backend_error_does_not_leak_in_flight() {
     let output_info = TensorInfo::new(Shape::new([1, 2]), DataType::U8).with_layout(DataFormat::NC);
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![input_info],
             output_infos: vec![output_info],

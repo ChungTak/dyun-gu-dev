@@ -11,6 +11,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::ptr;
+use std::sync::Arc;
 
 use dg_core::{CpuDevice, DeviceKind, Shape, Tensor};
 use dg_runtime::{
@@ -617,7 +618,7 @@ mod tests {
     fn option() -> RuntimeOption {
         RuntimeOption::new(
             BackendKind::Sophon,
-            ModelSource::Bytes(mock_sys::encode_mock_model()),
+            ModelSource::Bytes(Arc::new(mock_sys::encode_mock_model())),
             BackendOptions::Sophon(SophonOptions::default()),
         )
     }

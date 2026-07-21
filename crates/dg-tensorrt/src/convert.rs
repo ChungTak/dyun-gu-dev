@@ -7,6 +7,7 @@ use dg_runtime::{
     supports_deployment, supports_device, supports_precision, BackendKind, Error, Result,
     RuntimeOption,
 };
+use std::sync::Arc;
 
 /// Maximum tensor rank supported by TensorRT (`nvinfer1::Dims::MAX_DIMS`).
 pub(crate) const TRT_MAX_DIMS: usize = 8;
@@ -159,7 +160,7 @@ mod tests {
     fn tensorrt_option() -> RuntimeOption {
         RuntimeOption::new(
             BackendKind::TensorRt,
-            ModelSource::Bytes(vec![0u8; 4]),
+            ModelSource::Bytes(Arc::new(vec![0u8; 4])),
             BackendOptions::TensorRt(TensorRtOptions::default()),
         )
     }

@@ -24,7 +24,7 @@ fn mock_option_with_delay(delay: Duration, max_in_flight: usize) -> RuntimeOptio
     let info = TensorInfo::new(Shape::new([1, 4]), DataType::U8).with_layout(DataFormat::NC);
     RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![info.clone()],
             output_infos: vec![info],

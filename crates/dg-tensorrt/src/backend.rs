@@ -10,6 +10,7 @@ use dg_runtime::{
     TensorRtOptions,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 use tracing::trace;
 
 #[cfg(feature = "backend")]
@@ -871,7 +872,7 @@ mod tests {
     fn runtime_option(model: Vec<u8>) -> RuntimeOption {
         RuntimeOption::new(
             BackendKind::TensorRt,
-            ModelSource::Bytes(model),
+            ModelSource::Bytes(Arc::new(model)),
             BackendOptions::TensorRt(TensorRtOptions::default()),
         )
     }
@@ -916,7 +917,7 @@ mod tests {
         let mut backend = TensorRtBackend::new();
         let option = RuntimeOption::new(
             BackendKind::TensorRt,
-            ModelSource::Bytes(mock_engine_bytes()),
+            ModelSource::Bytes(Arc::new(mock_engine_bytes())),
             BackendOptions::TensorRt(TensorRtOptions {
                 device_id: Some(7),
                 ..TensorRtOptions::default()

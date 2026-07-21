@@ -385,7 +385,7 @@ fn parse_mock_inference(node: &NodeSpec) -> Result<MockInferenceConfig> {
         .with_device(DeviceKind::Cpu);
     let option = RuntimeOption::new(
         BackendKind::Mock,
-        ModelSource::Bytes(Vec::new()),
+        ModelSource::Bytes(Arc::new(Vec::new())),
         BackendOptions::Mock(MockOptions {
             input_infos: vec![input_info],
             output_infos: vec![output_info],
