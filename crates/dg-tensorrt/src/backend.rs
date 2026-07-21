@@ -151,6 +151,11 @@ mod ffi {
             let rank = usize::try_from(rank).map_err(|_| {
                 Error::Backend(format!("trt_engine_io_shape failed for binding {index}"))
             })?;
+            if rank > TRT_MAX_DIMS {
+                return Err(Error::Backend(format!(
+                    "trt_engine_io_shape reported rank {rank}, limit is {TRT_MAX_DIMS}"
+                )));
+            }
             Ok(dims[..rank].to_vec())
         }
 
@@ -218,6 +223,11 @@ mod ffi {
             let rank = usize::try_from(rank).map_err(|_| {
                 Error::Backend(format!("failed to resolve shape for tensor {name}"))
             })?;
+            if rank > TRT_MAX_DIMS {
+                return Err(Error::Backend(format!(
+                    "trt_context_get_tensor_shape reported rank {rank}, limit is {TRT_MAX_DIMS}"
+                )));
+            }
             Ok(dims[..rank].to_vec())
         }
 
