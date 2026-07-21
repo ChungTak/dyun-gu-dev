@@ -307,7 +307,14 @@ impl RuntimeGraph {
                 )));
             }
             let handle = created.handle;
-            let mut elements = vec![created.element];
+            let mut elements = Vec::new();
+            elements.try_reserve_exact(threads).map_err(|_| {
+                Error::Config(format!(
+                    "failed to allocate element vector for node {} with {threads} threads",
+                    node.name
+                ))
+            })?;
+            elements.push(created.element);
             for _ in 1..threads {
                 let created = create_element(node)?;
                 if node.kind == "source" || !matches!(&created.handle, ElementHandle::None) {
