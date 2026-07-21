@@ -7,8 +7,7 @@ use dg_core::{
 
 use crate::{
     backend::BackendKind, create_backend, supports_deployment, supports_device, supports_precision,
-    BackendMetrics, CancelReport, Error, ModelSource, Result, RuntimeCapabilities, RuntimeOption,
-    TensorInfo,
+    BackendMetrics, CancelReport, Error, Result, RuntimeCapabilities, RuntimeOption, TensorInfo,
 };
 
 pub fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
@@ -20,6 +19,37 @@ pub fn model_source_size(source: &crate::ModelSource) -> Result<usize> {
         }
         crate::ModelSource::Bytes(bytes) => Ok(bytes.len()),
     }
+}
+
+/// Rejects a model source whose size exceeds the configured limit before the
+/// backend attempts to load it. This avoids allocating an oversized copy in
+/// `Runtime::new` and gives a clear `Config` error for mock backends that do
+/// not inspect `model_source`.
+fn ensure_model_source_fits(source: &crate::ModelSource, max_bytes: usize) -> Result<()> {
+    match source {
+        crate::ModelSource::Bytes(bytes) => {
+            if bytes.len() > max_bytes {
+                return Err(Error::Core(dg_core::Error::Config(format!(
+                    "model bytes {} exceeds limit {}",
+                    bytes.len(),
+                    max_bytes
+                ))));
+            }
+        }
+        crate::ModelSource::File(path) => {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                let len = metadata.len();
+                if len > max_bytes as u64 {
+                    return Err(Error::Core(dg_core::Error::Config(format!(
+                        "model file {} exceeds limit {}",
+                        path.display(),
+                        max_bytes
+                    ))));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Result of polling a submitted inference.
@@ -152,10 +182,10 @@ impl Runtime {
 
     pub fn new_with_metrics(option: RuntimeOption, metrics: Arc<BackendMetrics>) -> Result<Self> {
         validate_runtime_option(&option)?;
-        let mut option = option;
-        let max_model_bytes = option.process_policy.resource_policy().max_model_bytes;
-        let model = option.model_source.load_bounded(max_model_bytes)?;
-        option.model_source = ModelSource::Bytes(model.into_owned());
+        ensure_model_source_fits(
+            &option.model_source,
+            option.process_policy.resource_policy().max_model_bytes,
+        )?;
         let mut backend = create_backend(option.backend)?;
         backend.attach_metrics(Arc::clone(&metrics));
         backend.init(&option)?;

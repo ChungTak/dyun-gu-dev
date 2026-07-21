@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_void;
 use std::ptr;
+use std::sync::Arc;
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor};
 use dg_runtime::{
@@ -852,7 +853,7 @@ mod tests {
     fn option() -> RuntimeOption {
         RuntimeOption::new(
             BackendKind::Rknn,
-            dg_runtime::ModelSource::Bytes(mock_sys::encode_mock_model()),
+            dg_runtime::ModelSource::Bytes(Arc::new(mock_sys::encode_mock_model())),
             BackendOptions::Rknn(RknnOptions::default()),
         )
     }

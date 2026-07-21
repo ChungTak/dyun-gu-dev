@@ -8,7 +8,8 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use dg_core::{
     Buffer, BufferDesc, CpuDevice, DataFormat, DataType, DeviceKind, ExternalDropGuard,
@@ -2326,7 +2327,7 @@ pub unsafe extern "C" fn dg_backend_create(
         let config = BackendConfig::new(None, options);
         let mut option = configure_backend(backend_name(kind), config)
             .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
-        option.model_source = ModelSource::Bytes(model);
+        option.model_source = ModelSource::Bytes(Arc::new(model));
         let mut backend =
             create_backend(kind).map_err(|error| (DgStatus::Unsupported, error.to_string()))?;
         backend

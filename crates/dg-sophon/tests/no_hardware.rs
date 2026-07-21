@@ -2,6 +2,8 @@
 //! logic without touching a real device. These run in the default (no-SDK) CI
 //! build.
 
+use std::sync::Arc;
+
 use dg_core::{DataType, DeployMode, DeviceKind, Shape, TypeCode};
 use dg_runtime::{BackendKind, BackendOptions, Error, ModelSource, RuntimeOption, SophonOptions};
 use dg_sophon::convert::{bm_shape_dims, byte_size, shape_from_bm, SophonDataType, BM_MAX_DIMS};
@@ -10,7 +12,7 @@ use dg_sophon::validate::{validate_deploy_mode, validate_options};
 fn runtime_option(options: SophonOptions) -> RuntimeOption {
     RuntimeOption::new(
         BackendKind::Sophon,
-        ModelSource::Bytes(vec![0u8; 8]),
+        ModelSource::Bytes(Arc::new(vec![0u8; 8])),
         BackendOptions::Sophon(options),
     )
 }

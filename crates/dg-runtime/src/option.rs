@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub use dg_core::CoreSelection;
 use dg_core::{DataType, DeployMode, DeviceKind, ProcessRuntimePolicy, StreamKind};
@@ -14,7 +15,10 @@ use crate::{mock::MockOptions, Error, Result};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelSource {
     File(PathBuf),
-    Bytes(Vec<u8>),
+    /// Owned model bytes are reference-counted so `RuntimeOption` clones
+    /// (e.g. one per inference-pool placement) share the payload instead of
+    /// duplicating it in memory.
+    Bytes(Arc<Vec<u8>>),
 }
 
 impl ModelSource {
@@ -34,7 +38,7 @@ impl ModelSource {
                         max_bytes
                     ))));
                 }
-                Ok(Cow::Borrowed(bytes))
+                Ok(Cow::Borrowed(bytes.as_slice()))
             }
             ModelSource::File(path) => {
                 let file = File::open(path)?;

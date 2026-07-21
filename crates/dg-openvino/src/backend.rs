@@ -186,7 +186,7 @@ impl OpenVINOBackend {
                         max_model_bytes
                     ))));
                 }
-                core.read_model_from_buffer(bytes, None)
+                core.read_model_from_buffer(bytes.as_slice(), None)
                     .map_err(|err| Error::BackendUnavailable(err.to_string()))
             }
             ModelSource::File(path) => {

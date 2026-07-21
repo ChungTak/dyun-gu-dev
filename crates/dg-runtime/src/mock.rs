@@ -392,7 +392,7 @@ fn configure_mock(config: BackendConfig) -> Result<RuntimeOption> {
         max_in_flight: params.max_in_flight.unwrap_or(1).clamp(1, 64),
     });
     let model_source = config.model().map_or_else(
-        || ModelSource::Bytes(Vec::new()),
+        || ModelSource::Bytes(Arc::new(Vec::new())),
         |path| ModelSource::File(path.to_path_buf()),
     );
     Ok(config.into_runtime_option(BackendKind::Mock, model_source, options))
