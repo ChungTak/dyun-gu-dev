@@ -363,7 +363,7 @@ fn lock_backend(backend: &DgBackend) -> std::sync::MutexGuard<'_, Box<dyn InferB
 }
 
 #[allow(dead_code)]
-const MAX_VIEW_LEN: u64 = 1u64 << 40;
+const MAX_VIEW_LEN: u64 = ResourcePolicy::DEFAULT_MAX_MODEL_BYTES as u64;
 #[allow(dead_code)]
 const MAX_SHAPE_RANK: usize = 8;
 /// Maximum number of bytes (including the terminating NUL) scanned from a
@@ -2581,8 +2581,43 @@ pub unsafe extern "C" fn dg_tensor_create(
     out_error: *mut *mut DgError,
 ) -> DgStatus {
     ffi_result_with_out(out, out_error, || {
-        let data = unsafe { bytes(data, length)? };
+        // Validate the declared shape/dtype before forming a slice from the
+        // caller-supplied data pointer. This prevents a malicious `length` from
+        // forcing `from_raw_parts` to span a huge, unmapped region before we can
+        // compare it against the actual tensor size.
         let shape = unsafe { dims(shape, rank)? };
+        let parsed_dtype = data_type_from_c(dtype)?;
+        let parsed_format = format_from_c_enum(format)?;
+        let parsed_device = device_from_c(device)?;
+        let desc = TensorDesc::new(
+            Shape::new(shape.to_vec()),
+            parsed_dtype,
+            parsed_format,
+            parsed_device,
+        );
+        let expected = desc
+            .storage_bytes()
+            .map_err(|error| (DgStatus::InvalidArgument, error.to_string()))?;
+        ResourcePolicy::default()
+            .check_tensor_bytes(expected)
+            .map_err(|error| (map_core_error(&error), error.to_string()))?;
+        if length != expected {
+            return Err((
+                DgStatus::InvalidArgument,
+                format!("tensor byte length {length} does not match shape and dtype ({expected})"),
+            ));
+        }
+
+        let data = if length == 0 {
+            &[]
+        } else if data.is_null() {
+            return Err((DgStatus::NullPointer, "data pointer is null".to_string()));
+        } else {
+            // SAFETY: `length` has been validated to equal the storage required by
+            // the declared shape/dtype and fits within the default tensor limit.
+            unsafe { std::slice::from_raw_parts(data, length) }
+        };
+
         let tensor = tensor_from_bytes(data, shape, dtype, format, device)?;
         Ok(Arc::into_raw(Arc::new(DgTensor { tensor })) as *mut DgTensor)
     })
