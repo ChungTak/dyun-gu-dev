@@ -45,20 +45,36 @@ pub fn select_io_path(zero_copy_requested: bool, mem_api_available: bool) -> IoP
 /// onto the shared [`Quantization`] model. RKNN quantization is per-tensor,
 /// so `axis` is always `None`.
 pub fn quantization_from_rknn(qnt_type: u32, fl: i8, zp: i32, scale: f32) -> Result<Quantization> {
+    let check_scale = |value: f32| {
+        if value.is_finite() && value > 0.0 {
+            Ok(value)
+        } else {
+            Err(Error::Backend(format!(
+                "RKNN quantization scale {value} is not a finite positive value"
+            )))
+        }
+    };
+
     match qnt_type {
         RKNN_QNT_NONE => Ok(Quantization::none()),
-        RKNN_QNT_DFP => Ok(Quantization {
-            scheme: QuantizationScheme::DynamicFixedPoint,
-            scale: vec![(-f32::from(fl)).exp2()],
-            zero_point: vec![i32::from(fl)],
-            axis: None,
-        }),
-        RKNN_QNT_AFFINE_ASYMMETRIC => Ok(Quantization {
-            scheme: QuantizationScheme::AffineAsymmetric,
-            scale: vec![scale],
-            zero_point: vec![zp],
-            axis: None,
-        }),
+        RKNN_QNT_DFP => {
+            let scale = check_scale((-f32::from(fl)).exp2())?;
+            Ok(Quantization {
+                scheme: QuantizationScheme::DynamicFixedPoint,
+                scale: vec![scale],
+                zero_point: vec![i32::from(fl)],
+                axis: None,
+            })
+        }
+        RKNN_QNT_AFFINE_ASYMMETRIC => {
+            let scale = check_scale(scale)?;
+            Ok(Quantization {
+                scheme: QuantizationScheme::AffineAsymmetric,
+                scale: vec![scale],
+                zero_point: vec![zp],
+                axis: None,
+            })
+        }
         other => Err(Error::Backend(format!(
             "unsupported RKNN quantization type: {other}"
         ))),
@@ -325,6 +341,15 @@ mod tests {
     #[test]
     fn quantization_unknown_type_is_rejected() {
         assert!(quantization_from_rknn(99, 0, 0, 0.0).is_err());
+    }
+
+    #[test]
+    fn quantization_rejects_non_finite_and_non_positive_scale() {
+        assert!(quantization_from_rknn(RKNN_QNT_AFFINE_ASYMMETRIC, 0, 0, 0.0).is_err());
+        assert!(quantization_from_rknn(RKNN_QNT_AFFINE_ASYMMETRIC, 0, 0, f32::NAN).is_err());
+        assert!(quantization_from_rknn(RKNN_QNT_AFFINE_ASYMMETRIC, 0, 0, f32::INFINITY).is_err());
+        assert!(quantization_from_rknn(RKNN_QNT_AFFINE_ASYMMETRIC, 0, 0, -1.0).is_err());
+        assert!(quantization_from_rknn(RKNN_QNT_DFP, i8::MIN, 0, 0.0).is_err());
     }
 
     #[test]
