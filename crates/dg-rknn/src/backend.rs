@@ -1,7 +1,6 @@
 use std::ffi::CStr;
 use std::os::raw::c_void;
 use std::ptr;
-use std::sync::Arc;
 
 use dg_core::{DataFormat, DataType, DeviceKind, Shape, Tensor};
 use dg_runtime::{
@@ -155,7 +154,9 @@ impl ModelBuffer {
 }
 
 impl RknnBackend {
-    fn new() -> Self {
+    /// Creates an uninitialized RKNN backend. Call [`InferBackend::init`] with
+    /// `BackendOptions::Rknn` before running.
+    pub fn new() -> Self {
         Self {
             context: None,
             options: RknnOptions::default(),
@@ -445,10 +446,14 @@ impl RknnBackend {
         inputs_set
             .try_reserve_exact(input_buffers.len())
             .map_err(|_| Error::Backend("rknn staging input set allocation failed".to_string()))?;
-        for (index, buffer) in input_buffers.iter().enumerate() {
+        for (index, (buffer, tensor)) in input_buffers.iter().zip(inputs.iter()).enumerate() {
             let index = u32::try_from(index).map_err(|_| {
                 Error::InvalidOption("rknn input index does not fit in u32".to_string())
             })?;
+            // Host staging mirrors the RKNN model-zoo demo: declare the host
+            // buffer's dtype/layout and let the runtime convert into the model's
+            // native layout (pass_through=0). This is required for UINT8 NHWC
+            // images when mean/std are fused into the rknn model.
             inputs_set.push(sys::rknn_input {
                 index,
                 buf: buffer.as_ptr() as *mut c_void,
@@ -456,9 +461,9 @@ impl RknnBackend {
                     .len()
                     .try_into()
                     .map_err(|_| Error::InvalidOption("input buffer too large".to_string()))?,
-                pass_through: 1,
-                type_: unsafe { std::mem::zeroed() },
-                fmt: unsafe { std::mem::zeroed() },
+                pass_through: 0,
+                type_: dtype_to_rknn(tensor.desc().dtype())?,
+                fmt: layout_to_rknn(tensor.desc().format())?,
             });
         }
 
@@ -478,8 +483,10 @@ impl RknnBackend {
             let index = u32::try_from(index).map_err(|_| {
                 Error::InvalidOption("rknn output index does not fit in u32".to_string())
             })?;
+            // Dequantize on the device side so host consumers always see float
+            // logits/scores (classification, detection postprocess, etc.).
             outputs.push(sys::rknn_output {
-                want_float: 0,
+                want_float: 1,
                 is_prealloc: 0,
                 index,
                 buf: ptr::null_mut(),
@@ -505,13 +512,23 @@ impl RknnBackend {
                 )));
             }
             let info = &self.output_infos[index];
-            let tensor = info.allocate(&device)?;
+            // want_float=1 returns contiguous f32 of n_elems regardless of the
+            // model's native quantized dtype.
+            let mut float_info =
+                TensorInfo::new(info.shape.clone(), DataType::F32).with_device(DeviceKind::Cpu);
+            if let Some(name) = &info.name {
+                float_info = float_info.with_name(name.clone());
+            }
+            if let Some(layout) = info.layout {
+                float_info = float_info.with_layout(layout);
+            }
+            let tensor = float_info.allocate(&device)?;
             let output_size = usize::try_from(output.size)
                 .map_err(|_| Error::Backend("rknn output size exceeds usize".to_string()))?;
             if tensor.buffer().len() != output_size {
                 release_outputs(context, &mut outputs)?;
                 return Err(Error::Backend(format!(
-                    "rknn output size mismatch: expected {}, got {}",
+                    "rknn float output size mismatch: expected {}, got {}",
                     tensor.buffer().len(),
                     output_size
                 )));
@@ -626,6 +643,12 @@ impl Drop for RknnBackend {
                 let _ = sys::rknn_destroy(context);
             }
         }
+    }
+}
+
+impl Default for RknnBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -829,11 +852,45 @@ fn dtype_from_rknn(dtype: sys::rknn_tensor_type) -> Result<DataType> {
     }
 }
 
+fn dtype_to_rknn(dtype: DataType) -> Result<sys::rknn_tensor_type> {
+    if dtype == DataType::F32 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_FLOAT32)
+    } else if dtype == DataType::F16 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_FLOAT16)
+    } else if dtype == DataType::I8 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_INT8)
+    } else if dtype == DataType::U8 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_UINT8)
+    } else if dtype == DataType::I16 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_INT16)
+    } else if dtype == DataType::U16 {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_UINT16)
+    } else if dtype == DataType::new(dg_core::TypeCode::Int, 32, 1) {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_INT32)
+    } else if dtype == DataType::new(dg_core::TypeCode::Uint, 32, 1) {
+        Ok(sys::rknn_tensor_type::RKNN_TENSOR_UINT32)
+    } else {
+        Err(Error::InvalidOption(format!(
+            "unsupported host dtype for RKNN staging input: {dtype:?}"
+        )))
+    }
+}
+
 fn layout_from_rknn(fmt: sys::rknn_tensor_format) -> Option<DataFormat> {
     match fmt {
         sys::rknn_tensor_format::RKNN_TENSOR_NCHW => Some(DataFormat::NCHW),
         sys::rknn_tensor_format::RKNN_TENSOR_NHWC => Some(DataFormat::NHWC),
         _ => None,
+    }
+}
+
+fn layout_to_rknn(layout: DataFormat) -> Result<sys::rknn_tensor_format> {
+    match layout {
+        DataFormat::NCHW => Ok(sys::rknn_tensor_format::RKNN_TENSOR_NCHW),
+        DataFormat::NHWC => Ok(sys::rknn_tensor_format::RKNN_TENSOR_NHWC),
+        other => Err(Error::InvalidOption(format!(
+            "unsupported host layout for RKNN staging input: {other:?}"
+        ))),
     }
 }
 
@@ -847,6 +904,8 @@ fn release_outputs(context: sys::rknn_context, outputs: &mut [sys::rknn_output])
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::mock_sys;
     use dg_core::CpuDevice;
 

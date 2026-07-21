@@ -18,3 +18,10 @@ inventory.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[[example]]
+name = "resnet50_board_test"
+required-features = ["backend"]
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
