@@ -984,8 +984,22 @@ impl GraphSpec {
 fn read_limited(path: &Path, limit: usize) -> Result<String> {
     use std::io::Read;
     let file = fs::File::open(path)?;
+
+    // Pre-allocate the exact amount we are going to read, capped by `limit`,
+    // so `read_to_string` does not call the fallible allocator's `reserve`
+    // path (which aborts on failure) while processing an untrusted file.
+    let reserve = file
+        .metadata()
+        .map(|m| usize::try_from(m.len()).unwrap_or(usize::MAX).min(limit))
+        .unwrap_or(limit);
+
     let mut reader = file.take(limit as u64);
     let mut content = String::new();
+    content.try_reserve_exact(reserve).map_err(|_| {
+        Error::Io(std::io::Error::other(format!(
+            "failed to allocate config read buffer for {path:?}"
+        )))
+    })?;
     reader.read_to_string(&mut content)?;
     Ok(content)
 }

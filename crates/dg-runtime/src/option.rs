@@ -43,15 +43,28 @@ impl ModelSource {
                     .map_err(|_| {
                         Error::Io("model byte limit exceeds u64 representable range".to_string())
                     })?;
+
+                // Reserve the actual file size when known, capped by the read
+                // limit, so small models don't require the full `max_bytes`
+                // budget up-front and `read_to_end` cannot reallocate past the
+                // budget we set.
+                let reserve = file
+                    .metadata()
+                    .map(|m| {
+                        usize::try_from(m.len())
+                            .unwrap_or(usize::MAX)
+                            .min(max_bytes.saturating_add(1))
+                    })
+                    .unwrap_or_else(|_| max_bytes.saturating_add(1));
+
                 let mut reader = file.take(limit);
                 let mut buf = Vec::new();
-                buf.try_reserve_exact(max_bytes.saturating_add(1))
-                    .map_err(|_| {
-                        Error::Io(format!(
-                            "failed to allocate model read buffer for {}+1 bytes",
-                            max_bytes
-                        ))
-                    })?;
+                buf.try_reserve_exact(reserve).map_err(|_| {
+                    Error::Io(format!(
+                        "failed to allocate model read buffer for {}+1 bytes",
+                        max_bytes
+                    ))
+                })?;
                 reader.read_to_end(&mut buf)?;
                 if buf.len() > max_bytes {
                     return Err(Error::Core(dg_core::Error::Config(format!(
