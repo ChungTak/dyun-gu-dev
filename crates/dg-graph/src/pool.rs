@@ -83,13 +83,30 @@ impl ThreadPool {
                 "thread pool requires at least one worker".to_string(),
             ));
         }
+
+        let mut queues = Vec::new();
+        queues.try_reserve_exact(threads).map_err(|_| {
+            Error::Config(format!(
+                "failed to allocate thread pool queues for {threads} workers"
+            ))
+        })?;
+        for _ in 0..threads {
+            queues.push(Mutex::new(VecDeque::new()));
+        }
+
         let shared = Arc::new(Shared {
-            queues: (0..threads).map(|_| Mutex::new(VecDeque::new())).collect(),
+            queues,
             pending: AtomicUsize::new(0),
             signal: Mutex::new(false),
             available: Condvar::new(),
         });
-        let mut workers = Vec::with_capacity(threads);
+
+        let mut workers = Vec::new();
+        workers.try_reserve_exact(threads).map_err(|_| {
+            Error::Config(format!(
+                "failed to allocate worker handle vector for {threads} threads"
+            ))
+        })?;
         for index in 0..threads {
             let worker_shared = Arc::clone(&shared);
             match thread::Builder::new().spawn(move || worker_loop(&worker_shared, index)) {
